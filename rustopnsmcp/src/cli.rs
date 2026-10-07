@@ -44,11 +44,34 @@ pub struct OpnsCli {
     /// actually expires an approval, rather than a window this server
     /// measured itself.
     ///
-    /// The window runs from the moment something is **staged**, not from
-    /// approval, and it bounds the age of the pre-image the plan was built
-    /// against.
-    #[arg(long = "approval-timeout-secs", default_value = "300")]
+    /// The window runs from the moment the change set is **created**, not
+    /// from approval, and it bounds the age of the pre-image the plan was
+    /// built against.
+    #[arg(long = "approval-timeout-secs", default_value = "3600")]
     pub approval_timeout_secs: u64,
+
+    /// Allow the direct-commit tools (firmware upgrade, config.xml backup
+    /// revert, IDS rule update), which change the device with no change set and
+    /// no second-principal approval. Off by default. Spelled identically to
+    /// rustjunosmcp; refused calls are audited with reason
+    /// `direct_commit_disabled`.
+    #[arg(long = "allow-direct-commit")]
+    pub allow_direct_commit: bool,
+
+    /// Default confirm window, in minutes, for a commit-confirmed filter-rule
+    /// apply that omits `confirm_timeout_mins`. Must be >= 1. Spelled
+    /// identically to rustjunosmcp.
+    #[arg(long = "commit-confirm-default-mins", default_value_t = 10)]
+    pub commit_confirm_default_mins: u32,
+
+    /// Refuse `add_device` and `reload_devices`: the inventory changes only by
+    /// editing devices.json and sending SIGHUP.
+    #[arg(long = "inventory-readonly")]
+    pub inventory_readonly: bool,
+
+    /// Approver tooling switches shared across mecmcp servers.
+    #[command(flatten)]
+    pub web_approver: mecmcp_runtime::cli::WebApproverArgs,
 
     /// Expose the `/metrics` (Prometheus) endpoint (streamable-http only).
     /// OFF by default: `/metrics` carries no MCP bearer auth of its own, so
@@ -241,13 +264,13 @@ mod tests {
         let cli = OpnsCli::try_parse_from(["rustopnsmcp"]).expect("parses");
         assert!(!cli.lab_mode());
         assert!(cli.state_file.is_none());
-        assert_eq!(cli.approval_timeout_secs, 300);
+        assert_eq!(cli.approval_timeout_secs, 3600);
 
         let cli = OpnsCli::try_parse_from([
             "rustopnsmcp",
             "--lab-mode",
             "--state-file",
-            "/var/lib/rustopnsmcp/changesets.json",
+            "/var/lib/rustopnsmcp/changeset-state.json",
             "--approval-timeout-secs",
             "600",
         ])
@@ -256,10 +279,33 @@ mod tests {
         assert_eq!(
             cli.state_file,
             Some(std::path::PathBuf::from(
-                "/var/lib/rustopnsmcp/changesets.json"
+                "/var/lib/rustopnsmcp/changeset-state.json"
             ))
         );
         assert_eq!(cli.approval_timeout_secs, 600);
+    }
+
+    #[test]
+    fn the_server_flags_match_rustjunosmcp_defaults() {
+        let cli = OpnsCli::try_parse_from(["rustopnsmcp"]).expect("parses");
+        assert!(!cli.allow_direct_commit);
+        assert_eq!(cli.commit_confirm_default_mins, 10);
+        assert!(!cli.inventory_readonly);
+        assert!(!cli.web_approver.web_enabled_approver);
+
+        let cli = OpnsCli::try_parse_from([
+            "rustopnsmcp",
+            "--allow-direct-commit",
+            "--commit-confirm-default-mins",
+            "5",
+            "--inventory-readonly",
+            "--web-enabled-approver",
+        ])
+        .expect("parses");
+        assert!(cli.allow_direct_commit);
+        assert_eq!(cli.commit_confirm_default_mins, 5);
+        assert!(cli.inventory_readonly);
+        assert!(cli.web_approver.web_enabled_approver);
     }
 
     /// The shared `token` subcommand must remain reachable through the
