@@ -13,6 +13,14 @@ use crate::changeset::ResourceKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Arguments for `get_opnsense_config_fingerprint`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FingerprintArgs {
+    /// Which device, by its name in `devices.json`.
+    pub device: String,
+}
+
 /// Tool descriptions for all seven change-set tools.
 pub const DESCRIPTIONS: &[(&str, &str)] = &[
     (

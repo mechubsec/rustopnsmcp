@@ -20,6 +20,7 @@
 
 pub mod apply;
 pub mod diff;
+pub mod fingerprint;
 pub mod preimage;
 pub mod record;
 pub mod rollback;
@@ -27,6 +28,7 @@ pub mod validate;
 
 pub use apply::{ControllerOps, Outcome, Reconciled, State, apply_sequentially};
 pub use diff::{Change, Diff, diff_against_preimage};
+pub use fingerprint::{VOLATILE_FIELDS, config_fingerprint, fingerprint_collections};
 pub use preimage::{Preimage, ResourceKind, StagedMutation};
 pub use record::{
     StagedAction, actions_for, actions_of, fingerprint_of, mutations_of, preimage_of,

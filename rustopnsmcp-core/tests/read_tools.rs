@@ -545,3 +545,34 @@ async fn a_redirect_response_is_an_upstream_error() {
         Err(_) => panic!("expected Upstream {{ status: 302, .. }}, got a different error variant"),
     }
 }
+
+#[tokio::test]
+async fn the_config_fingerprint_covers_aliases_and_rules() {
+    use rustopnsmcp_core::changeset::{config_fingerprint, fingerprint_collections};
+    let fixture = rustopnsmcp_core::testing::fixture;
+    let client = client_against(default_routes()).await;
+    let live = config_fingerprint(&client).await.expect("fingerprint");
+    let aliases = fixture("aliases")["rows"].as_array().expect("rows").clone();
+    let rules = fixture("firewall_rules")["rows"]
+        .as_array()
+        .expect("rows")
+        .clone();
+    assert_eq!(
+        live,
+        fingerprint_collections(&aliases, &rules).expect("fingerprint")
+    );
+}
+
+#[tokio::test]
+async fn a_partial_listing_is_refused_rather_than_fingerprinted() {
+    let mut routes = default_routes();
+    routes.insert(
+        rustopnsmcp_core::endpoints::ALIASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "total": 5, "current": 1 }),
+    );
+    let client = client_against(routes).await;
+    let error = rustopnsmcp_core::changeset::config_fingerprint(&client)
+        .await
+        .expect_err("0 of 5 rows must not be fingerprinted");
+    assert!(error.to_string().contains("0 of 5"), "{error}");
+}

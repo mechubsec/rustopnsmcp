@@ -26,8 +26,8 @@ use rustopnsmcp_core::{
     changeset::{
         OpnsenseTransaction, Outcome, Preimage, StagedMutation, State, actions_for,
         apply_sequentially, canonicalize_mutations, check_single_resource_kind,
-        check_writable_fields, diff_against_preimage, fingerprint_of, mutations_of, preimage_of,
-        validate_locally,
+        check_writable_fields, config_fingerprint, diff_against_preimage, fingerprint_of,
+        mutations_of, preimage_of, validate_locally,
     },
     client::OpnsenseClient,
     error::OpnsenseError,
@@ -796,6 +796,41 @@ impl OpnsenseServer {
             "list_opnsense_dhcp_leases",
             &device,
             move |client| async move { read::list_dhcp_leases(&client, &args).await },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "get_opnsense_config_fingerprint",
+        description = "Fingerprint of the governed OPNsense configuration (every firewall \
+                       alias and filter rule), as sha256:<hex>. Pass it as \
+                       expected_fingerprint to create_opnsense_change_set and \
+                       apply_opnsense_change_set; either refuses if the configuration has \
+                       changed since. OPNsense has no candidate configuration: this \
+                       fingerprints the running one. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn get_opnsense_config_fingerprint(
+        &self,
+        Parameters(args): Parameters<changeset::FingerprintArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "get_opnsense_config_fingerprint",
+            &device,
+            move |client| async move {
+                let fingerprint = config_fingerprint(&client).await?;
+                Ok::<_, OpnsenseError>(serde_json::json!({
+                    "device": args.device,
+                    "fingerprint": fingerprint,
+                    "covers": ["firewall_aliases", "firewall_filter_rules"],
+                }))
+            },
         )
         .await
     }
@@ -1759,7 +1794,7 @@ mod tests {
         }
     }
 
-    /// The nine read tools, all redacted through the shared
+    /// The ten read tools, all redacted through the shared
     /// [`respond::respond_device`] path with [`OPNSENSE_PROFILE`].
     const RESPOND_REDACTED_TOOLS: &[&str] = &[
         "get_opnsense_system_status",
@@ -1771,6 +1806,7 @@ mod tests {
         "list_opnsense_nat_rules",
         "list_opnsense_routes",
         "list_opnsense_dhcp_leases",
+        "get_opnsense_config_fingerprint",
     ];
 
     /// The three read-shaped change-set tools that redact their own result
@@ -1825,7 +1861,7 @@ mod tests {
     }
 
     /// A response containing a distinct, synthetic secret for each of the
-    /// nine read tools comes back redacted, and no tool's rendered output
+    /// ten read tools comes back redacted, and no tool's rendered output
     /// contains any planted secret — not just the one its own fixture
     /// plants, so a tool that leaked the *wrong* secret would still be
     /// caught (mirrors `mecmcp_redact::testing::tools_leaking_secrets`'s own

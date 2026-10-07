@@ -28,6 +28,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_opnsense_routes",
     "list_opnsense_gateways",
     "list_opnsense_dhcp_leases",
+    "get_opnsense_config_fingerprint",
     "opnsense_create_change_set",
     "opnsense_stage_change",
     "opnsense_diff_change_set",
