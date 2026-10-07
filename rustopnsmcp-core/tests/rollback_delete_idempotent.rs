@@ -321,3 +321,33 @@ async fn rollback_of_a_rule_delete_that_landed_recreates_the_rule() {
         .await
         .expect("rollback of a rule delete that actually landed must re-create the rule");
 }
+
+/// OPNsense reports a validation failure as HTTP 200 with
+/// `{"result":"failed","validations":{...}}`. Through the real client and TLS
+/// stack, that must be a refusal carrying the validation text, never a save.
+#[tokio::test]
+async fn a_200_with_result_failed_on_set_rule_is_a_refusal() {
+    let uuid = "44444444-4444-4444-4444-444444444444";
+    let routes = HashMap::from([(
+        rustopnsmcp_core::endpoints::filter_set_rule(uuid),
+        serde_json::json!({
+            "result": "failed",
+            "validations": { "rule.interface": "Please specify a valid interface." },
+        }),
+    )]);
+    let client = client_against(routes).await;
+
+    let error = client
+        .set_rule(uuid, &serde_json::json!({ "interface": "nonexistent" }))
+        .await
+        .expect_err("a 200 carrying result=failed must not be treated as saved");
+
+    assert!(
+        matches!(
+            error,
+            rustopnsmcp_core::error::OpnsenseError::WriteRefused(_)
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("rule.interface"), "{error}");
+}

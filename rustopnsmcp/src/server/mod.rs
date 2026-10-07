@@ -868,15 +868,23 @@ impl OpnsenseServer {
     }
 
     #[tool(
-        name = "opnsense_apply_change_set",
-        description = "Applies the staged alias or filter rule writes as a sequence of \
-                       independent REST calls, then loads them with reconfigure/apply. \
-                       Output is redacted: values matching known secret patterns (API keys \
-                       and secrets, pre-shared keys, private keys, certificates, password \
-                       hashes) are replaced before being returned, and device-sourced \
-                       content is marked as untrusted."
+        name = "apply_opnsense_change_set",
+        description = "Applies an approved change set. expected_digest and \
+                       expected_fingerprint are required; apply is refused, with nothing \
+                       written, if the plan digest differs or the live configuration \
+                       fingerprint has changed since the plan was built. confirm_timeout_mins \
+                       is refused: OPNsense offers commit-confirmed apply only for firewall \
+                       filter rules, and not yet in this build. The writes are a sequence of \
+                       independent REST calls followed by one reconfigure/apply: OPNsense has \
+                       no candidate configuration, so a partial failure is a reachable outcome \
+                       and is reported as partial, and rollback replays a stored pre-image \
+                       best-effort. reconfigure/apply also loads any unapproved edit already \
+                       in config.xml. Output is redacted: values matching known secret \
+                       patterns (API keys and secrets, pre-shared keys, private keys, \
+                       certificates, password hashes) are replaced before being returned, and \
+                       device-sourced content is marked as untrusted."
     )]
-    async fn opnsense_apply_change_set(
+    async fn apply_opnsense_change_set(
         &self,
         Parameters(args): Parameters<changeset::ApplyChangeSetArgs>,
         context: RequestContext<RoleServer>,
@@ -884,7 +892,7 @@ impl OpnsenseServer {
         let caller = Self::caller(&context);
         if let Err(error) = authorize_call(
             caller.as_ref(),
-            "opnsense_apply_change_set",
+            "apply_opnsense_change_set",
             Some(&args.device),
             WRITE_TOOLS,
         ) {
@@ -896,10 +904,35 @@ impl OpnsenseServer {
             Err(result) => return *result,
         };
 
-        // Claim first, and only then read the plan. The claim is the single
-        // legal route from `Approved` to `Applying`, and it does the check
-        // and the write under one lock, so two concurrent applies cannot
-        // both observe `Approved` and both proceed.
+        // Everything refusable without the device or a claim, up front.
+        let record = match self.record_for(&args.change_set_id, &args.device).await {
+            Ok(record) => record,
+            Err(result) => return *result,
+        };
+        if let Err(refusal) = lifecycle::pre_apply_gate(
+            &record,
+            &args.expected_digest,
+            &args.expected_fingerprint,
+            args.confirm_timeout_mins,
+        ) {
+            return tool_error(refusal);
+        }
+
+        // The drift check OPNsense does not provide: re-read the live
+        // configuration fingerprint and compare it to the one the plan was
+        // built against.
+        let live = match config_fingerprint(&client).await {
+            Ok(live) => live,
+            Err(error) => return respond::respond_device("apply_opnsense_change_set", Err(error)),
+        };
+        if let Err(refusal) = lifecycle::check_fingerprint(&args.expected_fingerprint, &live) {
+            return tool_error(format!("apply refused: {refusal}"));
+        }
+
+        // Claim last, and only now. The claim is the single legal route from
+        // `Approved` to `Applying`, and it does the check and the write
+        // under one lock, so two concurrent applies cannot both observe
+        // `Approved` and both proceed.
         if let Err(error) = self
             .coordinator
             .change_set_status(args.change_set_id.clone(), args.device.clone())
@@ -929,16 +962,11 @@ impl OpnsenseServer {
 
         if unix_seconds_now() >= claimed.expires_at_unix {
             let deadline = claimed.expires_at_unix;
-            let mut lapsed = claimed;
-            lapsed.state = ChangeSetState::Failed;
-            if let Err(error) = self.coordinator.update_change_set(lapsed).await {
-                tracing::error!(
-                    change_set_id = %args.change_set_id,
-                    field = error.field(),
-                    message = error.message(),
-                    "an expired change set could not be settled after its claim"
-                );
-            }
+            self.settle_failed(
+                claimed,
+                "an expired change set could not be settled after its claim",
+            )
+            .await;
             return tool_error(format!(
                 "apply refused: the approval window closed at {deadline}; nothing was \
                  written. Re-plan and re-approve before applying."
@@ -948,45 +976,31 @@ impl OpnsenseServer {
         let (mutations, preimage) = match Self::plan_of(&claimed) {
             Ok(plan) => plan,
             Err(result) => {
-                let mut abandoned = claimed;
-                abandoned.state = ChangeSetState::Failed;
-                if let Err(error) = self.coordinator.update_change_set(abandoned).await {
-                    tracing::error!(
-                        change_set_id = %args.change_set_id,
-                        field = error.field(),
-                        message = error.message(),
-                        "a claimed change set could not be settled after its plan failed \
-                         to read; it will stay Applying"
-                    );
-                }
+                self.settle_failed(
+                    claimed,
+                    "a claimed change set could not be settled after its \
+                     plan failed to read",
+                )
+                .await;
                 return *result;
             }
         };
 
         if let Err(e) = check_writable_fields(&mutations) {
-            let mut abandoned = claimed;
-            abandoned.state = ChangeSetState::Failed;
-            if let Err(error) = self.coordinator.update_change_set(abandoned).await {
-                tracing::error!(
-                    change_set_id = %args.change_set_id,
-                    field = error.field(),
-                    message = error.message(),
-                    "a claimed change set could not be settled after its writable-field \
-                     check failed; it will stay Applying"
-                );
-            }
+            self.settle_failed(
+                claimed,
+                "a claimed change set could not be settled after its \
+                     writable-field check failed",
+            )
+            .await;
             return tool_error(format!("apply refused: {e}"));
         }
 
         let outcome = apply_sequentially(&client, &preimage, &mutations).await;
-        let succeeded = matches!(outcome.state, State::Applied | State::AppliedUnverified);
+        let (settled_state, _) = lifecycle::settled_state(outcome.state);
 
         let mut settled = claimed;
-        settled.state = if succeeded {
-            ChangeSetState::Applied
-        } else {
-            ChangeSetState::Failed
-        };
+        settled.state = settled_state;
 
         // The device has acted, so this cannot fail closed — refusing now
         // would not un-act it. Reported instead.
@@ -1000,6 +1014,20 @@ impl OpnsenseServer {
         }
 
         Self::apply_outcome_response(&args.change_set_id, &outcome)
+    }
+
+    /// Settle a claimed change set as `Failed` before any device write.
+    async fn settle_failed(&self, mut claimed: ChangeSetRecord, why: &'static str) {
+        let id = claimed.id.clone();
+        claimed.state = ChangeSetState::Failed;
+        if let Err(error) = self.coordinator.update_change_set(claimed).await {
+            tracing::error!(
+                change_set_id = %id,
+                field = error.field(),
+                message = error.message(),
+                "{why}; it will stay Applying"
+            );
+        }
     }
 
     /// Build the tool result for a finished apply.
@@ -1351,7 +1379,7 @@ mod tests {
     /// free text of their own (ids, digests, counts) and rely on
     /// `tool_result`'s unconditional `OutputRedaction::Apply` pass.
     const APPLY_REDACTED_TOOLS: &[&str] =
-        &["create_opnsense_change_set", "opnsense_apply_change_set"];
+        &["create_opnsense_change_set", "apply_opnsense_change_set"];
 
     /// Every registered tool must be accounted for by exactly one of the
     /// three redaction strategies above. A tool added to the router without
