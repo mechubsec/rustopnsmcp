@@ -72,9 +72,6 @@ fn unix_seconds_now() -> u64 {
 /// Operator choices the server consults per call.
 #[derive(Debug, Clone, Copy)]
 pub struct ServerOptions {
-    /// `--lab-mode`. The coordinator enforces it. Kept here only until
-    /// approve stops reading it (Task 12 removes the field).
-    pub lab_mode: bool,
     /// `--web-enabled-approver`: include staged actions in status output.
     pub web_enabled_approver: bool,
     /// `--inventory-readonly`: refuse `add_device` and `reload_devices`.
@@ -86,7 +83,6 @@ pub struct ServerOptions {
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
-            lab_mode: false,
             web_enabled_approver: false,
             inventory_readonly: false,
             direct_commit: mecmcp_audit::DirectCommitPolicy::new(false),
@@ -102,6 +98,12 @@ pub struct OpnsenseServer {
     /// Clients per device. `RwLock` allows rebuild on SIGHUP.
     clients: Arc<std::sync::RwLock<BTreeMap<String, OpnsenseClient>>>,
     /// Operator choices from the command line.
+    ///
+    /// `web_enabled_approver`, `inventory_readonly`, and `direct_commit` are
+    /// not yet read by any handler (Tasks 14-17 wire them in); `lab_mode`
+    /// was the only field read here, and Task 12 removed it from this
+    /// struct now that the coordinator is its sole holder.
+    #[allow(dead_code)]
     options: ServerOptions,
     /// The change-set lifecycle.
     ///
@@ -780,17 +782,19 @@ impl OpnsenseServer {
     }
 
     #[tool(
-        name = "opnsense_approve_change_set",
-        description = "Approves a change set for apply. Two-person control: the creating \
-                       token cannot approve its own set unless lab mode waives it, and a \
-                       waiver is recorded as a waiver rather than as an approval. Pass \
-                       expected_digest to bind the approval to the plan you read. \
+        name = "approve_opnsense_change_set",
+        description = "Approves a change set for apply. expected_digest is required and must \
+                       be the plan_digest you reviewed; the approval is refused if the plan \
+                       differs. The approver must be a second, human principal: the creating \
+                       token can never approve its own change set. Under --lab-mode change \
+                       sets are approved by a waiver at creation and there is nothing to \
+                       approve. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
                        content is marked as untrusted."
     )]
-    async fn opnsense_approve_change_set(
+    async fn approve_opnsense_change_set(
         &self,
         Parameters(args): Parameters<changeset::ApproveChangeSetArgs>,
         context: RequestContext<RoleServer>,
@@ -798,7 +802,7 @@ impl OpnsenseServer {
         let caller = Self::caller(&context);
         if let Err(error) = authorize_call(
             caller.as_ref(),
-            "opnsense_approve_change_set",
+            "approve_opnsense_change_set",
             Some(&args.device),
             WRITE_TOOLS,
         ) {
@@ -831,54 +835,20 @@ impl OpnsenseServer {
             return tool_error(format!("approval refused: {e}"));
         }
 
-        if let Some(ref expected) = args.expected_digest
-            && expected != &record.digest
-        {
-            return tool_error(format!(
-                "approval refused: the plan has changed since you read it. You named \
-                 digest {expected}; the change set now holds {}. Read it again before \
-                 approving.",
-                record.digest
-            ));
-        }
-
         let approver_actor_type = Self::approver_actor_type(caller.as_ref());
 
-        let outcome = if approver == record.owner {
-            if !self.options.lab_mode {
-                return tool_error(
-                    "two-person control: the creating token cannot approve its own change set",
-                );
-            }
-            self.coordinator
-                .waive_approval(
-                    args.change_set_id.clone(),
-                    args.device.clone(),
-                    approver.clone(),
-                    record.digest.clone(),
-                )
-                .await
-        } else {
-            self.coordinator
-                .approve_change_set(
-                    args.change_set_id.clone(),
-                    args.device.clone(),
-                    approver.clone(),
-                    record.digest.clone(),
-                    approver_actor_type,
-                )
-                .await
-        };
-
-        let outcome = match outcome {
+        let outcome = match lifecycle::approve(
+            &self.coordinator,
+            &args.change_set_id,
+            &args.device,
+            &approver,
+            approver_actor_type,
+            &args.expected_digest,
+        )
+        .await
+        {
             Ok(outcome) => outcome,
-            Err(error) => {
-                return tool_error(format!(
-                    "approval refused ({}): {}",
-                    error.field(),
-                    error.message()
-                ));
-            }
+            Err(refusal) => return tool_error(refusal),
         };
 
         let result = serde_json::json!({
@@ -894,7 +864,7 @@ impl OpnsenseServer {
         // it, but redacting again here is what keeps this call site correct
         // on its own rather than relying on staging-time behavior a future
         // change could quietly break.
-        Self::already_redacted_result("opnsense_approve_change_set", result)
+        Self::already_redacted_result("approve_opnsense_change_set", result)
     }
 
     #[tool(
@@ -1174,10 +1144,12 @@ impl ServerHandler for OpnsenseServer {
             ))
             .with_instructions(
                 "OPNsense MCP server. Device-addressed tools take (device, ...); the server \
-                 routes to the device by name from devices.json. Governed writes for firewall \
-                 aliases (phase 2a) and firewall filter rules (phase 2b) go through the same \
-                 plan -> digest -> human approve -> apply-with-drift-check lifecycle; a change \
-                 set stages exactly one resource kind at a time.",
+                 routes to the device by name from devices.json. Governed writes to firewall \
+                 aliases and filter rules follow get_opnsense_config_fingerprint -> \
+                 create_opnsense_change_set -> approve_opnsense_change_set (second, human \
+                 principal) -> apply_opnsense_change_set with the plan digest and fingerprint. \
+                 OPNsense has no candidate configuration: a partial apply is reachable and is \
+                 reported.",
             )
     }
 
@@ -1373,7 +1345,7 @@ mod tests {
     /// pass `OutputRedaction::Apply` runs would otherwise be a silent
     /// re-redaction of already-clean data.
     const ALREADY_REDACTED_TOOLS: &[&str] =
-        &["opnsense_approve_change_set", "opnsense_get_change_set"];
+        &["approve_opnsense_change_set", "opnsense_get_change_set"];
 
     /// The two change-set lifecycle tools that carry no caller-controlled
     /// free text of their own (ids, digests, counts) and rely on

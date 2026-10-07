@@ -80,7 +80,7 @@ impl MutationSpec {
     }
 }
 
-/// Arguments for `opnsense_approve_change_set`.
+/// Arguments for `approve_opnsense_change_set`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApproveChangeSetArgs {
@@ -88,15 +88,9 @@ pub struct ApproveChangeSetArgs {
     pub device: String,
     /// The change set ID to approve.
     pub change_set_id: String,
-    /// The plan digest the approver read, as `opnsense_get_change_set`
-    /// reports it.
-    ///
-    /// Optional, and supplying it is what makes the approval attest to a
-    /// specific plan: the approval is refused if the change set has moved on
-    /// since it was read. Omitting it approves whatever the record holds
-    /// when the call lands.
-    #[serde(default)]
-    pub expected_digest: Option<String>,
+    /// The plan digest the approver read, as create or status reports it.
+    /// Required: the approval is refused if the plan's digest is different.
+    pub expected_digest: String,
 }
 
 /// Arguments for `opnsense_apply_change_set`.
@@ -149,5 +143,14 @@ mod tests {
                           "force": true }],
         });
         assert!(serde_json::from_value::<CreateChangeSetArgs>(smuggled).is_err());
+    }
+
+    #[test]
+    fn approve_requires_expected_digest() {
+        let without = serde_json::json!({
+            "device": "fw-1",
+            "change_set_id": "0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        assert!(serde_json::from_value::<ApproveChangeSetArgs>(without).is_err());
     }
 }
