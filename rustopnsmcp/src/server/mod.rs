@@ -616,6 +616,9 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_interfaces",
         description = "OPNsense interfaces overview. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -623,14 +626,15 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_interfaces(
         &self,
-        Parameters(args): Parameters<read::DeviceArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
+        let device = args.device.clone();
         self.read_device(
             &context,
             "list_opnsense_interfaces",
-            &args.device,
-            |client| async move { read::list_interfaces(&client).await },
+            &device,
+            move |client| async move { read::list_interfaces(&client, &args).await },
         )
         .await
     }
@@ -638,6 +642,9 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_gateways",
         description = "OPNsense gateway status. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -645,14 +652,15 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_gateways(
         &self,
-        Parameters(args): Parameters<read::DeviceArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
+        let device = args.device.clone();
         self.read_device(
             &context,
             "list_opnsense_gateways",
-            &args.device,
-            |client| async move { read::list_gateways(&client).await },
+            &device,
+            move |client| async move { read::list_gateways(&client, &args).await },
         )
         .await
     }
@@ -663,6 +671,9 @@ impl OpnsenseServer {
                        Legacy GUI rules are included only on OPNsense 25.1 and later; on 24.7 \
                        and earlier this returns only MVC/automation rules and may be \
                        incomplete. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -670,7 +681,7 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_firewall_rules(
         &self,
-        Parameters(args): Parameters<read::SearchArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let device = args.device.clone();
@@ -686,6 +697,9 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_aliases",
         description = "OPNsense firewall aliases, optionally filtered by search_phrase. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -693,7 +707,7 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_aliases(
         &self,
-        Parameters(args): Parameters<read::SearchArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let device = args.device.clone();
@@ -710,6 +724,9 @@ impl OpnsenseServer {
         name = "list_opnsense_nat_rules",
         description = "OPNsense outbound and 1:1 NAT rules, side by side. Port forwards \
                        (destination NAT) are NOT included. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -717,7 +734,7 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_nat_rules(
         &self,
-        Parameters(args): Parameters<read::SearchArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let device = args.device.clone();
@@ -733,6 +750,9 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_routes",
         description = "OPNsense static routes, optionally filtered by search_phrase. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -740,7 +760,7 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_routes(
         &self,
-        Parameters(args): Parameters<read::SearchArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let device = args.device.clone();
@@ -757,6 +777,9 @@ impl OpnsenseServer {
         name = "list_opnsense_dhcp_leases",
         description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. ISC \
                        DHCPv4 only; Kea and Dnsmasq leases are NOT covered. \
+                       One page per call: limit (1-1000, default 200), offset (a multiple of \
+                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -764,7 +787,7 @@ impl OpnsenseServer {
     )]
     async fn list_opnsense_dhcp_leases(
         &self,
-        Parameters(args): Parameters<read::SearchArgs>,
+        Parameters(args): Parameters<read::ListArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let device = args.device.clone();
