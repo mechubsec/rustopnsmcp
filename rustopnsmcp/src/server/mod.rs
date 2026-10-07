@@ -23,9 +23,10 @@ use rmcp::{
 };
 use rustopnsmcp_core::{
     changeset::{
-        OpnsenseTransaction, Preimage, StagedMutation, State, actions_for, apply_sequentially,
-        canonicalize_mutations, check_single_resource_kind, check_writable_fields,
-        diff_against_preimage, fingerprint_of, mutations_of, preimage_of, validate_locally,
+        OpnsenseTransaction, Outcome, Preimage, StagedMutation, State, actions_for,
+        apply_sequentially, canonicalize_mutations, check_single_resource_kind,
+        check_writable_fields, diff_against_preimage, fingerprint_of, mutations_of, preimage_of,
+        validate_locally,
     },
     client::OpnsenseClient,
     error::OpnsenseError,
@@ -1342,16 +1343,6 @@ impl OpnsenseServer {
         }
 
         let outcome = apply_sequentially(&client, &preimage, &mutations).await;
-
-        let state_str = match outcome.state {
-            State::Applied => "applied",
-            State::AppliedUnverified => "applied_unverified",
-            State::Partial => "partial",
-            State::PartialRollbackFailed => "partial_rollback_failed",
-            State::RefusedStale => "refused_stale",
-            State::NotLoaded => "not_loaded",
-        };
-
         let succeeded = matches!(outcome.state, State::Applied | State::AppliedUnverified);
 
         let mut settled = claimed;
@@ -1372,8 +1363,30 @@ impl OpnsenseServer {
             );
         }
 
+        Self::apply_outcome_response(&args.change_set_id, &outcome)
+    }
+
+    /// Build the tool result for a finished apply.
+    ///
+    /// The body always carries the outcome counts, applied or not: the
+    /// caller needs to know what landed either way. But the audit choke
+    /// point in `call_tool` settles purely from `is_error` on the returned
+    /// `CallToolResult`, so a partial or rollback-failed apply must set it
+    /// -- that record is the one a SOC reviews after an incident that
+    /// half-applied a change, and it must not read as a plain success.
+    fn apply_outcome_response(change_set_id: &str, outcome: &Outcome) -> CallToolResult {
+        let state_str = match outcome.state {
+            State::Applied => "applied",
+            State::AppliedUnverified => "applied_unverified",
+            State::Partial => "partial",
+            State::PartialRollbackFailed => "partial_rollback_failed",
+            State::RefusedStale => "refused_stale",
+            State::NotLoaded => "not_loaded",
+        };
+        let succeeded = matches!(outcome.state, State::Applied | State::AppliedUnverified);
+
         let result = serde_json::json!({
-            "change_set_id": args.change_set_id,
+            "change_set_id": change_set_id,
             "state": state_str,
             "succeeded": outcome.succeeded.len(),
             "failed": outcome.failed.len(),
@@ -1383,12 +1396,16 @@ impl OpnsenseServer {
             "verification_failure": outcome.verification_failure,
         });
 
-        tool_result(
+        let mut response = tool_result(
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
             OutputRedaction::Apply,
-        )
+        );
+        if !succeeded {
+            response.is_error = Some(true);
+        }
+        response
     }
 
     #[tool(
@@ -1542,6 +1559,9 @@ impl ServerHandler for OpnsenseServer {
         let tool = request.name.to_string();
         let mut audit = audit::open(caller, &tool, request.arguments.as_ref());
         let device = audit::device_hint(request.arguments.as_ref());
+        if let Some(change_set_id) = audit::change_set_id_hint(request.arguments.as_ref()) {
+            audit.meta("change_set_id", change_set_id);
+        }
 
         if let Err(error) = authorize_call(caller, &tool, device.as_deref(), WRITE_TOOLS) {
             audit.deny("scope");
@@ -1598,6 +1618,55 @@ mod tests {
             .iter()
             .filter_map(|block| block.as_text().map(|text| text.text.clone()))
             .collect()
+    }
+
+    fn outcome_with_state(state: State) -> Outcome {
+        Outcome {
+            state,
+            succeeded: Vec::new(),
+            failed: Vec::new(),
+            attempted_and_failed: Vec::new(),
+            never_attempted: Vec::new(),
+            rollback_failures: Vec::new(),
+            verification_failure: None,
+        }
+    }
+
+    /// A fully applied outcome reaches the audit choke point as a success:
+    /// `call_tool`'s `audit::settle` reads `is_error` off the result rmcp
+    /// delivers, so this is the one place that mapping can be checked
+    /// without standing up the whole stdio server.
+    #[test]
+    fn a_fully_applied_outcome_is_not_an_audit_error() {
+        for state in [State::Applied, State::AppliedUnverified] {
+            let response =
+                OpnsenseServer::apply_outcome_response("cs-1", &outcome_with_state(state));
+            assert_ne!(response.is_error, Some(true), "{state:?}");
+        }
+    }
+
+    /// A partial apply, a rollback that itself failed, a stale refusal, and
+    /// a config-xml write that never reached `pf` are all end states where
+    /// the device was not left as approved. None of them may settle as a
+    /// success at the audit choke point -- before this test, `is_error` was
+    /// never set and every one of these reached the SIEM as `succeeded`.
+    #[test]
+    fn a_non_applied_outcome_is_an_audit_error_and_keeps_its_change_set_id() {
+        for state in [
+            State::Partial,
+            State::PartialRollbackFailed,
+            State::RefusedStale,
+            State::NotLoaded,
+        ] {
+            let response =
+                OpnsenseServer::apply_outcome_response("cs-partial-1", &outcome_with_state(state));
+            assert_eq!(response.is_error, Some(true), "{state:?}");
+            assert!(
+                text_of(&response).contains("cs-partial-1"),
+                "{state:?}: {}",
+                text_of(&response)
+            );
+        }
     }
 
     /// The nine read tools, all redacted through the shared [`OpnsenseServer::respond`]

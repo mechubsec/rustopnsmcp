@@ -32,12 +32,39 @@ pub(crate) fn action_for(tool: &str) -> &'static str {
     }
 }
 
+/// The longest a caller-supplied hint may be before the audit record
+/// truncates it. The value is attacker-controlled free text (there is no
+/// registry lookup at this choke point to resolve it to a known name
+/// first), so it needs a bound independent of whatever the caller sends.
+const HINT_MAX_BYTES: usize = 128;
+
+/// Truncate `value` to at most [`HINT_MAX_BYTES`] bytes, on a char boundary.
+fn bounded(mut value: String) -> String {
+    if value.len() <= HINT_MAX_BYTES {
+        return value;
+    }
+    let mut cut = HINT_MAX_BYTES;
+    while !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    value.truncate(cut);
+    value
+}
+
 /// The call's `device` argument, when it carries a string one.
 pub(crate) fn device_hint(arguments: Option<&JsonObject>) -> Option<String> {
     arguments
         .and_then(|arguments| arguments.get("device"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+        .map(|value| bounded(value.to_owned()))
+}
+
+/// The call's `change_set_id` argument, when it carries a string one.
+pub(crate) fn change_set_id_hint(arguments: Option<&JsonObject>) -> Option<String> {
+    arguments
+        .and_then(|arguments| arguments.get("change_set_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| bounded(value.to_owned()))
 }
 
 /// Open the scope for one call.
@@ -99,5 +126,30 @@ mod tests {
         assert_eq!(device_hint(with.as_object()), Some("fw-1".to_owned()));
         assert_eq!(device_hint(without.as_object()), None);
         assert_eq!(device_hint(None), None);
+    }
+
+    #[test]
+    fn change_set_id_hint_reads_only_a_string_change_set_id() {
+        let with = serde_json::json!({ "change_set_id": "cs-1" });
+        let without = serde_json::json!({ "change_set_id": 7 });
+        assert_eq!(
+            change_set_id_hint(with.as_object()),
+            Some("cs-1".to_owned())
+        );
+        assert_eq!(change_set_id_hint(without.as_object()), None);
+        assert_eq!(change_set_id_hint(None), None);
+    }
+
+    #[test]
+    fn hints_are_bounded_regardless_of_caller_input_length() {
+        let long = "x".repeat(HINT_MAX_BYTES * 4);
+        let device = serde_json::json!({ "device": long });
+        let hint = device_hint(device.as_object()).expect("device hint present");
+        assert_eq!(hint.len(), HINT_MAX_BYTES);
+
+        let change_set = serde_json::json!({ "change_set_id": long });
+        let hint =
+            change_set_id_hint(change_set.as_object()).expect("change_set_id hint present");
+        assert_eq!(hint.len(), HINT_MAX_BYTES);
     }
 }
