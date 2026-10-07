@@ -50,45 +50,14 @@ fn init_token_audit() {
 /// construct the journald layer. A server that starts anyway is a server
 /// that runs with no audit trail while believing it has one.
 fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<AuditFileSink>>> {
-    let redaction = if args.audit_redact.trim().is_empty() {
-        None
-    } else {
-        Some(
-            mecmcp_audit::AuditRedaction::parse(
-                &args.audit_redact,
-                args.audit_hmac_key_file.as_deref(),
-            )
-            .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
-        )
-    };
-    let audit_config = mecmcp_audit::AuditConfig {
-        format: mecmcp_audit::AuditFormat::parse(&args.audit_format),
-        audit_log_file: args.audit_log_file.clone(),
-        redaction,
-        journald: args.audit_journald,
-        otel: otel_config(args.otel_endpoint.clone(), args.otel_service_name.clone()),
-    };
+    let audit_config =
+        rustopnsmcp::startup::audit_config(args).map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
 
     match mecmcp_audit::init_tracing(&audit_config) {
         Ok(Some(sink)) => Ok(Some(Arc::new(sink))),
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("initializing audit tracing: {e}")),
     }
-}
-
-/// Build the optional `AuditConfig::otel` from `--otel-endpoint` and
-/// `--otel-service-name`.
-///
-/// Kept separate from `init_audit` so this mapping -- `--otel-endpoint` is
-/// honoured, not parsed and dropped -- is unit-testable without constructing
-/// a full `mecmcp_runtime::cli::Cli` or installing a tracing subscriber. A
-/// build without the `otel` feature makes `init_tracing` refuse a non-`None`
-/// value at startup instead of running without the export.
-fn otel_config(endpoint: Option<String>, service_name: String) -> Option<mecmcp_audit::OtelConfig> {
-    endpoint.map(|endpoint| mecmcp_audit::OtelConfig {
-        endpoint,
-        service_name,
-    })
 }
 
 #[tokio::main]
@@ -138,10 +107,44 @@ async fn main() -> Result<()> {
         );
     }
 
-    let coordinator = rustopnsmcp::changeset_state::build_coordinator(
+    // Built before the coordinator, which takes its recorder, and started
+    // here so a misconfiguration fails startup instead of the first change.
+    let evidence = match rustopnsmcp::startup::evidence_config(&cli.common)
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?
+    {
+        Some(config) => {
+            tracing::info!(
+                server_id = %config.server_id,
+                run_id = %config.run_id,
+                "SSDF evidence pipeline enabled"
+            );
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let transport = Arc::new(
+                mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
+                    cli.common.evidence.ca_file(),
+                    provider,
+                )
+                .context("building the SSDF evidence transport")?,
+            );
+            Some(
+                mecmcp_audit::EvidenceService::start_with_transport(config, transport)
+                    .context("starting the SSDF evidence pipeline")?,
+            )
+        }
+        None => None,
+    };
+
+    let approval_digest_key = rustopnsmcp::startup::approval_digest_key(&cli.common)
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
+    let coordinator = rustopnsmcp::changeset_state::build_coordinator_with(
         cli.state_file.as_deref(),
         std::time::Duration::from_secs(cli.approval_timeout_secs),
         cli.lab_mode(),
+        approval_digest_key,
+        evidence
+            .as_ref()
+            .map(mecmcp_audit::EvidenceService::recorder),
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
 
@@ -153,7 +156,7 @@ async fn main() -> Result<()> {
     };
     let server = OpnsenseServer::new(Arc::clone(&registry), options, coordinator)?;
 
-    match cli.common.transport {
+    let served = match cli.common.transport {
         mecmcp_runtime::cli::Transport::Stdio => {
             install_sighup_reload(registry, Some(server.clone()), None, audit_sink)?;
             serve_stdio(server).await
@@ -161,7 +164,18 @@ async fn main() -> Result<()> {
         mecmcp_runtime::cli::Transport::StreamableHttp => {
             serve_http(server, &cli, registry, audit_sink).await
         }
+    };
+
+    // Deliver what is still spooled. A failure is reported: the records stay
+    // in the outbox for the next start, but an operator stopping the server
+    // has no other signal that the trail is behind.
+    if let Some(service) = evidence
+        && let Err(error) = service.shutdown()
+    {
+        tracing::error!(%error, "the SSDF evidence pipeline did not flush cleanly");
     }
+
+    served
 }
 
 /// Load TLS configuration for the listener.
@@ -329,25 +343,4 @@ async fn serve_http(
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod otel_config_tests {
-    use super::otel_config;
-
-    #[test]
-    fn no_endpoint_means_otel_export_stays_off() {
-        assert!(otel_config(None, "mecmcp".to_owned()).is_none());
-    }
-
-    #[test]
-    fn an_endpoint_is_carried_through_with_its_service_name() {
-        let config = otel_config(
-            Some("http://127.0.0.1:4318".to_owned()),
-            "rustopnsmcp".to_owned(),
-        )
-        .expect("otel endpoint was set");
-        assert_eq!(config.endpoint, "http://127.0.0.1:4318");
-        assert_eq!(config.service_name, "rustopnsmcp");
-    }
 }

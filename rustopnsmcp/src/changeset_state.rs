@@ -52,26 +52,53 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     })
 }
 
+/// Build the change-set coordinator with no digest key and no evidence
+/// recorder. Tests and the stdio fallback use this form.
+///
+/// # Errors
+///
+/// As [`build_coordinator_with`].
+pub fn build_coordinator(
+    state_file: Option<&Path>,
+    approval_ttl: Duration,
+    lab_mode: bool,
+) -> Result<std::sync::Arc<ChangesetCoordinator>, String> {
+    build_coordinator_with(state_file, approval_ttl, lab_mode, None, None)
+}
+
 /// Build the change-set coordinator.
+///
+/// `approval_digest_key` switches approvals to the keyed digest
+/// (`--approval-digest-key-file`); `evidence` attaches the SSDF recorder so
+/// proposals, waivers and approvals are recorded.
 ///
 /// # Errors
 ///
 /// Returns a message naming what to do if the path cannot be made absolute
 /// or if the coordinator refuses the state.
-pub fn build_coordinator(
+pub fn build_coordinator_with(
     state_file: Option<&Path>,
     approval_ttl: Duration,
     lab_mode: bool,
+    approval_digest_key: Option<mecmcp_changeset::ApprovalDigestKey>,
+    evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
 ) -> Result<std::sync::Arc<ChangesetCoordinator>, String> {
     let absolute = match state_file {
         Some(path) => Some(absolute_path(path)?),
         None => None,
     };
 
-    let coordinator =
-        ChangesetCoordinator::load(absolute.as_deref(), limits(), approval_ttl, lab_mode).map_err(
-            |error| format!("change-set state ({}): {}", error.field(), error.message()),
-        )?;
+    let mut coordinator = ChangesetCoordinator::load_with_key(
+        absolute.as_deref(),
+        limits(),
+        approval_ttl,
+        lab_mode,
+        approval_digest_key,
+    )
+    .map_err(|error| format!("change-set state ({}): {}", error.field(), error.message()))?;
+    if let Some(recorder) = evidence {
+        coordinator = coordinator.with_evidence(recorder);
+    }
 
     Ok(std::sync::Arc::new(coordinator))
 }
