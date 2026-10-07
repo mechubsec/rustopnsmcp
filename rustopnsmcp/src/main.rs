@@ -147,7 +147,6 @@ async fn main() -> Result<()> {
 
     let registry = Arc::new(DeviceRegistry::load(&cli.common.device_mapping)?);
     let options = rustopnsmcp::server::ServerOptions {
-        lab_mode: cli.lab_mode(),
         web_enabled_approver: cli.web_approver.web_enabled_approver,
         inventory_readonly: cli.inventory_readonly,
         direct_commit,

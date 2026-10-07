@@ -102,6 +102,64 @@ pub(crate) async fn finish_creation(
         })
 }
 
+/// Approve a change set as a second, human principal.
+///
+/// The coordinator checks the digest, the actor type, the state and the
+/// expiry under its own lock. This adds the two refusals it cannot phrase:
+/// a lab-mode change set was already approved by its waiver, and the owner
+/// is never their own second principal, lab mode or not.
+///
+/// # Errors
+///
+/// Returns the refusal, naming the field the coordinator objected to.
+pub(crate) async fn approve(
+    coordinator: &ChangesetCoordinator,
+    change_set_id: &str,
+    device: &str,
+    approver: &str,
+    approver_actor_type: mecmcp_audit::ActorType,
+    expected_digest: &str,
+) -> Result<ChangeSetOutput, String> {
+    let record = coordinator
+        .change_set(change_set_id, device)
+        .await
+        .map_err(|error| {
+            format!(
+                "change set {change_set_id} on {device} ({}): {}",
+                error.field(),
+                error.message()
+            )
+        })?;
+    if record
+        .approval
+        .as_ref()
+        .and_then(|approval| approval.waived.as_ref())
+        .is_some()
+    {
+        return Err(
+            "this change set was approved by a lab-mode waiver at creation; there is nothing to \
+             approve"
+                .to_owned(),
+        );
+    }
+    if record.owner == approver {
+        return Err(
+            "two-person control: the creating principal cannot approve its own change set"
+                .to_owned(),
+        );
+    }
+    coordinator
+        .approve_change_set(
+            change_set_id.to_owned(),
+            device.to_owned(),
+            approver.to_owned(),
+            expected_digest.to_owned(),
+            approver_actor_type,
+        )
+        .await
+        .map_err(|error| format!("approval refused ({}): {}", error.field(), error.message()))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -218,5 +276,90 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn approving_with_a_stale_digest_is_refused_and_leaves_the_plan_planned() {
+        let coordinator = coordinator(false);
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let id = planned.id.clone();
+        coordinator.insert_change_set(planned).await.unwrap();
+
+        let stale = format!("sha256:{}", "0".repeat(64));
+        let error = approve(
+            &coordinator,
+            &id,
+            "fw-1",
+            "bob",
+            mecmcp_audit::ActorType::Human,
+            &stale,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("expected_digest"), "{error}");
+        let stored = coordinator.change_set(&id, "fw-1").await.unwrap();
+        assert_eq!(stored.state, ChangeSetState::Planned);
+        assert_eq!(stored.approver, None);
+    }
+
+    #[tokio::test]
+    async fn the_owner_cannot_approve_even_in_lab_mode() {
+        let coordinator = coordinator(true);
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let (id, digest) = (planned.id.clone(), planned.digest.clone());
+        coordinator.insert_change_set(planned).await.unwrap();
+
+        let error = approve(
+            &coordinator,
+            &id,
+            "fw-1",
+            "alice",
+            mecmcp_audit::ActorType::Human,
+            &digest,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("two-person control"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_waived_change_set_has_nothing_left_to_approve() {
+        let coordinator = coordinator(true);
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let (id, digest) = (planned.id.clone(), planned.digest.clone());
+        finish_creation(&coordinator, planned).await.unwrap();
+
+        let error = approve(
+            &coordinator,
+            &id,
+            "fw-1",
+            "bob",
+            mecmcp_audit::ActorType::Human,
+            &digest,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("lab-mode waiver"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_human_second_principal_with_the_current_digest_approves() {
+        let coordinator = coordinator(false);
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let (id, digest) = (planned.id.clone(), planned.digest.clone());
+        coordinator.insert_change_set(planned).await.unwrap();
+
+        let approved = approve(
+            &coordinator,
+            &id,
+            "fw-1",
+            "bob",
+            mecmcp_audit::ActorType::Human,
+            &digest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved.state, ChangeSetState::Approved);
+        assert_eq!(approved.approver.as_deref(), Some("bob"));
     }
 }

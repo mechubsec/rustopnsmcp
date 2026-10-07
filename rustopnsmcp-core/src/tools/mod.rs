@@ -30,7 +30,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_opnsense_dhcp_leases",
     "get_opnsense_config_fingerprint",
     "create_opnsense_change_set",
-    "opnsense_approve_change_set",
+    "approve_opnsense_change_set",
     "opnsense_apply_change_set",
     "opnsense_get_change_set",
 ];
@@ -41,7 +41,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// read-scope `get_opnsense_change_set_status`.
 pub const WRITE_TOOLS: &[&str] = &[
     "create_opnsense_change_set",
-    "opnsense_approve_change_set",
+    "approve_opnsense_change_set",
     "opnsense_apply_change_set",
     "opnsense_get_change_set",
 ];
