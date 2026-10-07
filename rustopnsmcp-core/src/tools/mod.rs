@@ -23,6 +23,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "get_device_list",
     "gather_device_facts",
     "opnsmcp_status",
+    "add_device",
+    "reload_devices",
     "get_opnsense_system_status",
     "get_opnsense_firmware_status",
     "list_opnsense_interfaces",
@@ -44,8 +46,10 @@ pub const TOOL_NAMES: &[&str] = &[
 /// `opnsense_get_change_set` stays here until Task 14 replaces it with the
 /// read-scope `get_opnsense_change_set_status`.
 pub const WRITE_TOOLS: &[&str] = &[
+    "add_device",
     "create_opnsense_change_set",
     "approve_opnsense_change_set",
     "apply_opnsense_change_set",
     "opnsense_get_change_set",
+    "reload_devices",
 ];

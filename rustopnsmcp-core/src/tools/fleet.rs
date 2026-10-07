@@ -1,8 +1,10 @@
 //! Fleet-meta tools: the names and shapes every mechub MCP server shares.
 
+use crate::inventory::Device;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::PathBuf;
 
 /// Arguments for a tool that takes none. Any field is refused.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -15,6 +17,50 @@ pub struct EmptyArgs {}
 pub struct GatherFactsArgs {
     /// Which device, by its name in `devices.json`.
     pub device: String,
+}
+
+/// Arguments for `add_device`. The same fields as a `devices.json` entry; the
+/// API key and secret are referenced, never passed inline.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddDeviceArgs {
+    /// The new device's name.
+    pub device: String,
+    /// `https://` base URL.
+    pub endpoint: String,
+    /// Environment variable holding the API key.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Owner-only file holding the API key.
+    #[serde(default)]
+    pub api_key_file: Option<PathBuf>,
+    /// Environment variable holding the API secret.
+    #[serde(default)]
+    pub api_secret_env: Option<String>,
+    /// Owner-only file holding the API secret.
+    #[serde(default)]
+    pub api_secret_file: Option<PathBuf>,
+    /// PEM trust anchor for a device behind a private CA.
+    #[serde(default)]
+    pub ca_pem_path: Option<PathBuf>,
+}
+
+impl AddDeviceArgs {
+    /// The name and the inventory entry.
+    #[must_use]
+    pub fn into_device(self) -> (String, Device) {
+        (
+            self.device,
+            Device {
+                endpoint: self.endpoint,
+                api_key_env: self.api_key_env,
+                api_key_file: self.api_key_file,
+                api_secret_env: self.api_secret_env,
+                api_secret_file: self.api_secret_file,
+                ca_pem_path: self.ca_pem_path,
+            },
+        )
+    }
 }
 
 /// The fact sheet for one device, from its system and firmware status.
@@ -68,5 +114,14 @@ mod tests {
     fn empty_args_refuse_any_field() {
         assert!(serde_json::from_value::<EmptyArgs>(serde_json::json!({})).is_ok());
         assert!(serde_json::from_value::<EmptyArgs>(serde_json::json!({ "device": "x" })).is_err());
+    }
+
+    #[test]
+    fn add_device_refuses_an_inline_secret() {
+        let inline = serde_json::json!({
+            "device": "fw-2", "endpoint": "https://fw-2.example.org",
+            "api_key": "inline-key-must-not-parse", "api_secret_env": "S2",
+        });
+        assert!(serde_json::from_value::<AddDeviceArgs>(inline).is_err());
     }
 }
