@@ -107,8 +107,12 @@ async fn main() -> Result<()> {
         );
     }
 
+    let approval_digest_key = rustopnsmcp::startup::approval_digest_key(&cli.common)
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
     // Built before the coordinator, which takes its recorder, and started
-    // here so a misconfiguration fails startup instead of the first change.
+    // here, after the digest key, so a misconfiguration fails startup before
+    // any egress to SSDF rather than after.
     let evidence = match rustopnsmcp::startup::evidence_config(&cli.common)
         .map_err(|refusal| anyhow::anyhow!("{refusal}"))?
     {
@@ -119,23 +123,31 @@ async fn main() -> Result<()> {
                 "SSDF evidence pipeline enabled"
             );
             let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-            let transport = Arc::new(
+            let ssdf_transport = Arc::new(
                 mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
                     cli.common.evidence.ca_file(),
-                    provider,
+                    Arc::clone(&provider),
                 )
                 .context("building the SSDF evidence transport")?,
             );
+            let forward_transport = Arc::new(
+                mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
+                    cli.common.evidence.forward_ca_file(),
+                    provider,
+                )
+                .context("building the audit-forward transport")?,
+            );
             Some(
-                mecmcp_audit::EvidenceService::start_with_transport(config, transport)
-                    .context("starting the SSDF evidence pipeline")?,
+                mecmcp_audit::EvidenceService::start_with_transports(
+                    config,
+                    ssdf_transport,
+                    forward_transport,
+                )
+                .context("starting the SSDF evidence pipeline")?,
             )
         }
         None => None,
     };
-
-    let approval_digest_key = rustopnsmcp::startup::approval_digest_key(&cli.common)
-        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
 
     let coordinator = rustopnsmcp::changeset_state::build_coordinator_with(
         cli.state_file.as_deref(),
