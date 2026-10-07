@@ -1,7 +1,6 @@
 //! `rustopnsmcp` — enterprise MCP server for OPNsense.
 
 use anyhow::{Context as _, Result, bail};
-use clap::Parser;
 use mecmcp_audit::AuditFileSink;
 use mecmcp_runtime::cli::Command;
 use mecmcp_transport::serve_router;
@@ -83,7 +82,13 @@ async fn main() -> Result<()> {
     // this provider.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let cli = OpnsCli::parse();
+    let parsed = mecmcp_runtime::cli::parse_with_provenance::<OpnsCli>(
+        "rustopnsmcp",
+        env!("CARGO_PKG_VERSION"),
+    );
+    rustopnsmcp::startup::refuse_unwired_flags(&|id| parsed.was_supplied(id))
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    let cli = parsed.cli;
 
     if let Some(Command::Token { action }) = cli.common.command {
         init_token_audit();
@@ -96,6 +101,12 @@ async fn main() -> Result<()> {
         .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
 
     let audit_sink = init_audit(&cli.common)?;
+
+    rustopnsmcp::startup::validate_commit_confirm_default_mins(cli.commit_confirm_default_mins)
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
+    let direct_commit = mecmcp_audit::DirectCommitPolicy::new(cli.allow_direct_commit);
+    direct_commit.log_startup("rustopnsmcp");
 
     if cli.lab_mode() {
         tracing::warn!(
@@ -120,7 +131,13 @@ async fn main() -> Result<()> {
     .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     let registry = Arc::new(DeviceRegistry::load(&cli.common.device_mapping)?);
-    let server = OpnsenseServer::new(Arc::clone(&registry), cli.lab_mode(), coordinator)?;
+    let options = rustopnsmcp::server::ServerOptions {
+        lab_mode: cli.lab_mode(),
+        web_enabled_approver: cli.web_approver.web_enabled_approver,
+        inventory_readonly: cli.inventory_readonly,
+        direct_commit,
+    };
+    let server = OpnsenseServer::new(Arc::clone(&registry), options, coordinator)?;
 
     match cli.common.transport {
         mecmcp_runtime::cli::Transport::Stdio => {

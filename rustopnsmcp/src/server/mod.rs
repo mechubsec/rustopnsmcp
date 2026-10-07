@@ -84,6 +84,31 @@ pub struct Draft {
     created_at_unix: u64,
 }
 
+/// Operator choices the server consults per call.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerOptions {
+    /// `--lab-mode`. The coordinator enforces it. Kept here only until
+    /// approve stops reading it (Task 12 removes the field).
+    pub lab_mode: bool,
+    /// `--web-enabled-approver`: include staged actions in status output.
+    pub web_enabled_approver: bool,
+    /// `--inventory-readonly`: refuse `add_device` and `reload_devices`.
+    pub inventory_readonly: bool,
+    /// `--allow-direct-commit`, as the shared policy type.
+    pub direct_commit: mecmcp_audit::DirectCommitPolicy,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            lab_mode: false,
+            web_enabled_approver: false,
+            inventory_readonly: false,
+            direct_commit: mecmcp_audit::DirectCommitPolicy::new(false),
+        }
+    }
+}
+
 /// The OPNsense MCP server.
 #[derive(Clone)]
 pub struct OpnsenseServer {
@@ -91,8 +116,8 @@ pub struct OpnsenseServer {
     registry: Arc<DeviceRegistry>,
     /// Clients per device. `RwLock` allows rebuild on SIGHUP.
     clients: Arc<std::sync::RwLock<BTreeMap<String, OpnsenseClient>>>,
-    /// Whether lab mode is enabled.
-    lab_mode: bool,
+    /// Operator choices from the command line.
+    options: ServerOptions,
     /// The change-set lifecycle.
     ///
     /// `mecmcp-changeset`'s coordinator, not a map: it owns the transition
@@ -129,14 +154,14 @@ impl OpnsenseServer {
     /// Returns an error if any device's client cannot be built.
     pub fn new(
         registry: Arc<DeviceRegistry>,
-        lab_mode: bool,
+        options: ServerOptions,
         coordinator: Arc<ChangesetCoordinator>,
     ) -> Result<Self, OpnsenseError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
             registry,
             clients: Arc::new(std::sync::RwLock::new(clients)),
-            lab_mode,
+            options,
             coordinator,
             drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             plan_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1182,7 +1207,7 @@ impl OpnsenseServer {
         let approver_actor_type = Self::approver_actor_type(caller.as_ref());
 
         let outcome = if approver == record.owner {
-            if !self.lab_mode {
+            if !self.options.lab_mode {
                 return tool_error(
                     "two-person control: the creating token cannot approve its own change set",
                 );
