@@ -400,6 +400,9 @@ async fn list_firewall_rules_parses_the_search_envelope() {
         .expect("list firewall rules");
     assert_eq!(rules["total"], 2);
     assert_eq!(rules["rows"].as_array().expect("rows array").len(), 2);
+    // The firmware fixture reports 24.7, which predates legacy-rule merging.
+    assert_eq!(rules["coverage"], "mvc_only");
+    assert_eq!(rules["product_version"], "24.7");
 }
 
 #[tokio::test]
@@ -541,4 +544,52 @@ async fn a_redirect_response_is_an_upstream_error() {
         Ok(_) => panic!("expected Upstream {{ status: 302, .. }}, got Ok"),
         Err(_) => panic!("expected Upstream {{ status: 302, .. }}, got a different error variant"),
     }
+}
+
+#[tokio::test]
+async fn the_config_fingerprint_covers_aliases_and_rules() {
+    use rustopnsmcp_core::changeset::{config_fingerprint, fingerprint_collections};
+    let fixture = rustopnsmcp_core::testing::fixture;
+    let client = client_against(default_routes()).await;
+    let live = config_fingerprint(&client).await.expect("fingerprint");
+    let aliases = fixture("aliases")["rows"].as_array().expect("rows").clone();
+    let rules = fixture("firewall_rules")["rows"]
+        .as_array()
+        .expect("rows")
+        .clone();
+    assert_eq!(
+        live,
+        fingerprint_collections(&aliases, &rules).expect("fingerprint")
+    );
+}
+
+#[tokio::test]
+async fn a_partial_listing_is_refused_rather_than_fingerprinted() {
+    let mut routes = default_routes();
+    routes.insert(
+        rustopnsmcp_core::endpoints::ALIASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "total": 5, "current": 1 }),
+    );
+    let client = client_against(routes).await;
+    let error = rustopnsmcp_core::changeset::config_fingerprint(&client)
+        .await
+        .expect_err("0 of 5 rows must not be fingerprinted");
+    assert!(error.to_string().contains("0 of 5"), "{error}");
+}
+
+#[tokio::test]
+async fn a_listing_with_no_total_is_refused_rather_than_fingerprinted() {
+    let mut routes = default_routes();
+    routes.insert(
+        rustopnsmcp_core::endpoints::ALIASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "current": 1 }),
+    );
+    let client = client_against(routes).await;
+    let error = rustopnsmcp_core::changeset::config_fingerprint(&client)
+        .await
+        .expect_err("a listing with no total must not be fingerprinted");
+    assert!(
+        error.to_string().contains("did not report a total"),
+        "{error}"
+    );
 }

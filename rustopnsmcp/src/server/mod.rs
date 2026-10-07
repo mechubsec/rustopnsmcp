@@ -1,6 +1,7 @@
 //! The MCP server handler.
 
 mod audit;
+mod lifecycle;
 mod respond;
 
 use mecmcp_auth::NoGrant;
@@ -8,6 +9,7 @@ use mecmcp_changeset::{
     ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
     change_set_digest, preview_digest,
 };
+use mecmcp_redact::Untrusted;
 use mecmcp_server::{
     OutputRedaction, ResultFormat, ResultLimits, authorize_call, caller_from_extensions,
     filter_tools_for_scope, tool_error, tool_result,
@@ -26,8 +28,8 @@ use rustopnsmcp_core::{
     changeset::{
         OpnsenseTransaction, Outcome, Preimage, StagedMutation, State, actions_for,
         apply_sequentially, canonicalize_mutations, check_single_resource_kind,
-        check_writable_fields, diff_against_preimage, fingerprint_of, mutations_of, preimage_of,
-        validate_locally,
+        check_writable_fields, config_fingerprint, diff_against_preimage, mutations_of,
+        preimage_of, validate_locally,
     },
     client::OpnsenseClient,
     error::OpnsenseError,
@@ -56,12 +58,6 @@ const RESULT_LIMITS: ResultLimits = ResultLimits {
 /// one-line change here rather than a re-plumb of every call site below.
 const OPNSENSE_PROFILE: mecmcp_redact::Profile = mecmcp_redact::Profile::new(&[], &[]);
 
-/// How many unstaged change sets may be held at once.
-///
-/// Bounded because a draft is reachable without touching a device, so an
-/// unbounded map is a way to grow the process with no write ever happening.
-const MAX_DRAFTS: usize = 32;
-
 /// Seconds since the Unix epoch.
 ///
 /// A clock before the epoch is not a case worth branching on; it reports 0,
@@ -71,19 +67,6 @@ fn unix_seconds_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-}
-
-/// A change set that exists but has nothing staged into it.
-#[derive(Debug, Clone)]
-pub struct Draft {
-    /// The device it was created against.
-    device: String,
-    /// The principal who created it.
-    owner: String,
-    /// What it is for, which becomes the preview's description.
-    description: String,
-    /// When it was created, so a forgotten draft does not live forever.
-    created_at_unix: u64,
 }
 
 /// Operator choices the server consults per call.
@@ -126,23 +109,6 @@ pub struct OpnsenseServer {
     /// policy, the claim-before-apply, and the preview-bound approval, and
     /// the approval TTL that `--approval-timeout-secs` configures.
     coordinator: Arc<ChangesetCoordinator>,
-    /// Change sets created but not yet staged into.
-    ///
-    /// The coordinator cannot hold one: its persistence layer refuses to
-    /// load a state file containing a change set with no actions, so
-    /// persisting an empty plan would make the *whole* store unloadable at
-    /// the next start. An empty change set has nothing to protect either —
-    /// no plan, no pre-image, no approval — so it is held here until the
-    /// first mutation is staged, and a restart loses exactly nothing.
-    drafts: Arc<std::sync::RwLock<BTreeMap<String, Draft>>>,
-    /// Serialises changing a plan against approving one.
-    ///
-    /// A plan write and an approval read/write must not interleave: an
-    /// approval landing between a plan becoming visible and its digest being
-    /// computed would attest to the wrong plan. Contention is negligible —
-    /// the coordinator already allows one pending change set per principal
-    /// per device.
-    plan_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -165,8 +131,6 @@ impl OpnsenseServer {
             clients: Arc::new(std::sync::RwLock::new(clients)),
             options,
             coordinator,
-            drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
-            plan_lock: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::opns_tool_router(),
         })
     }
@@ -304,17 +268,11 @@ impl OpnsenseServer {
 
     /// Render the preview an approver signs off on.
     ///
-    /// Stored as JSON rather than prose because it is read by a model relaying
-    /// to an operator, and because it is also where the description lives:
-    /// `ChangeSetRecord` has no field for one.
-    ///
-    /// The atomicity declaration is part of the preview deliberately.
-    /// OPNsense offers no atomic apply, no dry run, and no guaranteed
-    /// rollback, and an approver who is not told that is approving something
-    /// else.
+    /// The atomicity declaration is part of the preview on purpose. OPNsense
+    /// offers no atomic apply, no dry run and no guaranteed rollback, and an
+    /// approver who is not told that is approving something else.
     fn render_preview(
         device: &str,
-        description: &str,
         mutations: &[StagedMutation],
         preimage: &Preimage,
     ) -> Result<String, Box<CallToolResult>> {
@@ -335,7 +293,6 @@ impl OpnsenseServer {
 
         let mut rendered = serde_json::json!({
             "device": device,
-            "description": description,
             "staged_count": mutations.len(),
             "atomicity": {
                 "atomic_apply": atomicity.atomic_apply,
@@ -347,7 +304,7 @@ impl OpnsenseServer {
                      reachable and rollback is best-effort. {commit_verb} loads every pending \
                      {noun} edit currently in config.xml into the live pf tables/ruleset, not \
                      only this change set's mutations — including any unapproved edit made \
-                     through the OPNsense GUI since this change set was staged. Reconciling a \
+                     through the OPNsense GUI since this change set was created. Reconciling a \
                      create whose response was lost to a transport failure searches for a \
                      {noun} by {identity_field}; a concurrent GUI create with the same \
                      {identity_field} can be mistaken for this change set's own write and \
@@ -357,146 +314,58 @@ impl OpnsenseServer {
             "changes": diff.changes,
         });
 
-        // The description is free text a caller supplied, and the preview is
-        // both returned to callers and persisted in the change-set store:
-        // this is the one place a secret-shaped value in it is scrubbed
-        // before either happens, mirroring what `Self::respond` already does
-        // for every read tool.
+        // The preview is returned to callers and persisted in the change-set
+        // store; scrub secret-shaped values before either happens.
         mecmcp_redact::redact_json_value_with_profile(&mut rendered, &OPNSENSE_PROFILE);
 
         serde_json::to_string_pretty(&rendered)
             .map_err(|error| Box::new(tool_error(format!("failed to render the preview: {error}"))))
     }
 
-    /// The description carried in a record's preview.
-    fn description_of(record: &ChangeSetRecord) -> Result<String, Box<CallToolResult>> {
-        let Some(preview) = record.preview.as_ref() else {
-            return Err(Box::new(tool_error(
-                "change set has no stored preview; create it again",
-            )));
-        };
-        let parsed: serde_json::Value = serde_json::from_str(&preview.artifact).map_err(|_| {
-            Box::new(tool_error(
-                "stored change set: the preview is not the shape this server writes",
-            ))
-        })?;
-        Ok(parsed
-            .get("description")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_owned())
-    }
-
-    /// Record a change set that has nothing staged yet.
+    /// Build the complete, immutable record for a new change set.
     ///
-    /// Mirrors the coordinator's own rule — one pending change set per
-    /// principal per device — so a draft cannot be used to sidestep it, and
-    /// sweeps drafts older than the approval window on the way in.
-    async fn hold_draft(&self, id: String, draft: Draft) -> Result<(), Box<CallToolResult>> {
-        if let Some(blocker) = self
-            .coordinator
-            .change_sets()
-            .await
-            .into_iter()
-            .find(|record| {
-                if record.owner != draft.owner || record.device != draft.device {
-                    return false;
-                }
-                match record.state {
-                    ChangeSetState::Applying => true,
-                    ChangeSetState::Planned | ChangeSetState::Approved => {
-                        unix_seconds_now() < record.expires_at_unix
-                    }
-                    _ => false,
-                }
-            })
-        {
-            return Err(Box::new(tool_error(format!(
-                "change set {} on '{}' is still {}; finish or cancel it before creating \
-                 another",
-                blocker.id,
-                draft.device,
-                blocker.state.as_str()
-            ))));
-        }
-
-        let deadline = self.coordinator.approval_ttl().as_secs();
-        let now = unix_seconds_now();
-
-        let mut drafts = self
-            .drafts
-            .write()
-            .map_err(|_| Box::new(tool_error("drafts lock poisoned".to_owned())))?;
-
-        drafts.retain(|_, held| now.saturating_sub(held.created_at_unix) < deadline);
-
-        if let Some((existing, _)) = drafts
+    /// The digest binds `(owner, device, fingerprint, actions)`; the
+    /// fingerprint is the live configuration fingerprint the caller named and
+    /// the server just re-read.
+    fn plan_record(
+        &self,
+        owner: &str,
+        device: &str,
+        fingerprint: &str,
+        mutations: &[StagedMutation],
+        preimage: &Preimage,
+    ) -> Result<ChangeSetRecord, Box<CallToolResult>> {
+        let actions = actions_for(mutations, preimage)
             .iter()
-            .find(|(_, held)| held.owner == draft.owner && held.device == draft.device)
-        {
-            return Err(Box::new(tool_error(format!(
-                "change set {existing} on '{}' has nothing staged yet; stage into it or \
-                 let it lapse before creating another",
-                draft.device
-            ))));
-        }
-
-        if drafts.len() >= MAX_DRAFTS {
-            return Err(Box::new(tool_error(format!(
-                "{MAX_DRAFTS} change sets are open with nothing staged; stage into one or \
-                 let them lapse"
-            ))));
-        }
-
-        drafts.insert(id, draft);
-        Ok(())
-    }
-
-    /// The draft for this id, if it is one, the caller named its device, and
-    /// it has not lapsed.
-    fn draft(&self, change_set_id: &str, device: &str) -> Option<Draft> {
-        let deadline = self.coordinator.approval_ttl().as_secs();
-        let now = unix_seconds_now();
-
-        let held = self
-            .drafts
-            .read()
-            .ok()?
-            .get(change_set_id)
-            .filter(|draft| draft.device == device)
-            .cloned()?;
-
-        if now.saturating_sub(held.created_at_unix) >= deadline {
-            self.release_draft(change_set_id);
-            return None;
-        }
-
-        Some(held)
-    }
-
-    /// Forget a draft that has become a real change set.
-    fn release_draft(&self, change_set_id: &str) {
-        if let Ok(mut drafts) = self.drafts.write() {
-            drafts.remove(change_set_id);
-        }
-    }
-
-    /// Refuse a caller staging into a change set they do not own.
-    ///
-    /// Two-person control means the plan's author and its approver are
-    /// different principals. Without this check, any caller who names
-    /// another principal's change set id can stage additional mutations into
-    /// it, and a *different* principal approving afterward looks like a
-    /// genuine second reviewer when in fact one principal wrote the plan
-    /// content and the other only rubber-stamped it.
-    fn check_stager(principal: &str, owner: &str) -> Result<(), Box<CallToolResult>> {
-        if principal == owner {
-            Ok(())
-        } else {
-            Err(Box::new(tool_error(
-                "only the change set's creator may stage into it",
-            )))
-        }
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| Box::new(tool_error(format!("failed to store the plan: {error}"))))?;
+        let digest = change_set_digest(owner, device, fingerprint, &actions)
+            .map_err(|error| Box::new(tool_error(format!("failed to digest the plan: {error}"))))?;
+        let artifact = Self::render_preview(device, mutations, preimage)?;
+        Ok(ChangeSetRecord {
+            id: crate::changeset_state::new_change_set_id(),
+            owner: owner.to_owned(),
+            device: device.to_owned(),
+            expected_candidate_fingerprint: fingerprint.to_owned(),
+            actions,
+            digest,
+            state: ChangeSetState::Planned,
+            approver: None,
+            approval: None,
+            expires_at_unix: unix_seconds_now()
+                .saturating_add(self.coordinator.approval_ttl().as_secs()),
+            operation_id: None,
+            policy_signature: String::new(),
+            targets: Vec::new(),
+            preview: Some(PreviewRecord {
+                digest: preview_digest(&artifact),
+                artifact,
+                job_id: None,
+            }),
+            task_id: None,
+            apply_without_handle: false,
+        })
     }
 
     /// Refuse a plan the state file could not be reloaded with.
@@ -525,44 +394,6 @@ impl OpnsenseServer {
         }
 
         Ok(())
-    }
-
-    /// Rewrite a record's plan, its fingerprint, its digest, and its preview.
-    ///
-    /// All four move together. The digest binds `(owner, device, fingerprint,
-    /// actions)` and the approval binds the digest, so a plan changed without
-    /// its digest would carry an approval for a plan nobody approved.
-    fn with_plan(
-        mut record: ChangeSetRecord,
-        mutations: &[StagedMutation],
-        preimage: &Preimage,
-        description: &str,
-    ) -> Result<ChangeSetRecord, Box<CallToolResult>> {
-        let actions = actions_for(mutations, preimage);
-        let fingerprint = fingerprint_of(&actions)
-            .map_err(|error| Box::new(tool_error(format!("failed to fingerprint: {error}"))))?;
-        let artifact = Self::render_preview(&record.device, description, mutations, preimage)?;
-
-        record.actions = actions
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| Box::new(tool_error(format!("failed to store the plan: {error}"))))?;
-        record.expected_candidate_fingerprint = fingerprint;
-        record.digest = change_set_digest(
-            &record.owner,
-            &record.device,
-            &record.expected_candidate_fingerprint,
-            &record.actions,
-        )
-        .map_err(|error| Box::new(tool_error(format!("failed to digest the plan: {error}"))))?;
-        record.preview = Some(PreviewRecord {
-            digest: preview_digest(&artifact),
-            artifact,
-            job_id: None,
-        });
-
-        Ok(record)
     }
 }
 
@@ -617,7 +448,7 @@ impl OpnsenseServer {
         name = "list_opnsense_interfaces",
         description = "OPNsense interfaces overview. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -643,7 +474,7 @@ impl OpnsenseServer {
         name = "list_opnsense_gateways",
         description = "OPNsense gateway status. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -668,11 +499,11 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_firewall_rules",
         description = "OPNsense firewall filter rules, optionally filtered by search_phrase. \
-                       Legacy GUI rules are included only on OPNsense 25.1 and later; on 24.7 \
-                       and earlier this returns only MVC/automation rules and may be \
-                       incomplete. \
+                       The result's coverage field is read from the firmware version: \
+                       complete on 25.1 and later, mvc_only before 25.1 (legacy GUI rules are \
+                       missing), unknown if the version could not be read. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -698,7 +529,7 @@ impl OpnsenseServer {
         name = "list_opnsense_aliases",
         description = "OPNsense firewall aliases, optionally filtered by search_phrase. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -725,7 +556,7 @@ impl OpnsenseServer {
         description = "OPNsense outbound and 1:1 NAT rules, side by side. Port forwards \
                        (destination NAT) are NOT included. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -751,7 +582,7 @@ impl OpnsenseServer {
         name = "list_opnsense_routes",
         description = "OPNsense static routes, optionally filtered by search_phrase. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -778,7 +609,7 @@ impl OpnsenseServer {
         description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. ISC \
                        DHCPv4 only; Kea and Dnsmasq leases are NOT covered. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -801,14 +632,56 @@ impl OpnsenseServer {
     }
 
     #[tool(
-        name = "opnsense_create_change_set",
-        description = "Creates a new change set for firewall alias or filter rule writes. \
+        name = "get_opnsense_config_fingerprint",
+        description = "Fingerprint of the governed OPNsense configuration (every firewall \
+                       alias and filter rule), as sha256:<hex>, for use by the change-set \
+                       tools to detect a configuration change since this fingerprint was \
+                       taken. OPNsense has no candidate configuration: this fingerprints the \
+                       running one. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
                        content is marked as untrusted."
     )]
-    async fn opnsense_create_change_set(
+    async fn get_opnsense_config_fingerprint(
+        &self,
+        Parameters(args): Parameters<changeset::FingerprintArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "get_opnsense_config_fingerprint",
+            &device,
+            move |client| async move {
+                let fingerprint = config_fingerprint(&client).await?;
+                Ok::<_, OpnsenseError>(serde_json::json!({
+                    "device": args.device,
+                    "fingerprint": fingerprint,
+                    "covers": ["firewall_aliases", "firewall_filter_rules"],
+                }))
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "create_opnsense_change_set",
+        description = "Plans a change set of firewall alias or filter rule creates, updates \
+                       or deletes in one call; all actions must target one resource kind. \
+                       expected_fingerprint must come from get_opnsense_config_fingerprint; \
+                       the plan is refused if the configuration changed since. Nothing is \
+                       written to the device: OPNsense has no candidate configuration, so \
+                       the plan is held here with a pre-image of every resource it touches. \
+                       Returns change_set_id, plan_digest and the preview an approver \
+                       reviews. Under --lab-mode the approval is waived at creation and \
+                       recorded as approval_waiver lab-mode with no approver. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn create_opnsense_change_set(
         &self,
         Parameters(args): Parameters<changeset::CreateChangeSetArgs>,
         context: RequestContext<RoleServer>,
@@ -816,347 +689,88 @@ impl OpnsenseServer {
         let caller = Self::caller(&context);
         if let Err(error) = authorize_call(
             caller.as_ref(),
-            "opnsense_create_change_set",
+            "create_opnsense_change_set",
             Some(&args.device),
             WRITE_TOOLS,
         ) {
             return tool_error(error);
         }
-
         let owner = Self::principal(caller.as_ref());
-
-        if let Err(result) = self.client_for(&args.device) {
-            return *result;
-        }
-
-        // Held as a draft, not written to the store. The coordinator's
-        // persistence layer refuses to load a state file containing a change
-        // set with no actions, so writing an empty plan here would make the
-        // whole store unloadable at the next restart. The record is created
-        // on the first stage, which is also when there is a plan to propose.
-        let preview_budget = crate::changeset_state::limits().max_preview_bytes;
-        let smallest_preview = match Self::render_preview(
-            &args.device,
-            &args.description,
-            &[],
-            &Preimage::from_resources(Vec::new()),
-        ) {
-            Ok(rendered) => rendered.len(),
-            Err(result) => return *result,
-        };
-        if smallest_preview >= preview_budget {
-            return tool_error(format!(
-                "the description does not leave room for a preview: an empty change set \
-                 carrying it already renders to {smallest_preview} bytes, against a cap \
-                 of {preview_budget}"
-            ));
-        }
-
-        let id = crate::changeset_state::new_change_set_id();
-        let draft = Draft {
-            device: args.device.clone(),
-            owner,
-            description: args.description,
-            created_at_unix: unix_seconds_now(),
-        };
-
-        if let Err(result) = self.hold_draft(id.clone(), draft).await {
-            return *result;
-        }
-
-        let result = serde_json::json!({
-            "change_set_id": id,
-            "device": args.device,
-            "state": "draft",
-            "note": "nothing is staged yet; a draft is held in memory and is lost on \
-                     restart. It becomes a change set on the first opnsense_stage_change.",
-        });
-
-        tool_result(
-            Ok::<_, String>(result),
-            ResultFormat::PrettyJson,
-            RESULT_LIMITS,
-            OutputRedaction::Apply,
-        )
-    }
-
-    #[tool(
-        name = "opnsense_stage_change",
-        description = "Stages one or more alias or filter rule changes into an existing change \
-                       set; all mutations in one change set must target the same resource kind. \
-                       Output is redacted: values matching known secret patterns (API keys \
-                       and secrets, pre-shared keys, private keys, certificates, password \
-                       hashes) are replaced before being returned, and device-sourced \
-                       content is marked as untrusted."
-    )]
-    async fn opnsense_stage_change(
-        &self,
-        Parameters(args): Parameters<changeset::StageChangeArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_stage_change",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let draft = self.draft(&args.change_set_id, &args.device);
-        let existing = match draft {
-            Some(_) => None,
-            None => match self.record_for(&args.change_set_id, &args.device).await {
-                Ok(record) => Some(record),
-                Err(result) => return *result,
-            },
-        };
-
-        if let Some(ref record) = existing
-            && record.state != ChangeSetState::Planned
-        {
-            return tool_error(format!(
-                "change set is {} and can no longer be staged into; create a new one",
-                record.state.as_str()
-            ));
-        }
-
-        let (description, owner) = match (&draft, &existing) {
-            (Some(draft), _) => (draft.description.clone(), draft.owner.clone()),
-            (None, Some(record)) => match Self::description_of(record) {
-                Ok(description) => (description, record.owner.clone()),
-                Err(result) => return *result,
-            },
-            (None, None) => unreachable!("one of the two is always present"),
-        };
-
-        if let Err(result) = Self::check_stager(&Self::principal(caller.as_ref()), &owner) {
-            return *result;
-        }
-
         let client = match self.client_for(&args.device) {
             Ok(client) => client,
             Err(result) => return *result,
         };
 
-        let mut mutations = match &existing {
-            Some(record) => match Self::plan_of(record) {
-                Ok(plan) => plan.0,
-                Err(result) => return *result,
-            },
-            None => Vec::new(),
-        };
-
-        for spec in args.mutations {
-            mutations.push(match spec {
-                changeset::MutationSpec::Create { resource, body } => {
-                    StagedMutation::create(resource, body)
-                }
-                changeset::MutationSpec::Update {
-                    resource,
-                    uuid,
-                    body,
-                } => StagedMutation::update(resource, uuid, body),
-                changeset::MutationSpec::Delete { resource, uuid } => {
-                    StagedMutation::delete(resource, uuid)
-                }
-            });
+        if args.actions.is_empty() {
+            return tool_error("a change set needs at least one action");
         }
-
-        // Checked before canonicalization/writable-field checks run per-kind
-        // logic against a batch that might mix kinds.
-        if let Err(e) = check_single_resource_kind(&mutations) {
-            return tool_error(format!("staged mutation refused: {e}"));
+        let mut mutations: Vec<StagedMutation> = args
+            .actions
+            .into_iter()
+            .map(changeset::MutationSpec::into_mutation)
+            .collect();
+        if let Err(error) = check_single_resource_kind(&mutations) {
+            return tool_error(format!("change set refused: {error}"));
         }
-
-        // Canonicalize multi-value fields (content/proto/categories) before
-        // anything downstream — the digest, the preview, and reconciliation
-        // and verification checks after apply — ever sees them, so a staged
-        // value that lands correctly cannot read as a mismatch purely
-        // because of the order or separator the caller used.
+        // Canonicalize before the digest, the preview and verification ever
+        // see the values, so a value that lands correctly cannot read as a
+        // mismatch because of the order or separator the caller used.
         canonicalize_mutations(&mut mutations);
+        // Before the pre-image: a disallowed field must never enter a plan a
+        // human could approve.
+        if let Err(error) = check_writable_fields(&mutations) {
+            return tool_error(format!("change set refused: {error}"));
+        }
+        if let Err(refusal) =
+            lifecycle::ensure_no_pending(&self.coordinator, &owner, &args.device).await
+        {
+            return tool_error(refusal);
+        }
 
-        // Checked over the whole plan, not only the new mutations, and before
-        // the pre-image is captured: a mutation setting a disallowed field
-        // must never enter a change set a human could approve.
-        if let Err(e) = check_writable_fields(&mutations) {
-            return tool_error(format!("staged mutation refused: {e}"));
+        let live = match config_fingerprint(&client).await {
+            Ok(live) => live,
+            Err(error) => return respond::respond_device("create_opnsense_change_set", Err(error)),
+        };
+        if let Err(refusal) = lifecycle::check_fingerprint(&args.expected_fingerprint, &live) {
+            return tool_error(refusal);
         }
 
         let preimage = match Preimage::capture(&client, &mutations).await {
             Ok(preimage) => preimage,
-            Err(e) => return tool_error(format!("failed to capture pre-image: {e}")),
+            Err(error) => return respond::respond_device("create_opnsense_change_set", Err(error)),
         };
+        if let Err(error) = validate_locally(&preimage, &mutations) {
+            return tool_error(format!("change set refused: {error}"));
+        }
 
-        let staged_count = mutations.len();
-        let base = existing.unwrap_or_else(|| ChangeSetRecord {
-            id: args.change_set_id.clone(),
-            owner,
-            device: args.device.clone(),
-            expected_candidate_fingerprint: String::new(),
-            actions: Vec::new(),
-            digest: String::new(),
-            state: ChangeSetState::Planned,
-            approver: None,
-            approval: None,
-            expires_at_unix: unix_seconds_now()
-                .saturating_add(self.coordinator.approval_ttl().as_secs()),
-            operation_id: None,
-            policy_signature: String::new(),
-            targets: Vec::new(),
-            preview: None,
-            task_id: None,
-            apply_without_handle: false,
-        });
-
-        let staged = match Self::with_plan(base, &mutations, &preimage, &description) {
+        let record = match self.plan_record(&owner, &args.device, &live, &mutations, &preimage) {
             Ok(record) => record,
             Err(result) => return *result,
         };
-
-        if let Err(result) = Self::check_plan_limits(&staged) {
+        if let Err(result) = Self::check_plan_limits(&record) {
             return *result;
         }
+        let preview = record
+            .preview
+            .as_ref()
+            .map(|preview| preview.artifact.clone())
+            .unwrap_or_default();
 
-        // Held across the write, so no approval can land between the plan
-        // becoming visible and the digest it carries.
-        let _publishing = self.plan_lock.lock().await;
-
-        let write_result = if draft.is_some() {
-            self.coordinator.insert_change_set(staged).await
-        } else {
-            self.coordinator
-                .update_change_set_from(ChangeSetState::Planned, staged)
-                .await
-        };
-
-        if let Err(error) = write_result {
-            return tool_error(format!(
-                "failed to store change set ({}): {}",
-                error.field(),
-                error.message()
-            ));
-        }
-
-        if draft.is_some() {
-            self.release_draft(&args.change_set_id);
-        }
-
-        drop(_publishing);
-
-        let result = serde_json::json!({
-            "change_set_id": args.change_set_id,
-            "staged_count": staged_count,
-        });
-
-        tool_result(
-            Ok::<_, String>(result),
-            ResultFormat::PrettyJson,
-            RESULT_LIMITS,
-            OutputRedaction::Apply,
-        )
-    }
-
-    #[tool(
-        name = "opnsense_diff_change_set",
-        description = "Returns a diff showing what applying the change set would do. \
-                       Output is redacted: values matching known secret patterns (API keys \
-                       and secrets, pre-shared keys, private keys, certificates, password \
-                       hashes) are replaced before being returned, and device-sourced \
-                       content is marked as untrusted."
-    )]
-    async fn opnsense_diff_change_set(
-        &self,
-        Parameters(args): Parameters<changeset::DiffChangeSetArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_diff_change_set",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let record = match self.record_for(&args.change_set_id, &args.device).await {
-            Ok(record) => record,
-            Err(result) => return *result,
-        };
-
-        let (mutations, preimage) = match Self::plan_of(&record) {
-            Ok(plan) => plan,
-            Err(result) => return *result,
-        };
-
-        let diff = match diff_against_preimage(&preimage, &mutations) {
-            Ok(diff) => diff,
-            Err(e) => return tool_error(format!("failed to compute diff: {e}")),
+        let created = match lifecycle::finish_creation(&self.coordinator, record).await {
+            Ok(created) => created,
+            Err(refusal) => return tool_error(refusal),
         };
 
         let result = serde_json::json!({
-            "change_set_id": record.id,
-            "computed": diff.computed,
-            "changes": diff.changes,
+            "change_set_id": created.change_set_id,
+            "plan_digest": created.digest,
+            "expected_fingerprint": live,
+            "state": created.state.as_str(),
+            "approver": created.approver,
+            "approval_waiver": created.approval_waiver,
+            "expires_at_unix": created.expires_at_unix,
+            "preview": Untrusted::new(preview.as_str()).render_tagged("create_opnsense_change_set.preview"),
         });
-
-        Self::already_redacted_result("opnsense_diff_change_set", result)
-    }
-
-    #[tool(
-        name = "opnsense_validate_change_set",
-        description = "Validates the change set as far as possible without applying it. \
-                       Output is redacted: values matching known secret patterns (API keys \
-                       and secrets, pre-shared keys, private keys, certificates, password \
-                       hashes) are replaced before being returned, and device-sourced \
-                       content is marked as untrusted."
-    )]
-    async fn opnsense_validate_change_set(
-        &self,
-        Parameters(args): Parameters<changeset::ValidateChangeSetArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_validate_change_set",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let record = match self.record_for(&args.change_set_id, &args.device).await {
-            Ok(record) => record,
-            Err(result) => return *result,
-        };
-
-        let (mutations, preimage) = match Self::plan_of(&record) {
-            Ok(plan) => plan,
-            Err(result) => return *result,
-        };
-
-        if let Err(e) = validate_locally(&preimage, &mutations) {
-            return tool_error(format!("local validation failed: {e}"));
-        }
-
-        // Schema constraints: staging already refuses these, but a change set
-        // can outlive a server restart (it round-trips through
-        // --state-file), so a plan built before this check existed must
-        // still be caught by the tool whose description already promises it.
-        if let Err(e) = check_writable_fields(&mutations) {
-            return tool_error(format!("schema constraints failed: {e}"));
-        }
-
-        let result = serde_json::json!({
-            "change_set_id": record.id,
-            "valid": true,
-            "note": "OPNsense has no server-side dry-run validation for aliases or filter \
-                     rules; this is client-side only",
-        });
-
         tool_result(
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
@@ -1227,8 +841,6 @@ impl OpnsenseServer {
                 record.digest
             ));
         }
-
-        let _approving = self.plan_lock.lock().await;
 
         let approver_actor_type = Self::approver_actor_type(caller.as_ref());
 
@@ -1485,20 +1097,6 @@ impl OpnsenseServer {
             return tool_error(error);
         }
 
-        if let Some(draft) = self.draft(&args.change_set_id, &args.device) {
-            let result = serde_json::json!({
-                "change_set_id": args.change_set_id,
-                "device": draft.device,
-                "description": draft.description,
-                "creator": draft.owner,
-                "state": "draft",
-                "mutation_count": 0,
-                "note": "nothing is staged yet; this draft is held in memory and is \
-                         lost on restart",
-            });
-            return Self::already_redacted_result("opnsense_get_change_set", result);
-        }
-
         if let Err(error) = self
             .coordinator
             .change_set_status(args.change_set_id.clone(), args.device.clone())
@@ -1518,12 +1116,9 @@ impl OpnsenseServer {
             Err(result) => return *result,
         };
 
-        let description = Self::description_of(&record).unwrap_or_default();
-
         let result = serde_json::json!({
             "change_set_id": record.id,
             "device": record.device,
-            "description": description,
             "creator": record.owner,
             "approver": record.approval.as_ref().and_then(|a| a.approver.clone()),
             "approval_waiver": record
@@ -1631,7 +1226,7 @@ impl ServerHandler for OpnsenseServer {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use rustopnsmcp_core::changeset::ResourceKind;
+    use rustopnsmcp_core::changeset::{ResourceKind, fingerprint_of};
 
     /// The router and the registry must agree, in both directions.
     #[test]
@@ -1666,14 +1261,35 @@ mod tests {
         }
     }
 
+    /// The published max_bytes range must match the ceiling `page_request`
+    /// actually enforces, or a model that follows the description gets
+    /// refused on its first call.
+    #[test]
+    fn list_tool_descriptions_state_the_real_max_bytes_range() {
+        let expected = format!(
+            "max_bytes ({}-{})",
+            rustopnsmcp_core::tools::read::MIN_MAX_BYTES,
+            rustopnsmcp_core::tools::read::MAX_BYTES_CEILING
+        );
+        let router = OpnsenseServer::opns_tool_router();
+        for tool in router.list_all() {
+            let description = tool.description.as_deref().unwrap_or_default();
+            if description.contains("max_bytes") {
+                assert!(
+                    description.contains(&expected),
+                    "{} does not state the real max_bytes range ({expected}): {description}",
+                    tool.name
+                );
+            }
+        }
+    }
+
     /// Spec §3.1: reads are `list_opnsense_*` or `get_opnsense_*`; the old
     /// `opnsense_*` prefix does not survive.
     #[test]
     fn no_tool_keeps_the_old_opnsense_prefix_for_reads() {
         for name in rustopnsmcp_core::tools::TOOL_NAMES {
-            let is_old_read = name.starts_with("opnsense_")
-                && !name.ends_with("_change_set")
-                && *name != "opnsense_stage_change";
+            let is_old_read = name.starts_with("opnsense_") && !name.ends_with("_change_set");
             assert!(!is_old_read, "{name} still uses the pre-v1 read prefix");
         }
     }
@@ -1736,7 +1352,7 @@ mod tests {
         }
     }
 
-    /// The nine read tools, all redacted through the shared
+    /// The ten read tools, all redacted through the shared
     /// [`respond::respond_device`] path with [`OPNSENSE_PROFILE`].
     const RESPOND_REDACTED_TOOLS: &[&str] = &[
         "get_opnsense_system_status",
@@ -1748,28 +1364,22 @@ mod tests {
         "list_opnsense_nat_rules",
         "list_opnsense_routes",
         "list_opnsense_dhcp_leases",
+        "get_opnsense_config_fingerprint",
     ];
 
-    /// The three read-shaped change-set tools that redact their own result
+    /// The two read-shaped change-set tools that redact their own result
     /// with [`OPNSENSE_PROFILE`] before `tool_result`, tagging
     /// `OutputRedaction::AlreadyRedacted` because the unconditional generic
     /// pass `OutputRedaction::Apply` runs would otherwise be a silent
     /// re-redaction of already-clean data.
-    const ALREADY_REDACTED_TOOLS: &[&str] = &[
-        "opnsense_diff_change_set",
-        "opnsense_approve_change_set",
-        "opnsense_get_change_set",
-    ];
+    const ALREADY_REDACTED_TOOLS: &[&str] =
+        &["opnsense_approve_change_set", "opnsense_get_change_set"];
 
-    /// The four change-set lifecycle tools that carry no caller-controlled
+    /// The two change-set lifecycle tools that carry no caller-controlled
     /// free text of their own (ids, digests, counts) and rely on
     /// `tool_result`'s unconditional `OutputRedaction::Apply` pass.
-    const APPLY_REDACTED_TOOLS: &[&str] = &[
-        "opnsense_create_change_set",
-        "opnsense_stage_change",
-        "opnsense_validate_change_set",
-        "opnsense_apply_change_set",
-    ];
+    const APPLY_REDACTED_TOOLS: &[&str] =
+        &["create_opnsense_change_set", "opnsense_apply_change_set"];
 
     /// Every registered tool must be accounted for by exactly one of the
     /// three redaction strategies above. A tool added to the router without
@@ -1802,7 +1412,7 @@ mod tests {
     }
 
     /// A response containing a distinct, synthetic secret for each of the
-    /// nine read tools comes back redacted, and no tool's rendered output
+    /// ten read tools comes back redacted, and no tool's rendered output
     /// contains any planted secret — not just the one its own fixture
     /// plants, so a tool that leaked the *wrong* secret would still be
     /// caught (mirrors `mecmcp_redact::testing::tools_leaking_secrets`'s own
@@ -1900,23 +1510,12 @@ mod tests {
         assert!(leaking.is_empty());
     }
 
-    /// Phase 2a's seven change-set tools are the only mutating surface;
+    /// The four change-set lifecycle tools are the only mutating surface;
     /// this is meant to stay visible rather than silently assumed.
     #[test]
     fn write_tools_covers_the_change_set_lifecycle() {
-        assert_eq!(WRITE_TOOLS.len(), 7);
-        assert!(WRITE_TOOLS.contains(&"opnsense_apply_change_set"));
-    }
-
-    /// Two-person control depends on the plan's author and its approver
-    /// being different principals. Without this check, a second token could
-    /// stage its own mutations into someone else's change set and then
-    /// "approve" it — one principal writing and approving the same content
-    /// under the appearance of a second reviewer.
-    #[test]
-    fn only_the_owner_may_stage_into_their_own_change_set() {
-        assert!(OpnsenseServer::check_stager("alice", "alice").is_ok());
-        assert!(OpnsenseServer::check_stager("bob", "alice").is_err());
+        assert_eq!(WRITE_TOOLS.len(), 4);
+        assert!(WRITE_TOOLS.contains(&"create_opnsense_change_set"));
     }
 
     /// A stdio caller carries no verified token entry, so its actor type
@@ -1930,31 +1529,22 @@ mod tests {
         );
     }
 
-    /// The preview is built from a caller-supplied `description`, then both
-    /// returned from `opnsense_diff_change_set`/`opnsense_approve_change_set`/
-    /// `opnsense_get_change_set` and persisted in the change-set store.
-    /// Before this fix, none of those paths ran the redaction every read
-    /// tool already gets via `Self::respond`, so a secret-shaped string in
-    /// the description reached both the caller and the on-disk state file
-    /// verbatim.
+    /// The preview is returned to callers and persisted in the change-set
+    /// store, so a secret-shaped value in a staged body must be scrubbed.
     #[test]
-    fn render_preview_redacts_secret_shaped_text_in_the_description() {
+    fn render_preview_redacts_secret_shaped_text_in_a_staged_body() {
         let preimage = Preimage::from_resources(Vec::new());
         let mutations = vec![StagedMutation::create(
             ResourceKind::Alias,
             serde_json::json!({
                 "name": "test_alias",
                 "type": "host",
+                "description": "rollout notes: password=hunter2",
             }),
         )];
 
-        let artifact = OpnsenseServer::render_preview(
-            "home",
-            "rollout notes: password=hunter2",
-            &mutations,
-            &preimage,
-        )
-        .expect("renders");
+        let artifact =
+            OpnsenseServer::render_preview("home", &mutations, &preimage).expect("renders");
 
         assert!(!artifact.contains("hunter2"), "{artifact}");
         assert!(artifact.contains("REDACTED"), "{artifact}");

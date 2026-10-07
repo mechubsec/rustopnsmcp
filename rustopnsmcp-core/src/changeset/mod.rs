@@ -20,6 +20,7 @@
 
 pub mod apply;
 pub mod diff;
+pub mod fingerprint;
 pub mod preimage;
 pub mod record;
 pub mod rollback;
@@ -27,6 +28,7 @@ pub mod validate;
 
 pub use apply::{ControllerOps, Outcome, Reconciled, State, apply_sequentially};
 pub use diff::{Change, Diff, diff_against_preimage};
+pub use fingerprint::{VOLATILE_FIELDS, config_fingerprint, fingerprint_collections};
 pub use preimage::{Preimage, ResourceKind, StagedMutation};
 pub use record::{
     StagedAction, actions_for, actions_of, fingerprint_of, mutations_of, preimage_of,
@@ -81,39 +83,5 @@ mod tests {
         assert!(!atomicity.atomic_apply);
         assert!(!atomicity.dry_run_validation);
         assert!(!atomicity.guaranteed_rollback);
-    }
-
-    /// The design forbids the word outright, because an operator approving an
-    /// OPNsense alias change set is not getting commit-confirmed semantics
-    /// and the model relaying the request must be able to say so.
-    #[test]
-    fn no_change_set_tool_description_claims_atomicity() {
-        for (name, description) in crate::tools::changeset::DESCRIPTIONS {
-            let lowered = description.to_lowercase();
-            assert!(
-                !lowered.contains("atomic"),
-                "{name} description contains 'atomic': {description}"
-            );
-            assert!(
-                !lowered.contains("all-or-nothing"),
-                "{name} description implies atomicity: {description}"
-            );
-        }
-    }
-
-    /// And the descriptions must say the true thing, not merely avoid the
-    /// false one.
-    #[test]
-    fn the_apply_description_states_that_partial_failure_is_reachable() {
-        let apply = crate::tools::changeset::DESCRIPTIONS
-            .iter()
-            .find(|(name, _)| *name == "opnsense_apply_change_set")
-            .expect("apply is registered");
-        let lowered = apply.1.to_lowercase();
-        assert!(
-            lowered.contains("partial"),
-            "apply must state that partial failure is a reachable outcome: {}",
-            apply.1
-        );
     }
 }

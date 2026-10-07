@@ -28,10 +28,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_opnsense_routes",
     "list_opnsense_gateways",
     "list_opnsense_dhcp_leases",
-    "opnsense_create_change_set",
-    "opnsense_stage_change",
-    "opnsense_diff_change_set",
-    "opnsense_validate_change_set",
+    "get_opnsense_config_fingerprint",
+    "create_opnsense_change_set",
     "opnsense_approve_change_set",
     "opnsense_apply_change_set",
     "opnsense_get_change_set",
@@ -39,16 +37,10 @@ pub const TOOL_NAMES: &[&str] = &[
 
 /// The mutating tools, passed to `mecmcp_server::authorize_call`.
 ///
-/// All seven change-set tools: none of them is a wildcard for "read" scope,
-/// including the read-shaped `opnsense_diff_change_set`,
-/// `opnsense_validate_change_set`, and `opnsense_get_change_set` — they
-/// expose a plan's contents and preview, which a read-only caller has no
-/// business seeing before an owner or approver does.
+/// `opnsense_get_change_set` stays here until Task 14 replaces it with the
+/// read-scope `get_opnsense_change_set_status`.
 pub const WRITE_TOOLS: &[&str] = &[
-    "opnsense_create_change_set",
-    "opnsense_stage_change",
-    "opnsense_diff_change_set",
-    "opnsense_validate_change_set",
+    "create_opnsense_change_set",
     "opnsense_approve_change_set",
     "opnsense_apply_change_set",
     "opnsense_get_change_set",
