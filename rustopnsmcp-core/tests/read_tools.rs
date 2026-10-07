@@ -11,7 +11,7 @@
 
 use rustopnsmcp_core::client::OpnsenseClient;
 use rustopnsmcp_core::inventory::Device;
-use rustopnsmcp_core::tools::read::{self, SearchArgs};
+use rustopnsmcp_core::tools::read::{self, ListArgs};
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::Arc;
@@ -334,11 +334,13 @@ async fn client_against(routes: HashMap<String, serde_json::Value>) -> OpnsenseC
     OpnsenseClient::new(device).expect("client builds")
 }
 
-fn no_filter() -> SearchArgs {
-    SearchArgs {
+fn no_filter() -> ListArgs {
+    ListArgs {
         device: "fw".to_owned(),
         search_phrase: None,
         limit: None,
+        offset: None,
+        max_bytes: None,
     }
 }
 
@@ -359,19 +361,35 @@ async fn firmware_status_reads_the_fixture() {
 }
 
 #[tokio::test]
-async fn list_interfaces_reads_the_fixture() {
+async fn list_interfaces_pages_the_overview_by_identifier() {
     let client = client_against(default_routes()).await;
-    let interfaces = read::list_interfaces(&client)
+    let interfaces = read::list_interfaces(&client, &no_filter())
         .await
         .expect("list interfaces");
-    assert!(interfaces["rows"]["wan"].is_object());
+    assert_eq!(interfaces["total"], 2);
+    assert_eq!(interfaces["rows"][0]["identifier"], "lan");
+    assert_eq!(interfaces["rows"][1]["identifier"], "wan");
+    assert_eq!(interfaces["next_offset"], serde_json::Value::Null);
 }
 
 #[tokio::test]
-async fn list_gateways_reads_the_fixture() {
+async fn list_gateways_pages_the_status_items() {
     let client = client_against(default_routes()).await;
-    let gateways = read::list_gateways(&client).await.expect("list gateways");
-    assert_eq!(gateways["items"][0]["name"], "WAN_DHCP");
+    let gateways = read::list_gateways(&client, &no_filter())
+        .await
+        .expect("list gateways");
+    assert_eq!(gateways["rows"][0]["name"], "WAN_DHCP");
+    assert_eq!(gateways["offset"], 0);
+}
+
+#[tokio::test]
+async fn a_search_phrase_on_a_tool_that_cannot_search_is_refused() {
+    let client = client_against(default_routes()).await;
+    let filtered = ListArgs {
+        search_phrase: Some("wan".to_owned()),
+        ..no_filter()
+    };
+    assert!(read::list_gateways(&client, &filtered).await.is_err());
 }
 
 #[tokio::test]

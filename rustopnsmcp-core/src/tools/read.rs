@@ -9,7 +9,7 @@ use crate::endpoints;
 use crate::error::OpnsenseError;
 use crate::model::{SearchResponse, require_object};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Arguments shared by every read tool: which device to query.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -19,44 +19,115 @@ pub struct DeviceArgs {
     pub device: String,
 }
 
-/// Arguments for a paginated `search_*` read tool.
+/// Arguments for every `list_opnsense_*` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SearchArgs {
+pub struct ListArgs {
     /// Which device, by its name in `devices.json`.
     pub device: String,
     /// Free-text filter, matched against the resource's usual search fields.
+    /// Refused by tools whose device endpoint cannot search.
     #[serde(default)]
     pub search_phrase: Option<String>,
-    /// Maximum items to return. Defaults to 200.
-    ///
-    /// A response holding exactly this many items may not be the whole
-    /// collection — advance the page with a future paging argument once one
-    /// is needed; phase 1 always requests page 1.
+    /// Page size, 1 to 1000. Defaults to 200.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Rows to skip. Must be a multiple of `limit`, because OPNsense pages by
+    /// page number. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Upper bound, in bytes, on the page's serialized rows: 1024 to 524288.
+    /// Rows past the bound are dropped from the end and the result says
+    /// `truncated_to_fit_max_bytes: true`.
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
 }
 
-/// Upper bound on `limit`. The 8 MiB transport-level response cap and the
-/// 512 KiB MCP result cap already bound the worst case; this exists so an
-/// oversized request is refused up front with a clear reason instead of
-/// silently truncated or left to those caps to absorb.
+/// Upper bound on `limit`.
 const MAX_LIMIT: u32 = 1_000;
+
+/// Upper bound on `offset`. Large enough for any real OPNsense collection;
+/// small enough that `offset / limit + 1` (the device's 1-based page number,
+/// computed in `u32`) can never overflow for any `limit` this module allows.
+const MAX_OFFSET: u32 = 1_000_000;
 
 /// Upper bound on `search_phrase`, in bytes.
 const MAX_SEARCH_PHRASE_BYTES: usize = 256;
 
-/// Reject an out-of-range `limit` or an oversized `search_phrase` before it
-/// reaches the device. Fail closed: no silent clamping.
+/// The largest device-output text a result may carry (spec §3.1). The
+/// server's `respond::MAX_DEVICE_TEXT_BYTES` is defined as this constant,
+/// so the two bounds can't drift apart; `rustopnsmcp` cannot be depended on
+/// from here, so the direction runs core -> binary.
+pub const MAX_DEVICE_TEXT_BYTES: usize = 512 * 1024;
+
+/// Default and upper bound for `max_bytes`: headroom under
+/// [`MAX_DEVICE_TEXT_BYTES`] for the page envelope, the NAT wrapper, and
+/// redaction placeholders, which can be longer than the secret they replace.
+///
+/// A page sized to this ceiling is measured the same way it will be
+/// rendered: compact JSON, matching `respond_device`'s compact render. If
+/// the two ever measured differently again, a page that "fits" could still
+/// be refused as oversized.
+pub const MAX_BYTES_CEILING: usize = MAX_DEVICE_TEXT_BYTES - 16 * 1024;
+
+/// Lower bound for `max_bytes`: below this not even one row is useful.
+pub const MIN_MAX_BYTES: usize = 1024;
+
+/// A validated page request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageRequest {
+    /// Page size.
+    pub limit: u32,
+    /// Rows skipped; a multiple of `limit`.
+    pub offset: u32,
+    /// Byte bound on the page's serialized rows.
+    pub max_bytes: usize,
+}
+
+/// One page of a collection, as every `list_opnsense_*` tool returns it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Page {
+    /// The rows on this page.
+    pub rows: Vec<serde_json::Value>,
+    /// The collection's size, when the device reports it.
+    pub total: Option<u32>,
+    /// The page size requested.
+    pub limit: u32,
+    /// The offset requested.
+    pub offset: u32,
+    /// Where the next page starts; `null` on the last page or after
+    /// truncation.
+    pub next_offset: Option<u32>,
+    /// Whether rows were dropped to fit `max_bytes`.
+    pub truncated_to_fit_max_bytes: bool,
+}
+
+/// Validate a list request. Fail closed: nothing is clamped.
 ///
 /// # Errors
-/// Returns [`OpnsenseError::Config`] when either bound is exceeded.
-fn validate_search_args(args: &SearchArgs) -> Result<(), OpnsenseError> {
-    if let Some(limit) = args.limit
-        && !(1..=MAX_LIMIT).contains(&limit)
-    {
+/// Returns [`OpnsenseError::Config`] naming the first bound exceeded.
+pub fn page_request(args: &ListArgs) -> Result<PageRequest, OpnsenseError> {
+    let limit = args.limit.unwrap_or(endpoints::DEFAULT_ROW_COUNT);
+    if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(OpnsenseError::Config(format!(
             "limit must be between 1 and {MAX_LIMIT}, got {limit}"
+        )));
+    }
+    let offset = args.offset.unwrap_or(0);
+    if offset > MAX_OFFSET {
+        return Err(OpnsenseError::Config(format!(
+            "offset must be at most {MAX_OFFSET}, got {offset}"
+        )));
+    }
+    if !offset.is_multiple_of(limit) {
+        return Err(OpnsenseError::Config(format!(
+            "offset must be a multiple of limit ({limit}), got {offset}"
+        )));
+    }
+    let max_bytes = args.max_bytes.unwrap_or(MAX_BYTES_CEILING);
+    if !(MIN_MAX_BYTES..=MAX_BYTES_CEILING).contains(&max_bytes) {
+        return Err(OpnsenseError::Config(format!(
+            "max_bytes must be between {MIN_MAX_BYTES} and {MAX_BYTES_CEILING}, got {max_bytes}"
         )));
     }
     if let Some(phrase) = &args.search_phrase
@@ -67,16 +138,112 @@ fn validate_search_args(args: &SearchArgs) -> Result<(), OpnsenseError> {
             phrase.len()
         )));
     }
+    Ok(PageRequest {
+        limit,
+        offset,
+        max_bytes,
+    })
+}
+
+/// The `search_*` request body for a page.
+fn search_body(args: &ListArgs, page: &PageRequest) -> serde_json::Value {
+    serde_json::json!({
+        "current": page.offset / page.limit + 1,
+        "rowCount": page.limit,
+        "searchPhrase": args.search_phrase.clone().unwrap_or_default(),
+    })
+}
+
+/// Refuse `search_phrase` on a tool whose endpoint cannot search, instead of
+/// ignoring it.
+fn refuse_search_phrase(args: &ListArgs, tool: &str) -> Result<(), OpnsenseError> {
+    if args.search_phrase.is_some() {
+        return Err(OpnsenseError::Config(format!(
+            "search_phrase is not supported by {tool}"
+        )));
+    }
     Ok(())
 }
 
-/// Build the standard `search_*` request body.
-fn search_body(args: &SearchArgs) -> serde_json::Value {
-    serde_json::json!({
-        "current": 1,
-        "rowCount": args.limit.unwrap_or(endpoints::DEFAULT_ROW_COUNT),
-        "searchPhrase": args.search_phrase.clone().unwrap_or_default(),
-    })
+/// Build a page from one device page of rows, fitting it to `max_bytes`.
+///
+/// `rows` and `total` are device-reported and untrusted: a device can send
+/// more or fewer rows than `limit`, or a `total` inconsistent with what it
+/// actually returned. The page the caller sees never carries more than
+/// `limit` rows, and `next_offset`, when present, is always `offset + limit`
+/// -- a value `page_request` will accept on the caller's next call -- never
+/// a number derived from how many rows the device happened to send.
+#[must_use]
+pub fn page_from(rows: Vec<serde_json::Value>, total: Option<u32>, page: &PageRequest) -> Page {
+    let limit = page.limit as usize;
+    let full_page = rows.len() >= limit;
+    let mut rows = rows;
+    rows.truncate(limit);
+
+    let sizes: Vec<usize> = rows
+        .iter()
+        .map(|row| serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len()))
+        .collect();
+
+    let mut kept = rows.len();
+    let array_bytes = |count: usize| -> usize {
+        let body: usize = sizes[..count]
+            .iter()
+            .fold(0, |sum, size| sum.saturating_add(*size));
+        body.saturating_add(2)
+            .saturating_add(count.saturating_sub(1))
+    };
+    while kept > 0 && array_bytes(kept) > page.max_bytes {
+        kept -= 1;
+    }
+    let byte_truncated = kept < rows.len();
+    rows.truncate(kept);
+
+    let end = page.offset.saturating_add(page.limit);
+    let next_offset = if byte_truncated || !full_page {
+        None
+    } else {
+        match total {
+            Some(total) if end < total => Some(end),
+            Some(_) => None,
+            None => Some(end),
+        }
+    };
+
+    Page {
+        rows,
+        total,
+        limit: page.limit,
+        offset: page.offset,
+        next_offset,
+        truncated_to_fit_max_bytes: byte_truncated,
+    }
+}
+
+/// Page a collection the device returns whole.
+#[must_use]
+pub fn page_slice(all: Vec<serde_json::Value>, page: &PageRequest) -> Page {
+    let total = u32::try_from(all.len()).unwrap_or(u32::MAX);
+    let start = (page.offset as usize).min(all.len());
+    let end = start.saturating_add(page.limit as usize).min(all.len());
+    let rows = all[start..end].to_vec();
+    page_from(rows, Some(total), page)
+}
+
+/// Run one `search_*` page and shape it.
+async fn search_page(
+    client: &OpnsenseClient,
+    path: &str,
+    args: &ListArgs,
+    page: &PageRequest,
+) -> Result<Page, OpnsenseError> {
+    let raw = client.post(path, &search_body(args, page)).await?;
+    let parsed = SearchResponse::parse(&raw)?;
+    Ok(page_from(parsed.rows, parsed.total, page))
+}
+
+fn to_json(page: &Page) -> Result<serde_json::Value, OpnsenseError> {
+    serde_json::to_value(page).map_err(|error| OpnsenseError::Malformed(error.to_string()))
 }
 
 /// `get_opnsense_system_status`: the device's system status.
@@ -100,24 +267,74 @@ pub async fn firmware_status(client: &OpnsenseClient) -> Result<serde_json::Valu
     Ok(raw)
 }
 
-/// `list_opnsense_interfaces`: the interfaces overview.
+/// `list_opnsense_interfaces`: the interfaces overview, paged here.
+///
+/// The overview answers with `rows` as an object keyed by interface
+/// identifier. Each entry becomes a row carrying that key as `identifier`,
+/// sorted by identifier so pages are stable.
 ///
 /// # Errors
-/// As [`system_status`].
-pub async fn list_interfaces(client: &OpnsenseClient) -> Result<serde_json::Value, OpnsenseError> {
+/// As [`system_status`], and [`OpnsenseError::Config`] for a bad page request
+/// or any `search_phrase`.
+pub async fn list_interfaces(
+    client: &OpnsenseClient,
+    args: &ListArgs,
+) -> Result<serde_json::Value, OpnsenseError> {
+    refuse_search_phrase(args, "list_opnsense_interfaces")?;
+    let page = page_request(args)?;
     let raw = client.get(endpoints::INTERFACES_OVERVIEW).await?;
     require_object(&raw)?;
-    Ok(raw)
+    let mut all: Vec<serde_json::Value> = match raw.get("rows") {
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(identifier, body)| {
+                let mut row = body.clone();
+                if let Some(object) = row.as_object_mut() {
+                    object.insert(
+                        "identifier".to_owned(),
+                        serde_json::Value::String(identifier.clone()),
+                    );
+                }
+                row
+            })
+            .collect(),
+        Some(serde_json::Value::Array(rows)) => rows.clone(),
+        _ => {
+            return Err(OpnsenseError::Malformed(
+                "interfacesInfo response has no rows".to_owned(),
+            ));
+        }
+    };
+    all.sort_by(|left, right| {
+        let key = |row: &serde_json::Value| {
+            row.get("identifier")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        key(left).cmp(&key(right))
+    });
+    to_json(&page_slice(all, &page))
 }
 
-/// `list_opnsense_gateways`: gateway status.
+/// `list_opnsense_gateways`: gateway status, paged here.
 ///
 /// # Errors
-/// As [`system_status`].
-pub async fn list_gateways(client: &OpnsenseClient) -> Result<serde_json::Value, OpnsenseError> {
+/// As [`list_interfaces`].
+pub async fn list_gateways(
+    client: &OpnsenseClient,
+    args: &ListArgs,
+) -> Result<serde_json::Value, OpnsenseError> {
+    refuse_search_phrase(args, "list_opnsense_gateways")?;
+    let page = page_request(args)?;
     let raw = client.get(endpoints::GATEWAYS_STATUS).await?;
     require_object(&raw)?;
-    Ok(raw)
+    let Some(items) = raw.get("items").and_then(serde_json::Value::as_array) else {
+        return Err(OpnsenseError::Malformed(
+            "gateway status response has no items".to_owned(),
+        ));
+    };
+    to_json(&page_slice(items.clone(), &page))
 }
 
 /// `list_opnsense_firewall_rules`: firewall filter rules, one page.
@@ -127,14 +344,10 @@ pub async fn list_gateways(client: &OpnsenseClient) -> Result<serde_json::Value,
 /// response missing the `rows` envelope.
 pub async fn list_firewall_rules(
     client: &OpnsenseClient,
-    args: &SearchArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
-    validate_search_args(args)?;
-    let raw = client
-        .post(endpoints::FIREWALL_RULES_SEARCH, &search_body(args))
-        .await?;
-    let parsed = SearchResponse::parse(&raw)?;
-    serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
+    let page = page_request(args)?;
+    to_json(&search_page(client, endpoints::FIREWALL_RULES_SEARCH, args, &page).await?)
 }
 
 /// `list_opnsense_aliases`: firewall aliases, one page.
@@ -143,14 +356,10 @@ pub async fn list_firewall_rules(
 /// As [`list_firewall_rules`].
 pub async fn list_aliases(
     client: &OpnsenseClient,
-    args: &SearchArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
-    validate_search_args(args)?;
-    let raw = client
-        .post(endpoints::ALIASES_SEARCH, &search_body(args))
-        .await?;
-    let parsed = SearchResponse::parse(&raw)?;
-    serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
+    let page = page_request(args)?;
+    to_json(&search_page(client, endpoints::ALIASES_SEARCH, args, &page).await?)
 }
 
 /// `list_opnsense_routes`: static routes, one page.
@@ -159,14 +368,10 @@ pub async fn list_aliases(
 /// As [`list_firewall_rules`].
 pub async fn list_routes(
     client: &OpnsenseClient,
-    args: &SearchArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
-    validate_search_args(args)?;
-    let raw = client
-        .post(endpoints::ROUTES_SEARCH, &search_body(args))
-        .await?;
-    let parsed = SearchResponse::parse(&raw)?;
-    serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
+    let page = page_request(args)?;
+    to_json(&search_page(client, endpoints::ROUTES_SEARCH, args, &page).await?)
 }
 
 /// `list_opnsense_dhcp_leases`: DHCPv4 leases, one page.
@@ -175,14 +380,10 @@ pub async fn list_routes(
 /// As [`list_firewall_rules`].
 pub async fn list_dhcp_leases(
     client: &OpnsenseClient,
-    args: &SearchArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
-    validate_search_args(args)?;
-    let raw = client
-        .post(endpoints::DHCP_LEASES_SEARCH, &search_body(args))
-        .await?;
-    let parsed = SearchResponse::parse(&raw)?;
-    serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
+    let page = page_request(args)?;
+    to_json(&search_page(client, endpoints::DHCP_LEASES_SEARCH, args, &page).await?)
 }
 
 /// `list_opnsense_nat_rules`: outbound and 1:1 NAT rules, one page each.
@@ -195,80 +396,141 @@ pub async fn list_dhcp_leases(
 /// As [`list_firewall_rules`], for either sub-request.
 pub async fn list_nat_rules(
     client: &OpnsenseClient,
-    args: &SearchArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
-    validate_search_args(args)?;
-    let body = search_body(args);
-    let outbound_raw = client.post(endpoints::NAT_OUTBOUND_SEARCH, &body).await?;
-    let one_to_one_raw = client.post(endpoints::NAT_ONE_TO_ONE_SEARCH, &body).await?;
-
-    let outbound = SearchResponse::parse(&outbound_raw)?;
-    let one_to_one = SearchResponse::parse(&one_to_one_raw)?;
-
-    serde_json::to_value(serde_json::json!({
-        "outbound": outbound,
-        "one_to_one": one_to_one,
+    let page = page_request(args)?;
+    // Two collections share one result, so each gets half the byte budget.
+    let half = PageRequest {
+        max_bytes: page.max_bytes / 2,
+        ..page
+    };
+    let outbound = search_page(client, endpoints::NAT_OUTBOUND_SEARCH, args, &half).await?;
+    let one_to_one = search_page(client, endpoints::NAT_ONE_TO_ONE_SEARCH, args, &half).await?;
+    Ok(serde_json::json!({
+        "outbound": to_json(&outbound)?,
+        "one_to_one": to_json(&one_to_one)?,
     }))
-    .map_err(|error| OpnsenseError::Malformed(error.to_string()))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{SearchArgs, search_body, validate_search_args};
+    use super::*;
 
-    #[test]
-    fn search_body_defaults_row_count_and_empty_phrase() {
-        let args = SearchArgs {
+    fn args(limit: Option<u32>, offset: Option<u32>, max_bytes: Option<usize>) -> ListArgs {
+        ListArgs {
             device: "fw".to_owned(),
             search_phrase: None,
-            limit: None,
-        };
-        let body = search_body(&args);
-        assert_eq!(body["current"], 1);
-        assert_eq!(body["rowCount"], crate::endpoints::DEFAULT_ROW_COUNT);
-        assert_eq!(body["searchPhrase"], "");
+            limit,
+            offset,
+            max_bytes,
+        }
+    }
+
+    fn rows(count: usize) -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| serde_json::json!({ "uuid": format!("row-{index}") }))
+            .collect()
     }
 
     #[test]
-    fn search_body_passes_through_supplied_values() {
-        let args = SearchArgs {
-            device: "fw".to_owned(),
+    fn defaults_are_the_first_page_of_200_under_the_ceiling() {
+        let page = page_request(&args(None, None, None)).unwrap();
+        assert_eq!(
+            (page.limit, page.offset, page.max_bytes),
+            (endpoints::DEFAULT_ROW_COUNT, 0, MAX_BYTES_CEILING)
+        );
+    }
+
+    #[test]
+    fn an_offset_that_is_not_a_multiple_of_limit_is_refused() {
+        assert!(page_request(&args(Some(50), Some(75), None)).is_err());
+        assert!(page_request(&args(Some(50), Some(100), None)).is_ok());
+    }
+
+    #[test]
+    fn limit_and_max_bytes_are_bounded_without_clamping() {
+        assert!(page_request(&args(Some(0), None, None)).is_err());
+        assert!(page_request(&args(Some(MAX_LIMIT + 1), None, None)).is_err());
+        assert!(page_request(&args(None, None, Some(MIN_MAX_BYTES - 1))).is_err());
+        assert!(page_request(&args(None, None, Some(MAX_BYTES_CEILING + 1))).is_err());
+    }
+
+    #[test]
+    fn an_offset_that_would_overflow_the_devices_page_number_is_refused() {
+        assert!(page_request(&args(Some(1), Some(u32::MAX), None)).is_err());
+        assert!(page_request(&args(Some(1), Some(MAX_OFFSET + 1), None)).is_err());
+        assert!(page_request(&args(Some(1), Some(MAX_OFFSET), None)).is_ok());
+    }
+
+    #[test]
+    fn the_search_body_asks_for_the_page_the_offset_names() {
+        let list = ListArgs {
             search_phrase: Some("wan".to_owned()),
-            limit: Some(50),
+            ..args(Some(50), Some(100), None)
         };
-        let body = search_body(&args);
+        let page = page_request(&list).unwrap();
+        let body = search_body(&list, &page);
+        assert_eq!(body["current"], 3);
         assert_eq!(body["rowCount"], 50);
         assert_eq!(body["searchPhrase"], "wan");
     }
 
-    fn args_with(limit: Option<u32>, search_phrase: Option<String>) -> SearchArgs {
-        SearchArgs {
-            device: "fw".to_owned(),
-            search_phrase,
-            limit,
-        }
+    #[test]
+    fn next_offset_follows_the_total() {
+        let page = page_request(&args(Some(2), Some(0), None)).unwrap();
+        assert_eq!(page_from(rows(2), Some(5), &page).next_offset, Some(2));
+        let last = page_request(&args(Some(2), Some(4), None)).unwrap();
+        assert_eq!(page_from(rows(1), Some(5), &last).next_offset, None);
     }
 
     #[test]
-    fn validate_search_args_accepts_defaults_and_in_range_values() {
-        assert!(validate_search_args(&args_with(None, None)).is_ok());
-        assert!(validate_search_args(&args_with(Some(1), None)).is_ok());
-        assert!(validate_search_args(&args_with(Some(super::MAX_LIMIT), None)).is_ok());
-        assert!(validate_search_args(&args_with(None, Some("wan".to_owned()))).is_ok());
+    fn a_device_that_sends_more_rows_than_limit_is_capped_and_still_pages_cleanly() {
+        let page = page_request(&args(Some(2), Some(0), None)).unwrap();
+        let fitted = page_from(rows(5), None, &page);
+        assert_eq!(fitted.rows.len(), 2, "never more than limit rows");
+        assert_eq!(
+            fitted.next_offset,
+            Some(2),
+            "next_offset must be offset + limit, a value page_request will accept"
+        );
+        assert!(page_request(&args(Some(2), fitted.next_offset, None)).is_ok());
     }
 
     #[test]
-    fn validate_search_args_rejects_zero_and_oversized_limit() {
-        assert!(validate_search_args(&args_with(Some(0), None)).is_err());
-        assert!(validate_search_args(&args_with(Some(super::MAX_LIMIT + 1), None)).is_err());
+    fn a_device_that_undercounts_total_does_not_offer_a_next_offset_past_a_short_page() {
+        // total claims more rows exist than the device actually returned for
+        // this page; a short page is trusted as the end, not the total.
+        let page = page_request(&args(Some(5), Some(0), None)).unwrap();
+        let fitted = page_from(rows(3), Some(100), &page);
+        assert_eq!(fitted.next_offset, None);
     }
 
     #[test]
-    fn validate_search_args_rejects_oversized_search_phrase() {
-        let too_long = "x".repeat(super::MAX_SEARCH_PHRASE_BYTES + 1);
-        assert!(validate_search_args(&args_with(None, Some(too_long))).is_err());
+    fn a_page_over_max_bytes_drops_rows_and_says_so() {
+        let page = page_request(&args(Some(200), None, Some(MIN_MAX_BYTES))).unwrap();
+        let fitted = page_from(rows(200), Some(1000), &page);
+        assert!(fitted.truncated_to_fit_max_bytes);
+        assert!(fitted.rows.len() < 200);
+        assert_eq!(fitted.next_offset, None);
+        assert!(serde_json::to_vec(&fitted.rows).unwrap().len() <= MIN_MAX_BYTES);
+    }
 
-        let exactly_at_cap = "x".repeat(super::MAX_SEARCH_PHRASE_BYTES);
-        assert!(validate_search_args(&args_with(None, Some(exactly_at_cap))).is_ok());
+    #[test]
+    fn page_slice_pages_a_collection_the_device_does_not_page() {
+        let page = page_request(&args(Some(2), Some(2), None)).unwrap();
+        let sliced = page_slice(rows(5), &page);
+        assert_eq!(sliced.rows, rows(5)[2..4].to_vec());
+        assert_eq!(sliced.total, Some(5));
+        assert_eq!(sliced.next_offset, Some(4));
+    }
+
+    #[test]
+    fn search_phrase_is_bounded() {
+        let too_long = ListArgs {
+            search_phrase: Some("x".repeat(MAX_SEARCH_PHRASE_BYTES + 1)),
+            ..args(None, None, None)
+        };
+        assert!(page_request(&too_long).is_err());
     }
 }
