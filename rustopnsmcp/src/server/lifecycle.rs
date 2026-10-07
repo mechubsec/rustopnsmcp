@@ -225,6 +225,117 @@ pub(crate) fn pre_apply_gate(
     Ok(())
 }
 
+/// Default and maximum page size for `list_opnsense_change_sets`.
+const DEFAULT_LIST_LIMIT: u32 = 50;
+const MAX_LIST_LIMIT: u32 = 200;
+
+/// One change set as status and list report it.
+///
+/// `include_preview` for callers who may approve; `include_actions` only
+/// under `--web-enabled-approver`. The preview and actions carry device
+/// pre-images, so the preview is tagged as untrusted.
+pub(crate) fn status_view(
+    record: &ChangeSetRecord,
+    include_preview: bool,
+    include_actions: bool,
+) -> serde_json::Value {
+    let mut view = serde_json::json!({
+        "change_set_id": record.id,
+        "device": record.device,
+        "owner": record.owner,
+        "state": record.state.as_str(),
+        "approver": record.approval.as_ref().and_then(|approval| approval.approver.clone()),
+        "approval_waiver": record
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.waived.as_ref())
+            .map(|waiver| waiver.reason.clone()),
+        "expires_at_unix": record.expires_at_unix,
+        "plan_digest": record.digest,
+        "expected_fingerprint": record.expected_candidate_fingerprint,
+        "action_count": record.actions.len(),
+    });
+    let Some(object) = view.as_object_mut() else {
+        return view;
+    };
+    if include_preview && let Some(preview) = record.preview.as_ref() {
+        object.insert(
+            "preview".to_owned(),
+            serde_json::Value::String(
+                mecmcp_redact::Untrusted::new(preview.artifact.as_str())
+                    .render_tagged("get_opnsense_change_set_status.preview"),
+            ),
+        );
+    }
+    if include_actions {
+        object.insert(
+            "actions".to_owned(),
+            serde_json::Value::Array(record.actions.clone()),
+        );
+    }
+    view
+}
+
+/// A page of one device's change sets, latest expiry first.
+///
+/// # Errors
+///
+/// Returns a message when `limit` is outside 1..=200.
+pub(crate) fn list_view(
+    records: Vec<ChangeSetRecord>,
+    device: &str,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(format!(
+            "limit must be between 1 and {MAX_LIST_LIMIT}, got {limit}"
+        ));
+    }
+    let offset = offset.unwrap_or(0) as usize;
+
+    let mut mine: Vec<ChangeSetRecord> = records
+        .into_iter()
+        .filter(|record| record.device == device)
+        .collect();
+    mine.sort_by(|left, right| {
+        right
+            .expires_at_unix
+            .cmp(&left.expires_at_unix)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let total = mine.len();
+    let rows: Vec<serde_json::Value> = mine
+        .iter()
+        .skip(offset)
+        .take(limit as usize)
+        .map(|record| status_view(record, false, false))
+        .collect();
+    let end = offset.saturating_add(rows.len());
+    let next_offset = (end < total).then_some(end);
+
+    Ok(serde_json::json!({
+        "rows": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": next_offset,
+    }))
+}
+
+/// Why `confirm_opnsense_change_set` refuses in this build.
+pub(crate) fn refuse_confirm(device: &str, operation_id: &str) -> String {
+    if let Err(error) = mecmcp_changeset::OperationId::new(operation_id.to_owned()) {
+        return format!("operation_id is not a valid operation id: {error}");
+    }
+    format!(
+        "no commit-confirmed apply is pending for operation {operation_id} on '{device}': this \
+         build applies without a confirm window"
+    )
+}
+
 /// The recorded state and the reported word for an apply outcome.
 ///
 /// Only a clean apply is `Applied`. Every partial or refused outcome is
@@ -474,6 +585,87 @@ mod tests {
         assert!(pre_apply_gate(&planned, &planned.digest, drifted, None).is_err());
         // The caller names the plan's fingerprint, but the device has moved on.
         assert!(check_fingerprint(&planned.expected_candidate_fingerprint, drifted).is_err());
+    }
+
+    #[test]
+    fn status_hides_the_plan_from_a_read_only_caller() {
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let view = status_view(&planned, false, false);
+        assert_eq!(view["plan_digest"], planned.digest.as_str());
+        assert!(view.get("preview").is_none());
+        assert!(view.get("actions").is_none());
+
+        let approver_view = status_view(&planned, true, false);
+        assert!(
+            approver_view["preview"]
+                .as_str()
+                .unwrap()
+                .contains("untrusted-device-content")
+        );
+        assert!(approver_view.get("actions").is_none());
+
+        let web_view = status_view(&planned, true, true);
+        assert!(web_view["actions"].is_array());
+    }
+
+    #[test]
+    fn list_filters_by_device_and_pages() {
+        let mut records = vec![
+            record("alice", "fw-1", ResourceKind::Alias),
+            record("bob", "fw-1", ResourceKind::Rule),
+            record("carol", "fw-2", ResourceKind::Alias),
+        ];
+        records[0].expires_at_unix = 10;
+        records[1].expires_at_unix = 20;
+
+        let page = list_view(records.clone(), "fw-1", Some(1), None).unwrap();
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["rows"][0]["owner"], "bob");
+        assert_eq!(page["next_offset"], 1);
+
+        let second = list_view(records, "fw-1", Some(1), Some(1)).unwrap();
+        assert_eq!(second["rows"][0]["owner"], "alice");
+        assert_eq!(second["next_offset"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn list_limit_is_bounded() {
+        assert!(list_view(Vec::new(), "fw-1", Some(0), None).is_err());
+        assert!(list_view(Vec::new(), "fw-1", Some(201), None).is_err());
+    }
+
+    #[test]
+    fn confirm_refuses_because_no_confirm_window_is_ever_open() {
+        let message = refuse_confirm("fw-1", &"a".repeat(64));
+        assert!(
+            message.contains("no commit-confirmed apply is pending"),
+            "{message}"
+        );
+        let malformed = refuse_confirm("fw-1", "../etc");
+        assert!(malformed.contains("operation_id"), "{malformed}");
+    }
+
+    #[tokio::test]
+    async fn cancel_frees_the_pending_slot() {
+        let coordinator = coordinator(false);
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let id = planned.id.clone();
+        finish_creation(&coordinator, planned).await.unwrap();
+        assert!(
+            ensure_no_pending(&coordinator, "alice", "fw-1")
+                .await
+                .is_err()
+        );
+
+        coordinator
+            .cancel_change_set(id, "fw-1".to_owned(), "alice".to_owned())
+            .await
+            .unwrap();
+        assert!(
+            ensure_no_pending(&coordinator, "alice", "fw-1")
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

@@ -11,8 +11,8 @@ use mecmcp_changeset::{
 };
 use mecmcp_redact::Untrusted;
 use mecmcp_server::{
-    OutputRedaction, ResultFormat, ResultLimits, authorize_call, caller_from_extensions,
-    filter_tools_for_scope, tool_error, tool_result,
+    OutputRedaction, ResultFormat, ResultLimits, authorize_call, authorize_tool,
+    caller_from_extensions, filter_tools_for_scope, tool_error, tool_result,
 };
 use rmcp::{
     RoleServer, ServerHandler,
@@ -1170,28 +1170,31 @@ impl OpnsenseServer {
     }
 
     #[tool(
-        name = "opnsense_get_change_set",
-        description = "Returns the current status and contents of a change set. \
+        name = "get_opnsense_change_set_status",
+        description = "Status of one change set: state, owner, approver or lab-mode waiver, \
+                       expiry, plan_digest and expected_fingerprint. The preview is included \
+                       only for callers allowed to approve, and the raw staged actions only \
+                       when the server runs with --web-enabled-approver. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
                        content is marked as untrusted."
     )]
-    async fn opnsense_get_change_set(
+    async fn get_opnsense_change_set_status(
         &self,
-        Parameters(args): Parameters<changeset::GetChangeSetArgs>,
+        Parameters(args): Parameters<changeset::ChangeSetStatusArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
         if let Err(error) = authorize_call(
             caller.as_ref(),
-            "opnsense_get_change_set",
+            "get_opnsense_change_set_status",
             Some(&args.device),
             WRITE_TOOLS,
         ) {
             return tool_error(error);
         }
-
+        // Retires an expired plan before it is reported.
         if let Err(error) = self
             .coordinator
             .change_set_status(args.change_set_id.clone(), args.device.clone())
@@ -1205,31 +1208,127 @@ impl OpnsenseServer {
                 error.message()
             ));
         }
-
         let record = match self.record_for(&args.change_set_id, &args.device).await {
             Ok(record) => record,
             Err(result) => return *result,
         };
+        let may_approve =
+            authorize_tool(caller.as_ref(), "approve_opnsense_change_set", WRITE_TOOLS).is_ok();
+        let view = lifecycle::status_view(&record, may_approve, self.options.web_enabled_approver);
+        tool_result(
+            Ok::<_, String>(view),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+            OutputRedaction::Apply,
+        )
+    }
 
-        let result = serde_json::json!({
-            "change_set_id": record.id,
-            "device": record.device,
-            "creator": record.owner,
-            "approver": record.approval.as_ref().and_then(|a| a.approver.clone()),
-            "approval_waiver": record
-                .approval
-                .as_ref()
-                .and_then(|a| a.waived.as_ref())
-                .map(|waiver| waiver.kind.as_str()),
-            "state": record.state.as_str(),
-            "mutation_count": record.actions.len(),
-            "expires_at_unix": record.expires_at_unix,
-            "plan_digest": record.digest,
-            "expected_preimage_fingerprint": record.expected_candidate_fingerprint,
-            "preview": record.preview.as_ref().map(|preview| preview.artifact.clone()),
-        });
+    #[tool(
+        name = "list_opnsense_change_sets",
+        description = "Change sets for one device, latest expiry first, one page per call \
+                       (limit 1-200, default 50; offset). Each row is status metadata without \
+                       the preview. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn list_opnsense_change_sets(
+        &self,
+        Parameters(args): Parameters<changeset::ListChangeSetsArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "list_opnsense_change_sets",
+            Some(&args.device),
+            WRITE_TOOLS,
+        ) {
+            return tool_error(error);
+        }
+        let records = self.coordinator.change_sets().await;
+        tool_result(
+            lifecycle::list_view(records, &args.device, args.limit, args.offset),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+            OutputRedaction::Apply,
+        )
+    }
 
-        Self::already_redacted_result("opnsense_get_change_set", result)
+    #[tool(
+        name = "cancel_opnsense_change_set",
+        description = "Cancels a planned or approved change set, freeing its owner's pending \
+                       slot on the device. Only the owner or its approver may cancel; an \
+                       applying or applied change set cannot be cancelled. Nothing on the \
+                       device changes. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn cancel_opnsense_change_set(
+        &self,
+        Parameters(args): Parameters<changeset::CancelChangeSetArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "cancel_opnsense_change_set",
+            Some(&args.device),
+            WRITE_TOOLS,
+        ) {
+            return tool_error(error);
+        }
+        let principal = Self::principal(caller.as_ref());
+        match self
+            .coordinator
+            .cancel_change_set(args.change_set_id.clone(), args.device.clone(), principal)
+            .await
+        {
+            Ok(cancelled) => tool_result(
+                Ok::<_, String>(serde_json::json!({
+                    "change_set_id": cancelled.change_set_id,
+                    "state": cancelled.state.as_str(),
+                })),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+                OutputRedaction::Apply,
+            ),
+            Err(error) => tool_error(format!(
+                "cancel refused ({}): {}",
+                error.field(),
+                error.message()
+            )),
+        }
+    }
+
+    #[tool(
+        name = "confirm_opnsense_change_set",
+        description = "Confirms a commit-confirmed apply so it is not rolled back. This build \
+                       never opens a confirm window (confirm_timeout_mins is refused on \
+                       apply), so every call is refused with the reason. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn confirm_opnsense_change_set(
+        &self,
+        Parameters(args): Parameters<changeset::ConfirmChangeSetArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "confirm_opnsense_change_set",
+            Some(&args.device),
+            WRITE_TOOLS,
+        ) {
+            return tool_error(error);
+        }
+        tool_error(lifecycle::refuse_confirm(&args.device, &args.operation_id))
     }
 }
 
@@ -1478,15 +1577,18 @@ mod tests {
     /// `OutputRedaction::AlreadyRedacted` because the unconditional generic
     /// pass `OutputRedaction::Apply` runs would otherwise be a silent
     /// re-redaction of already-clean data.
-    const ALREADY_REDACTED_TOOLS: &[&str] =
-        &["approve_opnsense_change_set", "opnsense_get_change_set"];
+    const ALREADY_REDACTED_TOOLS: &[&str] = &["approve_opnsense_change_set"];
 
-    /// The two change-set lifecycle tools that carry no caller-controlled
+    /// The change-set lifecycle tools that carry no caller-controlled
     /// free text of their own (ids, digests, counts) and rely on
     /// `tool_result`'s unconditional `OutputRedaction::Apply` pass.
     const APPLY_REDACTED_TOOLS: &[&str] = &[
         "create_opnsense_change_set",
         "apply_opnsense_change_set",
+        "confirm_opnsense_change_set",
+        "cancel_opnsense_change_set",
+        "get_opnsense_change_set_status",
+        "list_opnsense_change_sets",
         "get_device_list",
         "opnsmcp_status",
     ];
@@ -1620,12 +1722,15 @@ mod tests {
         assert!(leaking.is_empty());
     }
 
-    /// The four change-set lifecycle tools are the only mutating surface;
-    /// this is meant to stay visible rather than silently assumed.
+    /// The five change-set lifecycle tools are the only mutating surface;
+    /// this is meant to stay visible rather than silently assumed. Status
+    /// and list are reads, as in rustjunosmcp.
     #[test]
     fn write_tools_covers_the_change_set_lifecycle() {
-        assert_eq!(WRITE_TOOLS.len(), 4);
+        assert_eq!(WRITE_TOOLS.len(), 5);
         assert!(WRITE_TOOLS.contains(&"create_opnsense_change_set"));
+        assert!(!WRITE_TOOLS.contains(&"get_opnsense_change_set_status"));
+        assert!(!WRITE_TOOLS.contains(&"list_opnsense_change_sets"));
     }
 
     /// A stdio caller carries no verified token entry, so its actor type

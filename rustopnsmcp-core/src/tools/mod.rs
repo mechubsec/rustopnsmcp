@@ -36,16 +36,21 @@ pub const TOOL_NAMES: &[&str] = &[
     "create_opnsense_change_set",
     "approve_opnsense_change_set",
     "apply_opnsense_change_set",
-    "opnsense_get_change_set",
+    "confirm_opnsense_change_set",
+    "cancel_opnsense_change_set",
+    "get_opnsense_change_set_status",
+    "list_opnsense_change_sets",
 ];
 
 /// The mutating tools, passed to `mecmcp_server::authorize_call`.
 ///
-/// `opnsense_get_change_set` stays here until Task 14 replaces it with the
-/// read-scope `get_opnsense_change_set_status`.
+/// A wildcard tool scope permits everything except these. Status, list and
+/// the fingerprint are reads, as in rustjunosmcp; cancel changes stored state
+/// and is a write here.
 pub const WRITE_TOOLS: &[&str] = &[
-    "create_opnsense_change_set",
-    "approve_opnsense_change_set",
     "apply_opnsense_change_set",
-    "opnsense_get_change_set",
+    "approve_opnsense_change_set",
+    "cancel_opnsense_change_set",
+    "confirm_opnsense_change_set",
+    "create_opnsense_change_set",
 ];
