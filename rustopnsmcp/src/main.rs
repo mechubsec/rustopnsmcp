@@ -67,7 +67,7 @@ fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<AuditFileSin
         audit_log_file: args.audit_log_file.clone(),
         redaction,
         journald: args.audit_journald,
-        otel: None,
+        otel: otel_config(args.otel_endpoint.clone(), args.otel_service_name.clone()),
     };
 
     match mecmcp_audit::init_tracing(&audit_config) {
@@ -75,6 +75,21 @@ fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<AuditFileSin
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("initializing audit tracing: {e}")),
     }
+}
+
+/// Build the optional `AuditConfig::otel` from `--otel-endpoint` and
+/// `--otel-service-name`.
+///
+/// Kept separate from `init_audit` so this mapping -- `--otel-endpoint` is
+/// honoured, not parsed and dropped -- is unit-testable without constructing
+/// a full `mecmcp_runtime::cli::Cli` or installing a tracing subscriber. A
+/// build without the `otel` feature makes `init_tracing` refuse a non-`None`
+/// value at startup instead of running without the export.
+fn otel_config(endpoint: Option<String>, service_name: String) -> Option<mecmcp_audit::OtelConfig> {
+    endpoint.map(|endpoint| mecmcp_audit::OtelConfig {
+        endpoint,
+        service_name,
+    })
 }
 
 #[tokio::main]
@@ -298,4 +313,25 @@ async fn serve_http(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod otel_config_tests {
+    use super::otel_config;
+
+    #[test]
+    fn no_endpoint_means_otel_export_stays_off() {
+        assert!(otel_config(None, "mecmcp".to_owned()).is_none());
+    }
+
+    #[test]
+    fn an_endpoint_is_carried_through_with_its_service_name() {
+        let config = otel_config(
+            Some("http://127.0.0.1:4318".to_owned()),
+            "rustopnsmcp".to_owned(),
+        )
+        .expect("otel endpoint was set");
+        assert_eq!(config.endpoint, "http://127.0.0.1:4318");
+        assert_eq!(config.service_name, "rustopnsmcp");
+    }
 }

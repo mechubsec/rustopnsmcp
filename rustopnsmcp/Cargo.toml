@@ -31,6 +31,12 @@ tracing-subscriber.workspace = true
 rustls.workspace = true
 uuid.workspace = true
 
+[features]
+# OpenTelemetry export for `--otel-endpoint`. Off by default, as in mecmcp. A
+# build without it refuses `--otel-endpoint` at startup instead of dropping
+# the export.
+otel = ["mecmcp-audit/otel"]
+
 [dev-dependencies]
 rcgen.workspace = true
 tempfile.workspace = true

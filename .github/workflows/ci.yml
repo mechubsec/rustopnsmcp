@@ -47,6 +47,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+      - name: One mecmcp pin
+        run: scripts/check-mecmcp-pin.sh
+
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
 
