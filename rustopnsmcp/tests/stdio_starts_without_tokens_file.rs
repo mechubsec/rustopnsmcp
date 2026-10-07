@@ -139,8 +139,8 @@ fn stdio_starts_when_tokens_file_flag_points_to_a_missing_path() {
     assert!(
         tools
             .iter()
-            .any(|tool| tool.get("name") == Some(&json!("opnsense_system_status"))),
-        "expected opnsense_system_status in the tool catalog: {tools:?}"
+            .any(|tool| tool.get("name") == Some(&json!("get_opnsense_system_status"))),
+        "expected get_opnsense_system_status in the tool catalog: {tools:?}"
     );
 
     assert!(

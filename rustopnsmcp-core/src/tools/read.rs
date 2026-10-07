@@ -79,7 +79,7 @@ fn search_body(args: &SearchArgs) -> serde_json::Value {
     })
 }
 
-/// `opnsense_system_status`: the device's system status.
+/// `get_opnsense_system_status`: the device's system status.
 ///
 /// # Errors
 /// Returns [`OpnsenseError`] on a transport failure, a non-2xx response, or a
@@ -90,7 +90,7 @@ pub async fn system_status(client: &OpnsenseClient) -> Result<serde_json::Value,
     Ok(raw)
 }
 
-/// `opnsense_firmware_status`: installed firmware and available-update status.
+/// `get_opnsense_firmware_status`: installed firmware and available-update status.
 ///
 /// # Errors
 /// As [`system_status`].
@@ -100,7 +100,7 @@ pub async fn firmware_status(client: &OpnsenseClient) -> Result<serde_json::Valu
     Ok(raw)
 }
 
-/// `opnsense_list_interfaces`: the interfaces overview.
+/// `list_opnsense_interfaces`: the interfaces overview.
 ///
 /// # Errors
 /// As [`system_status`].
@@ -110,7 +110,7 @@ pub async fn list_interfaces(client: &OpnsenseClient) -> Result<serde_json::Valu
     Ok(raw)
 }
 
-/// `opnsense_list_gateways`: gateway status.
+/// `list_opnsense_gateways`: gateway status.
 ///
 /// # Errors
 /// As [`system_status`].
@@ -120,7 +120,7 @@ pub async fn list_gateways(client: &OpnsenseClient) -> Result<serde_json::Value,
     Ok(raw)
 }
 
-/// `opnsense_list_firewall_rules`: firewall filter rules, one page.
+/// `list_opnsense_firewall_rules`: firewall filter rules, one page.
 ///
 /// # Errors
 /// Returns [`OpnsenseError`] on a transport failure, a non-2xx response, or a
@@ -137,7 +137,7 @@ pub async fn list_firewall_rules(
     serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
 }
 
-/// `opnsense_list_aliases`: firewall aliases, one page.
+/// `list_opnsense_aliases`: firewall aliases, one page.
 ///
 /// # Errors
 /// As [`list_firewall_rules`].
@@ -153,7 +153,7 @@ pub async fn list_aliases(
     serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
 }
 
-/// `opnsense_list_routes`: static routes, one page.
+/// `list_opnsense_routes`: static routes, one page.
 ///
 /// # Errors
 /// As [`list_firewall_rules`].
@@ -169,7 +169,7 @@ pub async fn list_routes(
     serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
 }
 
-/// `opnsense_list_dhcp_leases`: DHCPv4 leases, one page.
+/// `list_opnsense_dhcp_leases`: DHCPv4 leases, one page.
 ///
 /// # Errors
 /// As [`list_firewall_rules`].
@@ -185,7 +185,7 @@ pub async fn list_dhcp_leases(
     serde_json::to_value(parsed).map_err(|error| OpnsenseError::Malformed(error.to_string()))
 }
 
-/// `opnsense_list_nat_rules`: outbound and 1:1 NAT rules, one page each.
+/// `list_opnsense_nat_rules`: outbound and 1:1 NAT rules, one page each.
 ///
 /// OPNsense splits NAT across two controllers with no combined listing
 /// endpoint, so this tool fetches both and returns them side by side rather
