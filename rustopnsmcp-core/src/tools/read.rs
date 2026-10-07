@@ -46,11 +46,29 @@ pub struct ListArgs {
 /// Upper bound on `limit`.
 const MAX_LIMIT: u32 = 1_000;
 
+/// Upper bound on `offset`. Large enough for any real OPNsense collection;
+/// small enough that `offset / limit + 1` (the device's 1-based page number,
+/// computed in `u32`) can never overflow for any `limit` this module allows.
+const MAX_OFFSET: u32 = 1_000_000;
+
 /// Upper bound on `search_phrase`, in bytes.
 const MAX_SEARCH_PHRASE_BYTES: usize = 256;
 
-/// Default and upper bound for `max_bytes`: the server's device-output cap.
-pub const MAX_BYTES_CEILING: usize = 512 * 1024;
+/// The largest device-output text a result may carry (spec §3.1). The
+/// server's `respond::MAX_DEVICE_TEXT_BYTES` is defined as this constant,
+/// so the two bounds can't drift apart; `rustopnsmcp` cannot be depended on
+/// from here, so the direction runs core -> binary.
+pub const MAX_DEVICE_TEXT_BYTES: usize = 512 * 1024;
+
+/// Default and upper bound for `max_bytes`: headroom under
+/// [`MAX_DEVICE_TEXT_BYTES`] for the page envelope, the NAT wrapper, and
+/// redaction placeholders, which can be longer than the secret they replace.
+///
+/// A page sized to this ceiling is measured the same way it will be
+/// rendered: compact JSON, matching `respond_device`'s compact render. If
+/// the two ever measured differently again, a page that "fits" could still
+/// be refused as oversized.
+pub const MAX_BYTES_CEILING: usize = MAX_DEVICE_TEXT_BYTES - 16 * 1024;
 
 /// Lower bound for `max_bytes`: below this not even one row is useful.
 pub const MIN_MAX_BYTES: usize = 1024;
@@ -96,6 +114,11 @@ pub fn page_request(args: &ListArgs) -> Result<PageRequest, OpnsenseError> {
         )));
     }
     let offset = args.offset.unwrap_or(0);
+    if offset > MAX_OFFSET {
+        return Err(OpnsenseError::Config(format!(
+            "offset must be at most {MAX_OFFSET}, got {offset}"
+        )));
+    }
     if !offset.is_multiple_of(limit) {
         return Err(OpnsenseError::Config(format!(
             "offset must be a multiple of limit ({limit}), got {offset}"
@@ -143,9 +166,20 @@ fn refuse_search_phrase(args: &ListArgs, tool: &str) -> Result<(), OpnsenseError
 }
 
 /// Build a page from one device page of rows, fitting it to `max_bytes`.
+///
+/// `rows` and `total` are device-reported and untrusted: a device can send
+/// more or fewer rows than `limit`, or a `total` inconsistent with what it
+/// actually returned. The page the caller sees never carries more than
+/// `limit` rows, and `next_offset`, when present, is always `offset + limit`
+/// -- a value `page_request` will accept on the caller's next call -- never
+/// a number derived from how many rows the device happened to send.
 #[must_use]
 pub fn page_from(rows: Vec<serde_json::Value>, total: Option<u32>, page: &PageRequest) -> Page {
-    let fetched = rows.len();
+    let limit = page.limit as usize;
+    let full_page = rows.len() >= limit;
+    let mut rows = rows;
+    rows.truncate(limit);
+
     let sizes: Vec<usize> = rows
         .iter()
         .map(|row| serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len()))
@@ -162,19 +196,18 @@ pub fn page_from(rows: Vec<serde_json::Value>, total: Option<u32>, page: &PageRe
     while kept > 0 && array_bytes(kept) > page.max_bytes {
         kept -= 1;
     }
-    let truncated = kept < fetched;
-    let mut rows = rows;
+    let byte_truncated = kept < rows.len();
     rows.truncate(kept);
 
-    let end = page
-        .offset
-        .saturating_add(u32::try_from(fetched).unwrap_or(u32::MAX));
-    let next_offset = match (truncated, total) {
-        (true, _) => None,
-        (false, Some(total)) if end < total => Some(end),
-        (false, Some(_)) => None,
-        (false, None) if fetched == page.limit as usize => Some(end),
-        (false, None) => None,
+    let end = page.offset.saturating_add(page.limit);
+    let next_offset = if byte_truncated || !full_page {
+        None
+    } else {
+        match total {
+            Some(total) if end < total => Some(end),
+            Some(_) => None,
+            None => Some(end),
+        }
     };
 
     Page {
@@ -183,7 +216,7 @@ pub fn page_from(rows: Vec<serde_json::Value>, total: Option<u32>, page: &PageRe
         limit: page.limit,
         offset: page.offset,
         next_offset,
-        truncated_to_fit_max_bytes: truncated,
+        truncated_to_fit_max_bytes: byte_truncated,
     }
 }
 
@@ -424,6 +457,13 @@ mod tests {
     }
 
     #[test]
+    fn an_offset_that_would_overflow_the_devices_page_number_is_refused() {
+        assert!(page_request(&args(Some(1), Some(u32::MAX), None)).is_err());
+        assert!(page_request(&args(Some(1), Some(MAX_OFFSET + 1), None)).is_err());
+        assert!(page_request(&args(Some(1), Some(MAX_OFFSET), None)).is_ok());
+    }
+
+    #[test]
     fn the_search_body_asks_for_the_page_the_offset_names() {
         let list = ListArgs {
             search_phrase: Some("wan".to_owned()),
@@ -442,6 +482,28 @@ mod tests {
         assert_eq!(page_from(rows(2), Some(5), &page).next_offset, Some(2));
         let last = page_request(&args(Some(2), Some(4), None)).unwrap();
         assert_eq!(page_from(rows(1), Some(5), &last).next_offset, None);
+    }
+
+    #[test]
+    fn a_device_that_sends_more_rows_than_limit_is_capped_and_still_pages_cleanly() {
+        let page = page_request(&args(Some(2), Some(0), None)).unwrap();
+        let fitted = page_from(rows(5), None, &page);
+        assert_eq!(fitted.rows.len(), 2, "never more than limit rows");
+        assert_eq!(
+            fitted.next_offset,
+            Some(2),
+            "next_offset must be offset + limit, a value page_request will accept"
+        );
+        assert!(page_request(&args(Some(2), fitted.next_offset, None)).is_ok());
+    }
+
+    #[test]
+    fn a_device_that_undercounts_total_does_not_offer_a_next_offset_past_a_short_page() {
+        // total claims more rows exist than the device actually returned for
+        // this page; a short page is trusted as the end, not the total.
+        let page = page_request(&args(Some(5), Some(0), None)).unwrap();
+        let fitted = page_from(rows(3), Some(100), &page);
+        assert_eq!(fitted.next_offset, None);
     }
 
     #[test]
