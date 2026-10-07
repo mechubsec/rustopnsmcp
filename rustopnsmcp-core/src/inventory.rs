@@ -180,9 +180,88 @@ impl DeviceRegistry {
             .get_device(name)
             .map_err(|_| OpnsenseError::Config(format!("unknown device: {name}")))
     }
+
+    /// Add a device to `devices.json` and reload.
+    ///
+    /// The file is rewritten through a same-directory temporary created
+    /// `0600` with `O_EXCL`, fsynced and renamed into place, so it keeps the
+    /// mode the hardened loader requires. Only the canonical
+    /// `{"version": 1, "devices": {...}}` shape is edited; any other shape is
+    /// refused rather than rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OpnsenseError`] for an invalid name or device, a duplicate
+    /// name, a non-canonical file, or any I/O failure.
+    pub fn add_device(&self, name: &str, device: Device) -> Result<usize, OpnsenseError> {
+        mecmcp_inventory::validate_device_name(name)
+            .map_err(|error| OpnsenseError::Config(error.to_string()))?;
+        device.validate()?;
+        if self.inner.get_device(name).is_ok() {
+            return Err(OpnsenseError::Config(format!(
+                "device {name} already exists"
+            )));
+        }
+
+        let path = self.inner.source();
+        let bytes = mecmcp_secret::read_hardened_file(&path, mecmcp_secret::FileLimits::default())?;
+        let mut document: serde_json::Value = serde_json::from_slice(bytes.expose())
+            .map_err(|error| OpnsenseError::Malformed(format!("devices.json: {error}")))?;
+        let Some(devices) = document
+            .get_mut("devices")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Err(OpnsenseError::Config(
+                "devices.json is not in the canonical {\"version\": 1, \"devices\": {...}} \
+                 shape; add the device by hand"
+                    .to_owned(),
+            ));
+        };
+        let entry = serde_json::to_value(&device)
+            .map_err(|error| OpnsenseError::Malformed(error.to_string()))?;
+        devices.insert(name.to_owned(), entry);
+
+        write_owner_only(&path, &document)?;
+        Ok(self.inner.reload()?)
+    }
+}
+
+/// Replace `path` with `document`, keeping it `0600`.
+fn write_owner_only(path: &Path, document: &serde_json::Value) -> Result<(), OpnsenseError> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let io = |what: &str, error: std::io::Error| {
+        OpnsenseError::Config(format!("{what} {}: {error}", path.display()))
+    };
+    let parent = path.parent().ok_or_else(|| {
+        OpnsenseError::Config(format!("{} has no parent directory", path.display()))
+    })?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let temporary = parent.join(format!(".devices-{}-{nanos}.tmp", std::process::id()));
+
+    let bytes = serde_json::to_vec_pretty(document)
+        .map_err(|error| OpnsenseError::Malformed(error.to_string()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|error| io("cannot write next to", error))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| io("cannot write next to", error))?;
+    drop(file);
+    std::fs::rename(&temporary, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        io("cannot replace", error)
+    })
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::Device;
 
@@ -338,5 +417,71 @@ mod tests {
             "the example inventory must load cleanly: {:?}",
             result.err()
         );
+    }
+
+    fn canonical_inventory(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join("devices.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"devices":{"fw-1":{"endpoint":"https://fw-1.example.org","api_key_env":"K1","api_secret_env":"S1"}}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+
+    fn new_device(endpoint: &str) -> Device {
+        serde_json::from_value(serde_json::json!({
+            "endpoint": endpoint,
+            "api_key_env": "K2",
+            "api_secret_env": "S2",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn add_device_persists_owner_only_and_reloads() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_inventory(&dir);
+        let registry = super::DeviceRegistry::load(&path).unwrap();
+
+        let count = registry
+            .add_device("fw-2", new_device("https://fw-2.example.org"))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert!(registry.get("fw-2").is_ok());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(
+            super::DeviceRegistry::load(&path)
+                .unwrap()
+                .get("fw-2")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn add_device_refuses_a_duplicate_a_bad_name_and_a_plaintext_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = super::DeviceRegistry::load(canonical_inventory(&dir)).unwrap();
+        assert!(
+            registry
+                .add_device("fw-1", new_device("https://x.example.org"))
+                .is_err()
+        );
+        assert!(
+            registry
+                .add_device("../fw", new_device("https://x.example.org"))
+                .is_err()
+        );
+        assert!(
+            registry
+                .add_device("fw-3", new_device("http://x.example.org"))
+                .is_err()
+        );
+        assert_eq!(registry.names(), vec!["fw-1".to_owned()]);
     }
 }

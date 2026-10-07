@@ -99,11 +99,11 @@ pub struct OpnsenseServer {
     clients: Arc<std::sync::RwLock<BTreeMap<String, OpnsenseClient>>>,
     /// Operator choices from the command line.
     ///
-    /// `web_enabled_approver`, `inventory_readonly`, and `direct_commit` are
-    /// not yet read by any handler (Tasks 14-17 wire them in); `lab_mode`
-    /// was the only field read here, and Task 12 removed it from this
-    /// struct now that the coordinator is its sole holder.
-    #[allow(dead_code)]
+    /// `inventory_readonly` gates `add_device` and `reload_devices` (Task
+    /// 16). `web_enabled_approver` and `direct_commit` are not yet read by
+    /// any handler (Tasks 14 and 17 wire them in); `lab_mode` was the only
+    /// field read here, and Task 12 removed it from this struct now that the
+    /// coordinator is its sole holder.
     options: ServerOptions,
     /// The change-set lifecycle.
     ///
@@ -411,6 +411,17 @@ impl OpnsenseServer {
                 .as_secs(),
         })
     }
+
+    /// Refuse an inventory write under `--inventory-readonly`.
+    pub(crate) fn refuse_readonly(&self, tool: &str) -> Result<(), Box<CallToolResult>> {
+        if !self.options.inventory_readonly {
+            return Ok(());
+        }
+        Err(Box::new(tool_error(format!(
+            "{tool} is refused: the inventory is read-only (--inventory-readonly). Edit \
+             devices.json and send SIGHUP."
+        ))))
+    }
 }
 
 #[tool_router(router = opns_tool_router, vis = "pub(crate)")]
@@ -496,6 +507,88 @@ impl OpnsenseServer {
             RESULT_LIMITS,
             OutputRedaction::Apply,
         )
+    }
+
+    #[tool(
+        name = "add_device",
+        description = "Adds an OPNsense device to devices.json and reloads the inventory. \
+                       The API key and secret are referenced by environment variable or \
+                       owner-only file path, never passed inline. Refused when the server \
+                       runs with --inventory-readonly. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn add_device(
+        &self,
+        Parameters(args): Parameters<fleet::AddDeviceArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "add_device",
+            Some(&args.device),
+            WRITE_TOOLS,
+        ) {
+            return tool_error(error);
+        }
+        if let Err(refused) = self.refuse_readonly("add_device") {
+            return *refused;
+        }
+        let (name, device) = args.into_device();
+        let count = match self.registry.add_device(&name, device) {
+            Ok(count) => count,
+            Err(error) => return tool_error(error),
+        };
+        if let Err(error) = self.rebuild_clients() {
+            return tool_error(format!(
+                "{name} was added to devices.json, but the clients could not be rebuilt: {error}"
+            ));
+        }
+        tool_result(
+            Ok::<_, String>(serde_json::json!({ "added": name, "devices": count })),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+            OutputRedaction::Apply,
+        )
+    }
+
+    #[tool(
+        name = "reload_devices",
+        description = "Re-reads devices.json and rebuilds every device client, as SIGHUP \
+                       does. Refused when the server runs with --inventory-readonly. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn reload_devices(
+        &self,
+        Parameters(_): Parameters<fleet::EmptyArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "reload_devices", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        if let Err(refused) = self.refuse_readonly("reload_devices") {
+            return *refused;
+        }
+        let devices = match self.registry.reload() {
+            Ok(count) => count,
+            Err(error) => return tool_error(format!("inventory reload failed: {error}")),
+        };
+        match self.rebuild_clients() {
+            Ok(clients) => tool_result(
+                Ok::<_, String>(serde_json::json!({ "devices": devices, "clients": clients })),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+                OutputRedaction::Apply,
+            ),
+            Err(error) => tool_error(format!("client rebuild failed: {error}")),
+        }
     }
 
     #[tool(
@@ -1591,6 +1684,8 @@ mod tests {
         "list_opnsense_change_sets",
         "get_device_list",
         "opnsmcp_status",
+        "add_device",
+        "reload_devices",
     ];
 
     /// Every registered tool must be accounted for by exactly one of the
@@ -1722,15 +1817,18 @@ mod tests {
         assert!(leaking.is_empty());
     }
 
-    /// The five change-set lifecycle tools are the only mutating surface;
-    /// this is meant to stay visible rather than silently assumed. Status
-    /// and list are reads, as in rustjunosmcp.
+    /// The five change-set lifecycle tools plus the two inventory-write
+    /// tools are the only mutating surface; this is meant to stay visible
+    /// rather than silently assumed. Status and list are reads, as in
+    /// rustjunosmcp.
     #[test]
     fn write_tools_covers_the_change_set_lifecycle() {
-        assert_eq!(WRITE_TOOLS.len(), 5);
+        assert_eq!(WRITE_TOOLS.len(), 7);
         assert!(WRITE_TOOLS.contains(&"create_opnsense_change_set"));
         assert!(!WRITE_TOOLS.contains(&"get_opnsense_change_set_status"));
         assert!(!WRITE_TOOLS.contains(&"list_opnsense_change_sets"));
+        assert!(WRITE_TOOLS.contains(&"add_device"));
+        assert!(WRITE_TOOLS.contains(&"reload_devices"));
     }
 
     /// A stdio caller carries no verified token entry, so its actor type
@@ -1935,5 +2033,33 @@ mod tests {
 
         assert!(coordinator.change_set(&id, "home").await.is_ok());
         assert!(coordinator.change_set(&id, "office").await.is_err());
+    }
+
+    /// `--inventory-readonly` must refuse both inventory-write tools, since
+    /// the shipped unit's `ProtectSystem=strict` keeps `/etc/rustopnsmcp`
+    /// read-only to the service and these tools would otherwise fail with a
+    /// confusing I/O error instead of a clear refusal.
+    #[test]
+    fn inventory_writes_are_refused_under_inventory_readonly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        std::fs::write(&path, r#"{"version":1,"devices":{}}"#).expect("write");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &path,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .expect("chmod");
+        let server = OpnsenseServer::new(
+            Arc::new(DeviceRegistry::load(&path).expect("load")),
+            ServerOptions {
+                inventory_readonly: true,
+                ..ServerOptions::default()
+            },
+            coordinator_at(None),
+        )
+        .expect("server");
+        assert!(server.refuse_readonly("add_device").is_err());
+        assert!(server.refuse_readonly("reload_devices").is_err());
     }
 }
