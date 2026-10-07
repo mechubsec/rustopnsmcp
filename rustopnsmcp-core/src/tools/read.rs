@@ -36,7 +36,7 @@ pub struct ListArgs {
     /// page number. Defaults to 0.
     #[serde(default)]
     pub offset: Option<u32>,
-    /// Upper bound, in bytes, on the page's serialized rows: 1024 to 524288.
+    /// Upper bound, in bytes, on the page's serialized rows: 1024 to 507904.
     /// Rows past the bound are dropped from the end and the result says
     /// `truncated_to_fit_max_bytes: true`.
     #[serde(default)]
@@ -337,7 +337,40 @@ pub async fn list_gateways(
     to_json(&page_slice(items.clone(), &page))
 }
 
+/// Whether a firewall-rule listing includes legacy GUI rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleCoverage {
+    /// 25.1 or later: MVC and legacy GUI rules.
+    Complete,
+    /// Before 25.1: MVC/automation rules only; GUI rules are missing.
+    MvcOnly,
+    /// The version could not be read; completeness is not claimed.
+    Unknown,
+}
+
+/// Classify a firmware `product_version` such as `26.7.1` or `24.7.12_4`.
+#[must_use]
+pub fn rule_listing_coverage(product_version: Option<&str>) -> RuleCoverage {
+    let Some(version) = product_version else {
+        return RuleCoverage::Unknown;
+    };
+    let mut parts = version.split(['.', '_']);
+    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+    match (major, minor) {
+        (Some(major), Some(minor)) if (major, minor) >= (25, 1) => RuleCoverage::Complete,
+        (Some(_), Some(_)) => RuleCoverage::MvcOnly,
+        _ => RuleCoverage::Unknown,
+    }
+}
+
 /// `list_opnsense_firewall_rules`: firewall filter rules, one page.
+///
+/// `search_rule` merges legacy GUI rules into its result only from OPNsense
+/// 25.1 on. The result's `coverage` field says whether this listing is
+/// complete, mvc_only (legacy GUI rules are missing), or unknown, so a
+/// caller never has to trust a device version it was not told.
 ///
 /// # Errors
 /// Returns [`OpnsenseError`] on a transport failure, a non-2xx response, or a
@@ -347,7 +380,33 @@ pub async fn list_firewall_rules(
     args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
     let page = page_request(args)?;
-    to_json(&search_page(client, endpoints::FIREWALL_RULES_SEARCH, args, &page).await?)
+    let listed = search_page(client, endpoints::FIREWALL_RULES_SEARCH, args, &page).await?;
+    // Read, not assumed: the same call on 24.7 and on 25.1 returns different
+    // sets of rules, and the result must say which it is. A failed firmware
+    // read is recorded as Unknown coverage and does not fail the listing.
+    let product_version = client
+        .get(endpoints::FIRMWARE_STATUS)
+        .await
+        .ok()
+        .and_then(|firmware| {
+            firmware
+                .pointer("/product/product_version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    let mut result = to_json(&listed)?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert(
+            "coverage".to_owned(),
+            serde_json::to_value(rule_listing_coverage(product_version.as_deref()))
+                .map_err(|error| OpnsenseError::Malformed(error.to_string()))?,
+        );
+        object.insert(
+            "product_version".to_owned(),
+            product_version.map_or(serde_json::Value::Null, serde_json::Value::String),
+        );
+    }
+    Ok(result)
 }
 
 /// `list_opnsense_aliases`: firewall aliases, one page.
@@ -532,5 +591,27 @@ mod tests {
             ..args(None, None, None)
         };
         assert!(page_request(&too_long).is_err());
+    }
+
+    #[test]
+    fn rule_listing_coverage_reports_mvc_only_below_25_1() {
+        assert_eq!(rule_listing_coverage(Some("24.7")), RuleCoverage::MvcOnly);
+        assert_eq!(
+            rule_listing_coverage(Some("24.7.12_4")),
+            RuleCoverage::MvcOnly
+        );
+        assert_eq!(rule_listing_coverage(Some("25.1")), RuleCoverage::Complete);
+        assert_eq!(
+            rule_listing_coverage(Some("26.7.1")),
+            RuleCoverage::Complete
+        );
+    }
+
+    #[test]
+    fn an_unparseable_version_is_reported_as_unknown_not_complete() {
+        assert_eq!(rule_listing_coverage(None), RuleCoverage::Unknown);
+        assert_eq!(rule_listing_coverage(Some("")), RuleCoverage::Unknown);
+        assert_eq!(rule_listing_coverage(Some("next")), RuleCoverage::Unknown);
+        assert_eq!(rule_listing_coverage(Some("25")), RuleCoverage::Unknown);
     }
 }
