@@ -400,6 +400,9 @@ async fn list_firewall_rules_parses_the_search_envelope() {
         .expect("list firewall rules");
     assert_eq!(rules["total"], 2);
     assert_eq!(rules["rows"].as_array().expect("rows array").len(), 2);
+    // The firmware fixture reports 24.7, which predates legacy-rule merging.
+    assert_eq!(rules["coverage"], "mvc_only");
+    assert_eq!(rules["product_version"], "24.7");
 }
 
 #[tokio::test]

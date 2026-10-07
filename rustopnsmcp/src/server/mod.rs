@@ -617,7 +617,7 @@ impl OpnsenseServer {
         name = "list_opnsense_interfaces",
         description = "OPNsense interfaces overview. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -643,7 +643,7 @@ impl OpnsenseServer {
         name = "list_opnsense_gateways",
         description = "OPNsense gateway status. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -668,11 +668,11 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_firewall_rules",
         description = "OPNsense firewall filter rules, optionally filtered by search_phrase. \
-                       Legacy GUI rules are included only on OPNsense 25.1 and later; on 24.7 \
-                       and earlier this returns only MVC/automation rules and may be \
-                       incomplete. \
+                       The result's coverage field is read from the firmware version: \
+                       complete on 25.1 and later, mvc_only before 25.1 (legacy GUI rules are \
+                       missing), unknown if the version could not be read. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -698,7 +698,7 @@ impl OpnsenseServer {
         name = "list_opnsense_aliases",
         description = "OPNsense firewall aliases, optionally filtered by search_phrase. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -725,7 +725,7 @@ impl OpnsenseServer {
         description = "OPNsense outbound and 1:1 NAT rules, side by side. Port forwards \
                        (destination NAT) are NOT included. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -751,7 +751,7 @@ impl OpnsenseServer {
         name = "list_opnsense_routes",
         description = "OPNsense static routes, optionally filtered by search_phrase. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -778,7 +778,7 @@ impl OpnsenseServer {
         description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. ISC \
                        DHCPv4 only; Kea and Dnsmasq leases are NOT covered. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
-                       limit), and max_bytes (1024-524288) bound the result; next_offset is \
+                       limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
@@ -1663,6 +1663,29 @@ mod tests {
                 "{} does not state the redaction contract: {description}",
                 tool.name
             );
+        }
+    }
+
+    /// The published max_bytes range must match the ceiling `page_request`
+    /// actually enforces, or a model that follows the description gets
+    /// refused on its first call.
+    #[test]
+    fn list_tool_descriptions_state_the_real_max_bytes_range() {
+        let expected = format!(
+            "max_bytes ({}-{})",
+            rustopnsmcp_core::tools::read::MIN_MAX_BYTES,
+            rustopnsmcp_core::tools::read::MAX_BYTES_CEILING
+        );
+        let router = OpnsenseServer::opns_tool_router();
+        for tool in router.list_all() {
+            let description = tool.description.as_deref().unwrap_or_default();
+            if description.contains("max_bytes") {
+                assert!(
+                    description.contains(&expected),
+                    "{} does not state the real max_bytes range ({expected}): {description}",
+                    tool.name
+                );
+            }
         }
     }
 
