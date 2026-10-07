@@ -1,6 +1,7 @@
 //! The MCP server handler.
 
 mod audit;
+mod respond;
 
 use mecmcp_auth::NoGrant;
 use mecmcp_changeset::{
@@ -215,6 +216,29 @@ impl OpnsenseServer {
             .get(device)
             .cloned()
             .ok_or_else(|| Box::new(tool_error(format!("unknown device: {device}"))))
+    }
+
+    /// The shared body of every device read: scope, client, read, respond.
+    async fn read_device<F, Fut>(
+        &self,
+        context: &RequestContext<RoleServer>,
+        tool: &'static str,
+        device: &str,
+        read: F,
+    ) -> CallToolResult
+    where
+        F: FnOnce(OpnsenseClient) -> Fut,
+        Fut: std::future::Future<Output = Result<serde_json::Value, OpnsenseError>>,
+    {
+        let caller = Self::caller(context);
+        if let Err(error) = authorize_call(caller.as_ref(), tool, Some(device), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        let client = match self.client_for(device) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+        respond::respond_device(tool, read(client).await)
     }
 
     /// Recover the caller from the request context.
@@ -544,259 +568,221 @@ impl OpnsenseServer {
 #[tool_router(router = opns_tool_router, vis = "pub(crate)")]
 impl OpnsenseServer {
     #[tool(
-        name = "opnsense_system_status",
-        description = "OPNsense system status"
+        name = "get_opnsense_system_status",
+        description = "OPNsense system status: product version, uptime, CPU and load. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_system_status(
+    async fn get_opnsense_system_status(
         &self,
         Parameters(args): Parameters<read::DeviceArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_system_status",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond("opnsense_system_status", read::system_status(&client).await)
+        self.read_device(
+            &context,
+            "get_opnsense_system_status",
+            &args.device,
+            |client| async move { read::system_status(&client).await },
+        )
+        .await
     }
 
     #[tool(
-        name = "opnsense_firmware_status",
-        description = "OPNsense installed firmware and available-update status"
+        name = "get_opnsense_firmware_status",
+        description = "OPNsense installed firmware version and available-update status. \
+                       Read-only: never asks the device to probe its update mirror. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_firmware_status(
+    async fn get_opnsense_firmware_status(
         &self,
         Parameters(args): Parameters<read::DeviceArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_firmware_status",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_firmware_status",
-            read::firmware_status(&client).await,
+        self.read_device(
+            &context,
+            "get_opnsense_firmware_status",
+            &args.device,
+            |client| async move { read::firmware_status(&client).await },
         )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_interfaces",
-        description = "OPNsense interfaces overview"
+        name = "list_opnsense_interfaces",
+        description = "OPNsense interfaces overview. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_interfaces(
+    async fn list_opnsense_interfaces(
         &self,
         Parameters(args): Parameters<read::DeviceArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_interfaces",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_list_interfaces",
-            read::list_interfaces(&client).await,
+        self.read_device(
+            &context,
+            "list_opnsense_interfaces",
+            &args.device,
+            |client| async move { read::list_interfaces(&client).await },
         )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_gateways",
-        description = "OPNsense gateway status"
+        name = "list_opnsense_gateways",
+        description = "OPNsense gateway status. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_gateways(
+    async fn list_opnsense_gateways(
         &self,
         Parameters(args): Parameters<read::DeviceArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_gateways",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond("opnsense_list_gateways", read::list_gateways(&client).await)
+        self.read_device(
+            &context,
+            "list_opnsense_gateways",
+            &args.device,
+            |client| async move { read::list_gateways(&client).await },
+        )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_firewall_rules",
-        description = "OPNsense firewall filter rules, one page, optionally filtered by \
-                        search_phrase. Legacy GUI rules are included only on OPNsense 25.1 \
-                        and later; on 24.7 and earlier this returns only MVC/automation rules \
-                        and may be incomplete."
+        name = "list_opnsense_firewall_rules",
+        description = "OPNsense firewall filter rules, optionally filtered by search_phrase. \
+                       Legacy GUI rules are included only on OPNsense 25.1 and later; on 24.7 \
+                       and earlier this returns only MVC/automation rules and may be \
+                       incomplete. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_firewall_rules(
+    async fn list_opnsense_firewall_rules(
         &self,
         Parameters(args): Parameters<read::SearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_firewall_rules",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_list_firewall_rules",
-            read::list_firewall_rules(&client, &args).await,
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "list_opnsense_firewall_rules",
+            &device,
+            move |client| async move { read::list_firewall_rules(&client, &args).await },
         )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_aliases",
-        description = "OPNsense firewall aliases, one page, optionally filtered by search_phrase"
+        name = "list_opnsense_aliases",
+        description = "OPNsense firewall aliases, optionally filtered by search_phrase. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_aliases(
+    async fn list_opnsense_aliases(
         &self,
         Parameters(args): Parameters<read::SearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_aliases",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_list_aliases",
-            read::list_aliases(&client, &args).await,
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "list_opnsense_aliases",
+            &device,
+            move |client| async move { read::list_aliases(&client, &args).await },
         )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_nat_rules",
-        description = "OPNsense outbound and 1:1 NAT rules, one page each. Port forwards \
-                        (destination NAT) are NOT included."
+        name = "list_opnsense_nat_rules",
+        description = "OPNsense outbound and 1:1 NAT rules, side by side. Port forwards \
+                       (destination NAT) are NOT included. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_nat_rules(
+    async fn list_opnsense_nat_rules(
         &self,
         Parameters(args): Parameters<read::SearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_nat_rules",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_list_nat_rules",
-            read::list_nat_rules(&client, &args).await,
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "list_opnsense_nat_rules",
+            &device,
+            move |client| async move { read::list_nat_rules(&client, &args).await },
         )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_routes",
-        description = "OPNsense static routes, one page, optionally filtered by search_phrase"
+        name = "list_opnsense_routes",
+        description = "OPNsense static routes, optionally filtered by search_phrase. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_routes(
+    async fn list_opnsense_routes(
         &self,
         Parameters(args): Parameters<read::SearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_routes",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_list_routes",
-            read::list_routes(&client, &args).await,
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "list_opnsense_routes",
+            &device,
+            move |client| async move { read::list_routes(&client, &args).await },
         )
+        .await
     }
 
     #[tool(
-        name = "opnsense_list_dhcp_leases",
-        description = "OPNsense DHCPv4 leases, one page, optionally filtered by search_phrase. \
-                        ISC DHCPv4 only; Kea and Dnsmasq leases are NOT covered."
+        name = "list_opnsense_dhcp_leases",
+        description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. ISC \
+                       DHCPv4 only; Kea and Dnsmasq leases are NOT covered. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
-    async fn opnsense_list_dhcp_leases(
+    async fn list_opnsense_dhcp_leases(
         &self,
         Parameters(args): Parameters<read::SearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "opnsense_list_dhcp_leases",
-            Some(&args.device),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-        let client = match self.client_for(&args.device) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-        Self::respond(
-            "opnsense_list_dhcp_leases",
-            read::list_dhcp_leases(&client, &args).await,
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "list_opnsense_dhcp_leases",
+            &device,
+            move |client| async move { read::list_dhcp_leases(&client, &args).await },
         )
+        .await
     }
 
     #[tool(
         name = "opnsense_create_change_set",
-        description = "Creates a new change set for firewall alias or filter rule writes"
+        description = "Creates a new change set for firewall alias or filter rule writes. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_create_change_set(
         &self,
@@ -873,7 +859,11 @@ impl OpnsenseServer {
     #[tool(
         name = "opnsense_stage_change",
         description = "Stages one or more alias or filter rule changes into an existing change \
-                       set; all mutations in one change set must target the same resource kind"
+                       set; all mutations in one change set must target the same resource kind. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_stage_change(
         &self,
@@ -1046,7 +1036,11 @@ impl OpnsenseServer {
 
     #[tool(
         name = "opnsense_diff_change_set",
-        description = "Returns a diff showing what applying the change set would do"
+        description = "Returns a diff showing what applying the change set would do. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_diff_change_set(
         &self,
@@ -1089,7 +1083,11 @@ impl OpnsenseServer {
 
     #[tool(
         name = "opnsense_validate_change_set",
-        description = "Validates the change set as far as possible without applying it"
+        description = "Validates the change set as far as possible without applying it. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_validate_change_set(
         &self,
@@ -1148,7 +1146,11 @@ impl OpnsenseServer {
         description = "Approves a change set for apply. Two-person control: the creating \
                        token cannot approve its own set unless lab mode waives it, and a \
                        waiver is recorded as a waiver rather than as an approval. Pass \
-                       expected_digest to bind the approval to the plan you read."
+                       expected_digest to bind the approval to the plan you read. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_approve_change_set(
         &self,
@@ -1262,7 +1264,11 @@ impl OpnsenseServer {
     #[tool(
         name = "opnsense_apply_change_set",
         description = "Applies the staged alias or filter rule writes as a sequence of \
-                       independent REST calls, then loads them with reconfigure/apply"
+                       independent REST calls, then loads them with reconfigure/apply. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_apply_change_set(
         &self,
@@ -1418,7 +1424,11 @@ impl OpnsenseServer {
 
     #[tool(
         name = "opnsense_get_change_set",
-        description = "Returns the current status and contents of a change set"
+        description = "Returns the current status and contents of a change set. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
     )]
     async fn opnsense_get_change_set(
         &self,
@@ -1494,32 +1504,15 @@ impl OpnsenseServer {
 }
 
 impl OpnsenseServer {
-    /// Turn a tool result into a `CallToolResult`, redacting secret-shaped
-    /// values in the JSON body first.
-    ///
-    /// This runs for every read tool, unconditionally — a device response
-    /// carries whatever it carries, and this is the one place a VPN PSK or an
-    /// embedded credential in a description field is scrubbed before it
-    /// reaches the caller.
-    fn respond(
-        tool: &'static str,
-        result: Result<serde_json::Value, OpnsenseError>,
-    ) -> CallToolResult {
-        match result {
-            Ok(json) => Self::already_redacted_result(tool, json),
-            Err(error) => tool_error(error),
-        }
-    }
-
     /// Redact `value` with [`OPNSENSE_PROFILE`] and wrap it as a tool result
     /// tagged `OutputRedaction::AlreadyRedacted`.
     ///
     /// This is the single call site every `AlreadyRedacted`-tagged tool
-    /// result goes through — `respond` above, and each change-set tool that
-    /// redacts inline before returning its own result shape. Routing every
-    /// one of them through the same function is what lets a unit test
-    /// exercise the exact code the handlers run: if a future edit dropped
-    /// the redaction call from here, every caller — and the test — would
+    /// result goes through — each change-set tool that redacts inline
+    /// before returning its own result shape. Routing every one of them
+    /// through the same function is what lets a unit test exercise the
+    /// exact code the handlers run: if a future edit dropped the
+    /// redaction call from here, every caller — and the test — would
     /// fail together, rather than a handler drifting from a copy of this
     /// logic the test never touches.
     fn already_redacted_result(tool: &'static str, mut value: serde_json::Value) -> CallToolResult {
@@ -1616,6 +1609,32 @@ mod tests {
         );
     }
 
+    /// Spec §3.1: every tool description states its redaction contract.
+    #[test]
+    fn every_tool_description_states_the_redaction_contract() {
+        let router = OpnsenseServer::opns_tool_router();
+        for tool in router.list_all() {
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(
+                description.contains(rustopnsmcp_core::tools::REDACTION_CONTRACT),
+                "{} does not state the redaction contract: {description}",
+                tool.name
+            );
+        }
+    }
+
+    /// Spec §3.1: reads are `list_opnsense_*` or `get_opnsense_*`; the old
+    /// `opnsense_*` prefix does not survive.
+    #[test]
+    fn no_tool_keeps_the_old_opnsense_prefix_for_reads() {
+        for name in rustopnsmcp_core::tools::TOOL_NAMES {
+            let is_old_read = name.starts_with("opnsense_")
+                && !name.ends_with("_change_set")
+                && *name != "opnsense_stage_change";
+            assert!(!is_old_read, "{name} still uses the pre-v1 read prefix");
+        }
+    }
+
     /// The only content a result carries, so a test can assert on it.
     fn text_of(result: &CallToolResult) -> String {
         result
@@ -1625,18 +1644,18 @@ mod tests {
             .collect()
     }
 
-    /// The nine read tools, all redacted through the shared [`OpnsenseServer::respond`]
-    /// path with [`OPNSENSE_PROFILE`].
+    /// The nine read tools, all redacted through the shared
+    /// [`respond::respond_device`] path with [`OPNSENSE_PROFILE`].
     const RESPOND_REDACTED_TOOLS: &[&str] = &[
-        "opnsense_system_status",
-        "opnsense_firmware_status",
-        "opnsense_list_interfaces",
-        "opnsense_list_gateways",
-        "opnsense_list_firewall_rules",
-        "opnsense_list_aliases",
-        "opnsense_list_nat_rules",
-        "opnsense_list_routes",
-        "opnsense_list_dhcp_leases",
+        "get_opnsense_system_status",
+        "get_opnsense_firmware_status",
+        "list_opnsense_interfaces",
+        "list_opnsense_gateways",
+        "list_opnsense_firewall_rules",
+        "list_opnsense_aliases",
+        "list_opnsense_nat_rules",
+        "list_opnsense_routes",
+        "list_opnsense_dhcp_leases",
     ];
 
     /// The three read-shaped change-set tools that redact their own result
@@ -1713,9 +1732,9 @@ mod tests {
             RESPOND_REDACTED_TOOLS,
             &secret_refs,
             |tool| {
-                // `respond` takes `tool: &'static str`; look the caller's
-                // borrowed name back up in the `'static` registry instead of
-                // leaking a fresh allocation per call.
+                // `respond_device` takes `tool: &'static str`; look the
+                // caller's borrowed name back up in the `'static` registry
+                // instead of leaking a fresh allocation per call.
                 let static_name = RESPOND_REDACTED_TOOLS
                     .iter()
                     .copied()
@@ -1730,7 +1749,7 @@ mod tests {
                     "description": format!("rollout notes: password={secret}"),
                     "note": "unrelated clean field",
                 });
-                let result = OpnsenseServer::respond(static_name, Ok(value));
+                let result = respond::respond_device(static_name, Ok(value));
                 text_of(&result)
             },
         );

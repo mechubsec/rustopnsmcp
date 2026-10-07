@@ -1,26 +1,33 @@
 //! The MCP tool surface.
 //!
-//! Phase 1 covered nine read tools, one per resource. Phase 2a adds seven
-//! change-set lifecycle tools that govern writes to firewall aliases;
-//! firewall rules follow in a later phase.
+//! Reads follow the mechub convention: `list_opnsense_<noun>` for
+//! collections and `get_opnsense_<noun>` for single objects or status (spec
+//! §3.1). Change-set tools govern writes to firewall aliases and filter rules.
 
 pub mod changeset;
 pub mod read;
+
+/// The sentence every tool description carries (spec §3.1: "Every tool
+/// description states its redaction contract").
+pub const REDACTION_CONTRACT: &str = "Output is redacted: values matching known secret \
+    patterns (API keys and secrets, pre-shared keys, private keys, certificates, password \
+    hashes) are replaced before being returned, and device-sourced content is marked as \
+    untrusted.";
 
 /// Every tool this server registers.
 ///
 /// Kept in one place so `filter_tools_for_scope` and the registry guard read
 /// the same list.
 pub const TOOL_NAMES: &[&str] = &[
-    "opnsense_system_status",
-    "opnsense_firmware_status",
-    "opnsense_list_interfaces",
-    "opnsense_list_firewall_rules",
-    "opnsense_list_aliases",
-    "opnsense_list_nat_rules",
-    "opnsense_list_routes",
-    "opnsense_list_gateways",
-    "opnsense_list_dhcp_leases",
+    "get_opnsense_system_status",
+    "get_opnsense_firmware_status",
+    "list_opnsense_interfaces",
+    "list_opnsense_firewall_rules",
+    "list_opnsense_aliases",
+    "list_opnsense_nat_rules",
+    "list_opnsense_routes",
+    "list_opnsense_gateways",
+    "list_opnsense_dhcp_leases",
     "opnsense_create_change_set",
     "opnsense_stage_change",
     "opnsense_diff_change_set",
