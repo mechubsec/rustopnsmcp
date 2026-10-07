@@ -18,7 +18,7 @@ pub const VOLATILE_FIELDS: &[&str] = &["current_items", "last_updated"];
 ///
 /// Returns the transport or shape error of either listing, and
 /// [`OpnsenseError::Malformed`] when a listing's rows fall short of its
-/// `total`.
+/// `total`, or when the device reports no `total` at all.
 pub async fn config_fingerprint(client: &OpnsenseClient) -> Result<String, OpnsenseError> {
     let aliases = whole_collection(client, endpoints::ALIASES_SEARCH).await?;
     let rules = whole_collection(client, endpoints::FIREWALL_RULES_SEARCH).await?;
@@ -28,7 +28,9 @@ pub async fn config_fingerprint(client: &OpnsenseClient) -> Result<String, Opnse
 /// Fetch every row of a `search_*` collection in one request.
 ///
 /// `rowCount: -1` asks OPNsense for all rows. The result is checked against
-/// `total`, so a device that ignores `-1` is caught and not trusted.
+/// `total`, so a device that ignores `-1` is caught and not trusted. A
+/// response with no `total` at all is refused rather than treated as
+/// complete, since a partial read could otherwise look complete.
 async fn whole_collection(
     client: &OpnsenseClient,
     path: &str,
@@ -40,9 +42,13 @@ async fn whole_collection(
         )
         .await?;
     let parsed = SearchResponse::parse(&raw)?;
-    if let Some(total) = parsed.total
-        && usize::try_from(total).ok() != Some(parsed.rows.len())
-    {
+    let total = parsed.total.ok_or_else(|| {
+        OpnsenseError::Malformed(format!(
+            "{path} did not report a total; refusing to fingerprint a listing that cannot be \
+             shown complete"
+        ))
+    })?;
+    if usize::try_from(total).ok() != Some(parsed.rows.len()) {
         return Err(OpnsenseError::Malformed(format!(
             "{path} returned {} of {total} rows; refusing to fingerprint a partial listing",
             parsed.rows.len()

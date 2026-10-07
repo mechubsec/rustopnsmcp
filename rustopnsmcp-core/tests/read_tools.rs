@@ -576,3 +576,20 @@ async fn a_partial_listing_is_refused_rather_than_fingerprinted() {
         .expect_err("0 of 5 rows must not be fingerprinted");
     assert!(error.to_string().contains("0 of 5"), "{error}");
 }
+
+#[tokio::test]
+async fn a_listing_with_no_total_is_refused_rather_than_fingerprinted() {
+    let mut routes = default_routes();
+    routes.insert(
+        rustopnsmcp_core::endpoints::ALIASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "current": 1 }),
+    );
+    let client = client_against(routes).await;
+    let error = rustopnsmcp_core::changeset::config_fingerprint(&client)
+        .await
+        .expect_err("a listing with no total must not be fingerprinted");
+    assert!(
+        error.to_string().contains("did not report a total"),
+        "{error}"
+    );
+}

@@ -803,11 +803,10 @@ impl OpnsenseServer {
     #[tool(
         name = "get_opnsense_config_fingerprint",
         description = "Fingerprint of the governed OPNsense configuration (every firewall \
-                       alias and filter rule), as sha256:<hex>. Pass it as \
-                       expected_fingerprint to create_opnsense_change_set and \
-                       apply_opnsense_change_set; either refuses if the configuration has \
-                       changed since. OPNsense has no candidate configuration: this \
-                       fingerprints the running one. \
+                       alias and filter rule), as sha256:<hex>, for use by the change-set \
+                       tools to detect a configuration change since this fingerprint was \
+                       taken. OPNsense has no candidate configuration: this fingerprints the \
+                       running one. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
