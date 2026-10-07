@@ -30,7 +30,12 @@ fn server() -> (tempfile::TempDir, OpnsenseServer) {
     let coordinator =
         rustopnsmcp::changeset_state::build_coordinator(None, Duration::from_secs(3600), false)
             .unwrap();
-    let server = OpnsenseServer::new(registry, false, coordinator).unwrap();
+    let server = OpnsenseServer::new(
+        registry,
+        rustopnsmcp::server::ServerOptions::default(),
+        coordinator,
+    )
+    .unwrap();
     (dir, server)
 }
 
