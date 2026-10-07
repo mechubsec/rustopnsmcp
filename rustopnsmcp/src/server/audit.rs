@@ -148,8 +148,7 @@ mod tests {
         assert_eq!(hint.len(), HINT_MAX_BYTES);
 
         let change_set = serde_json::json!({ "change_set_id": long });
-        let hint =
-            change_set_id_hint(change_set.as_object()).expect("change_set_id hint present");
+        let hint = change_set_id_hint(change_set.as_object()).expect("change_set_id hint present");
         assert_eq!(hint.len(), HINT_MAX_BYTES);
     }
 }
