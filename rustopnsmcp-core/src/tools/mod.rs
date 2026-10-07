@@ -31,7 +31,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "get_opnsense_config_fingerprint",
     "create_opnsense_change_set",
     "approve_opnsense_change_set",
-    "opnsense_apply_change_set",
+    "apply_opnsense_change_set",
     "opnsense_get_change_set",
 ];
 
@@ -42,6 +42,6 @@ pub const TOOL_NAMES: &[&str] = &[
 pub const WRITE_TOOLS: &[&str] = &[
     "create_opnsense_change_set",
     "approve_opnsense_change_set",
-    "opnsense_apply_change_set",
+    "apply_opnsense_change_set",
     "opnsense_get_change_set",
 ];

@@ -93,7 +93,7 @@ pub struct ApproveChangeSetArgs {
     pub expected_digest: String,
 }
 
-/// Arguments for `opnsense_apply_change_set`.
+/// Arguments for `apply_opnsense_change_set`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyChangeSetArgs {
@@ -101,6 +101,16 @@ pub struct ApplyChangeSetArgs {
     pub device: String,
     /// The change set ID to apply.
     pub change_set_id: String,
+    /// The plan digest that was approved. Required.
+    pub expected_digest: String,
+    /// The configuration fingerprint the plan was built against. Required;
+    /// apply re-reads the live one and refuses on any difference.
+    pub expected_fingerprint: String,
+    /// Commit-confirmed window, in minutes. Refused for every resource kind
+    /// in this build: OPNsense offers commit-confirmed only for filter
+    /// rules, through savepoints this build does not use yet.
+    #[serde(default)]
+    pub confirm_timeout_mins: Option<u32>,
 }
 
 /// Arguments for `opnsense_get_change_set`.
@@ -152,5 +162,42 @@ mod tests {
             "change_set_id": "0000000000000000000000000000000000000000000000000000000000000000",
         });
         assert!(serde_json::from_value::<ApproveChangeSetArgs>(without).is_err());
+    }
+
+    #[test]
+    fn apply_requires_expected_digest_and_fingerprint() {
+        let valid = serde_json::json!({
+            "device": "fw-1",
+            "change_set_id": "cs-1",
+            "expected_digest": "sha256:00",
+            "expected_fingerprint": "sha256:11",
+        });
+        assert!(serde_json::from_value::<ApplyChangeSetArgs>(valid).is_ok());
+
+        let without_digest = serde_json::json!({
+            "device": "fw-1",
+            "change_set_id": "cs-1",
+            "expected_fingerprint": "sha256:11",
+        });
+        assert!(serde_json::from_value::<ApplyChangeSetArgs>(without_digest).is_err());
+
+        let without_fingerprint = serde_json::json!({
+            "device": "fw-1",
+            "change_set_id": "cs-1",
+            "expected_digest": "sha256:00",
+        });
+        assert!(serde_json::from_value::<ApplyChangeSetArgs>(without_fingerprint).is_err());
+    }
+
+    #[test]
+    fn apply_confirm_timeout_mins_defaults_to_none() {
+        let without = serde_json::json!({
+            "device": "fw-1",
+            "change_set_id": "cs-1",
+            "expected_digest": "sha256:00",
+            "expected_fingerprint": "sha256:11",
+        });
+        let args: ApplyChangeSetArgs = serde_json::from_value(without).expect("valid");
+        assert_eq!(args.confirm_timeout_mins, None);
     }
 }

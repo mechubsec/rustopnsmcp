@@ -2,6 +2,7 @@
 //! a device or an MCP session.
 
 use mecmcp_changeset::{ChangeSetOutput, ChangeSetRecord, ChangeSetState, ChangesetCoordinator};
+use rustopnsmcp_core::changeset::{ResourceKind, StagedMutation, State, mutations_of};
 
 /// Seconds since the Unix epoch; 0 for a clock before it, which makes every
 /// deadline look passed (the safe direction for a gate).
@@ -158,6 +159,85 @@ pub(crate) async fn approve(
         )
         .await
         .map_err(|error| format!("approval refused ({}): {}", error.field(), error.message()))
+}
+
+/// Refuse `confirm_timeout_mins` rather than ignore it (spec §3.4): OPNsense
+/// offers commit-confirmed apply only for filter rules, and this build does
+/// not wire savepoints for it yet.
+///
+/// # Errors
+///
+/// Returns the refusal for any `Some`.
+pub(crate) fn check_confirm_timeout(
+    kind: ResourceKind,
+    confirm_timeout_mins: Option<u32>,
+) -> Result<(), String> {
+    if confirm_timeout_mins.is_none() {
+        return Ok(());
+    }
+    match kind {
+        ResourceKind::Rule => Err(
+            "confirm_timeout_mins: commit-confirmed apply for firewall filter rules is not \
+             available in this build; omit it"
+                .to_owned(),
+        ),
+        other => Err(format!(
+            "confirm_timeout_mins is refused for {}: OPNsense offers commit-confirmed only for \
+             firewall filter rules",
+            other.noun()
+        )),
+    }
+}
+
+/// Everything apply can refuse about a stored plan without touching the
+/// device: the digest the caller named, the fingerprint the plan was built
+/// against, and `confirm_timeout_mins`.
+///
+/// # Errors
+///
+/// Returns the first refusal.
+pub(crate) fn pre_apply_gate(
+    record: &ChangeSetRecord,
+    expected_digest: &str,
+    expected_fingerprint: &str,
+    confirm_timeout_mins: Option<u32>,
+) -> Result<(), String> {
+    let mutations =
+        mutations_of(&record.actions).map_err(|error| format!("stored change set: {error}"))?;
+    let Some(kind) = mutations.first().map(StagedMutation::kind) else {
+        return Err("stored change set has no actions".to_owned());
+    };
+    check_confirm_timeout(kind, confirm_timeout_mins)?;
+    if record.digest != expected_digest {
+        return Err(format!(
+            "apply refused: the plan digest is {}, not the {expected_digest} you named; read the \
+             change set again",
+            record.digest
+        ));
+    }
+    if record.expected_candidate_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "apply refused: this change set was planned against fingerprint {}, not \
+             {expected_fingerprint}",
+            record.expected_candidate_fingerprint
+        ));
+    }
+    Ok(())
+}
+
+/// The recorded state and the reported word for an apply outcome.
+///
+/// Only a clean apply is `Applied`. Every partial or refused outcome is
+/// `Failed`, so the store never says a partial apply succeeded.
+pub(crate) fn settled_state(state: State) -> (ChangeSetState, &'static str) {
+    match state {
+        State::Applied => (ChangeSetState::Applied, "applied"),
+        State::AppliedUnverified => (ChangeSetState::Applied, "applied_unverified"),
+        State::Partial => (ChangeSetState::Failed, "partial"),
+        State::PartialRollbackFailed => (ChangeSetState::Failed, "partial_rollback_failed"),
+        State::RefusedStale => (ChangeSetState::Failed, "refused_stale"),
+        State::NotLoaded => (ChangeSetState::Failed, "not_loaded"),
+    }
 }
 
 #[cfg(test)]
@@ -361,5 +441,61 @@ mod tests {
         .unwrap();
         assert_eq!(approved.state, ChangeSetState::Approved);
         assert_eq!(approved.approver.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn confirm_timeout_mins_is_refused_for_an_alias_change_set() {
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let error = pre_apply_gate(&planned, &planned.digest, FINGERPRINT, Some(5)).unwrap_err();
+        assert!(error.contains("refused for alias"), "{error}");
+    }
+
+    #[test]
+    fn confirm_timeout_mins_is_refused_for_rules_until_savepoints_land() {
+        let planned = record("alice", "fw-1", ResourceKind::Rule);
+        let error = pre_apply_gate(&planned, &planned.digest, FINGERPRINT, Some(5)).unwrap_err();
+        assert!(error.contains("not available in this build"), "{error}");
+        assert!(pre_apply_gate(&planned, &planned.digest, FINGERPRINT, None).is_ok());
+    }
+
+    #[test]
+    fn apply_is_refused_on_a_digest_the_plan_does_not_carry() {
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let stale = format!("sha256:{}", "0".repeat(64));
+        let error = pre_apply_gate(&planned, &stale, FINGERPRINT, None).unwrap_err();
+        assert!(error.contains("plan digest"), "{error}");
+    }
+
+    #[test]
+    fn apply_is_refused_when_the_live_fingerprint_has_drifted() {
+        let planned = record("alice", "fw-1", ResourceKind::Alias);
+        let drifted = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+        // The caller names a fingerprint the plan was not built against.
+        assert!(pre_apply_gate(&planned, &planned.digest, drifted, None).is_err());
+        // The caller names the plan's fingerprint, but the device has moved on.
+        assert!(check_fingerprint(&planned.expected_candidate_fingerprint, drifted).is_err());
+    }
+
+    #[test]
+    fn settled_state_never_records_a_partial_apply_as_applied() {
+        for state in [
+            State::Partial,
+            State::PartialRollbackFailed,
+            State::RefusedStale,
+            State::NotLoaded,
+        ] {
+            let (settled, _) = settled_state(state);
+            assert_eq!(settled, ChangeSetState::Failed, "{state:?}");
+        }
+        assert_eq!(settled_state(State::Partial).1, "partial");
+        assert_eq!(
+            settled_state(State::PartialRollbackFailed).1,
+            "partial_rollback_failed"
+        );
+        assert_eq!(settled_state(State::Applied).0, ChangeSetState::Applied);
+        assert_eq!(
+            settled_state(State::AppliedUnverified).1,
+            "applied_unverified"
+        );
     }
 }
