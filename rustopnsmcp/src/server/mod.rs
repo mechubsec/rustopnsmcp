@@ -34,7 +34,7 @@ use rustopnsmcp_core::{
     client::OpnsenseClient,
     error::OpnsenseError,
     inventory::DeviceRegistry,
-    tools::{WRITE_TOOLS, changeset, read},
+    tools::{WRITE_TOOLS, changeset, fleet, read},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -111,6 +111,8 @@ pub struct OpnsenseServer {
     /// policy, the claim-before-apply, and the preview-bound approval, and
     /// the approval TTL that `--approval-timeout-secs` configures.
     coordinator: Arc<ChangesetCoordinator>,
+    /// When this server was built, for `opnsmcp_status`.
+    started: std::time::Instant,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -133,6 +135,7 @@ impl OpnsenseServer {
             clients: Arc::new(std::sync::RwLock::new(clients)),
             options,
             coordinator,
+            started: std::time::Instant::now(),
             tool_router: Self::opns_tool_router(),
         })
     }
@@ -397,10 +400,104 @@ impl OpnsenseServer {
 
         Ok(())
     }
+
+    /// The `opnsmcp_status` body, as rustjunosmcp's `srxmcp_status` shapes it.
+    pub(crate) fn opnsmcp_status_body(started: std::time::Instant) -> serde_json::Value {
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "endpoint": "opnsmcp",
+            "uptime_seconds": std::time::Instant::now()
+                .saturating_duration_since(started)
+                .as_secs(),
+        })
+    }
 }
 
 #[tool_router(router = opns_tool_router, vis = "pub(crate)")]
 impl OpnsenseServer {
+    #[tool(
+        name = "get_device_list",
+        description = "The OPNsense devices visible to this caller, by name. Returns an \
+                       empty list when the caller's device scope matches nothing in the \
+                       inventory. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn get_device_list(
+        &self,
+        Parameters(_): Parameters<fleet::EmptyArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "get_device_list", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        let names = mecmcp_auth::filter_device_names(caller.as_ref(), self.registry.names());
+        tool_result(
+            Ok::<_, String>(serde_json::json!({ "names": names })),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+            OutputRedaction::Apply,
+        )
+    }
+
+    #[tool(
+        name = "gather_device_facts",
+        description = "Fact sheet for one OPNsense device: product name and version, latest \
+                       available version, series, whether an upgrade needs a reboot, uptime, \
+                       CPU and load. Read-only; never probes the update mirror. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn gather_device_facts(
+        &self,
+        Parameters(args): Parameters<fleet::GatherFactsArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let device = args.device.clone();
+        self.read_device(
+            &context,
+            "gather_device_facts",
+            &device,
+            move |client| async move {
+                let system = read::system_status(&client).await?;
+                let firmware = read::firmware_status(&client).await?;
+                Ok::<_, OpnsenseError>(fleet::facts_from(&args.device, &system, &firmware))
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "opnsmcp_status",
+        description = "This server's version, endpoint name and uptime in seconds. Touches \
+                       no device. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn opnsmcp_status(
+        &self,
+        Parameters(_): Parameters<fleet::EmptyArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "opnsmcp_status", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_result(
+            Ok::<_, String>(Self::opnsmcp_status_body(self.started)),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+            OutputRedaction::Apply,
+        )
+    }
+
     #[tool(
         name = "get_opnsense_system_status",
         description = "OPNsense system status: product version, uptime, CPU and load. \
@@ -1346,6 +1443,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opnsmcp_status_reports_version_endpoint_and_uptime() {
+        let body = OpnsenseServer::opnsmcp_status_body(std::time::Instant::now());
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["endpoint"], "opnsmcp");
+        assert!(body["uptime_seconds"].is_u64());
+    }
+
     /// Spec §3.1: every tool description states its redaction contract.
     #[test]
     fn every_tool_description_states_the_redaction_contract() {
@@ -1451,9 +1556,10 @@ mod tests {
         }
     }
 
-    /// The ten read tools, all redacted through the shared
+    /// The eleven read tools, all redacted through the shared
     /// [`respond::respond_device`] path with [`OPNSENSE_PROFILE`].
     const RESPOND_REDACTED_TOOLS: &[&str] = &[
+        "gather_device_facts",
         "get_opnsense_system_status",
         "get_opnsense_firmware_status",
         "list_opnsense_interfaces",
@@ -1483,6 +1589,8 @@ mod tests {
         "cancel_opnsense_change_set",
         "get_opnsense_change_set_status",
         "list_opnsense_change_sets",
+        "get_device_list",
+        "opnsmcp_status",
     ];
 
     /// Every registered tool must be accounted for by exactly one of the

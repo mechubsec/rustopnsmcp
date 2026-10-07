@@ -5,6 +5,7 @@
 //! §3.1). Change-set tools govern writes to firewall aliases and filter rules.
 
 pub mod changeset;
+pub mod fleet;
 pub mod read;
 
 /// The sentence every tool description carries (spec §3.1: "Every tool
@@ -19,6 +20,9 @@ pub const REDACTION_CONTRACT: &str = "Output is redacted: values matching known 
 /// Kept in one place so `filter_tools_for_scope` and the registry guard read
 /// the same list.
 pub const TOOL_NAMES: &[&str] = &[
+    "get_device_list",
+    "gather_device_facts",
+    "opnsmcp_status",
     "get_opnsense_system_status",
     "get_opnsense_firmware_status",
     "list_opnsense_interfaces",
