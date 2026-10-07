@@ -113,14 +113,48 @@ pub struct ApplyChangeSetArgs {
     pub confirm_timeout_mins: Option<u32>,
 }
 
-/// Arguments for `opnsense_get_change_set`.
+/// Arguments for `confirm_opnsense_change_set`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct GetChangeSetArgs {
+pub struct ConfirmChangeSetArgs {
     /// Which device, by its name in `devices.json`.
     pub device: String,
-    /// The change set ID to retrieve.
+    /// The operation id a commit-confirmed apply returned.
+    pub operation_id: String,
+}
+
+/// Arguments for `cancel_opnsense_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelChangeSetArgs {
+    /// Which device, by its name in `devices.json`.
+    pub device: String,
+    /// The change set ID to cancel.
     pub change_set_id: String,
+}
+
+/// Arguments for `get_opnsense_change_set_status`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeSetStatusArgs {
+    /// Which device, by its name in `devices.json`.
+    pub device: String,
+    /// The change set ID to report.
+    pub change_set_id: String,
+}
+
+/// Arguments for `list_opnsense_change_sets`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListChangeSetsArgs {
+    /// Which device, by its name in `devices.json`.
+    pub device: String,
+    /// Page size, 1 to 200. Defaults to 50.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Rows to skip. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<u32>,
 }
 
 #[cfg(test)]
@@ -199,5 +233,23 @@ mod tests {
         });
         let args: ApplyChangeSetArgs = serde_json::from_value(without).expect("valid");
         assert_eq!(args.confirm_timeout_mins, None);
+    }
+
+    #[test]
+    fn list_change_sets_limit_and_offset_default_to_none() {
+        let without = serde_json::json!({ "device": "fw-1" });
+        let args: ListChangeSetsArgs = serde_json::from_value(without).expect("valid");
+        assert_eq!(args.limit, None);
+        assert_eq!(args.offset, None);
+    }
+
+    #[test]
+    fn an_unknown_field_is_refused_on_each_lifecycle_args_type() {
+        let base = serde_json::json!({
+            "device": "fw-1", "change_set_id": "cs-1", "operation_id": "op-1", "extra": true,
+        });
+        assert!(serde_json::from_value::<ConfirmChangeSetArgs>(base.clone()).is_err());
+        assert!(serde_json::from_value::<CancelChangeSetArgs>(base.clone()).is_err());
+        assert!(serde_json::from_value::<ChangeSetStatusArgs>(base).is_err());
     }
 }
