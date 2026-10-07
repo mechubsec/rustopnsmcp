@@ -1,5 +1,7 @@
 //! The MCP server handler.
 
+mod audit;
+
 use mecmcp_auth::NoGrant;
 use mecmcp_changeset::{
     ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
@@ -11,10 +13,10 @@ use mecmcp_server::{
 };
 use rmcp::{
     RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerConfig,
+        CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -1339,7 +1341,6 @@ impl OpnsenseServer {
             return tool_error(format!("apply refused: {e}"));
         }
 
-        let principal = Self::principal(caller.as_ref());
         let outcome = apply_sequentially(&client, &preimage, &mutations).await;
 
         let state_str = match outcome.state {
@@ -1352,21 +1353,6 @@ impl OpnsenseServer {
         };
 
         let succeeded = matches!(outcome.state, State::Applied | State::AppliedUnverified);
-
-        tracing::info!(
-            target: "audit",
-            event = "opnsense_change_set_applied",
-            change_set_id = %args.change_set_id,
-            device = %args.device,
-            principal = %principal,
-            outcome = state_str,
-            succeeded = outcome.succeeded.len(),
-            failed = outcome.failed.len(),
-            attempted_and_failed = outcome.attempted_and_failed.len(),
-            never_attempted = outcome.never_attempted.len(),
-            rollback_failures = outcome.rollback_failures.len(),
-            "change set applied"
-        );
 
         let mut settled = claimed;
         settled.state = if succeeded {
@@ -1540,6 +1526,32 @@ impl ServerHandler for OpnsenseServer {
                  plan -> digest -> human approve -> apply-with-drift-check lifecycle; a change \
                  set stages exactly one resource kind at a time.",
             )
+    }
+
+    /// Audit and scope-check every call at one choke point.
+    ///
+    /// Defined by hand, which suppresses the `call_tool` `#[tool_handler]`
+    /// would generate. The body is the generated one with the audit scope
+    /// around it.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<NoGrant>(&context.extensions);
+        let tool = request.name.to_string();
+        let mut audit = audit::open(caller, &tool, request.arguments.as_ref());
+        let device = audit::device_hint(request.arguments.as_ref());
+
+        if let Err(error) = authorize_call(caller, &tool, device.as_deref(), WRITE_TOOLS) {
+            audit.deny("scope");
+            return Ok(CallToolResponse::Complete(tool_error(error)));
+        }
+
+        let call = ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(call).await;
+        audit::settle(&mut audit, &result);
+        result
     }
 
     async fn list_tools(
