@@ -32,10 +32,10 @@ phase_number="${phase#P}"
 
 # --- collect ----------------------------------------------------------------
 
-cargo build -q --locked --manifest-path "$root/Cargo.toml" -p rustopnsmcp
-cargo build -q --locked --manifest-path "$junos_src/Cargo.toml" -p rust-junosmcp
-opns_bin="$root/target/debug/rustopnsmcp"
-junos_bin="$junos_src/target/debug/rust-junosmcp"
+cargo build -q --locked --manifest-path "$root/Cargo.toml" -p rustopnsmcp --target-dir "$work/target-opns"
+cargo build -q --locked --manifest-path "$junos_src/Cargo.toml" -p rust-junosmcp --target-dir "$work/target-junos"
+opns_bin="$work/target-opns/debug/rustopnsmcp"
+junos_bin="$work/target-junos/debug/rust-junosmcp"
 
 flags() {
   "$1" --help | grep -oE '^\s+(-[A-Za-z], )?--[a-z0-9][a-z0-9-]*' \
@@ -88,6 +88,18 @@ active="$work/allowlist.active"
 : > "$active"
 while IFS='|' read -r kind side item until reason; do
   case "$kind" in ''|'#'*) continue ;; esac
+  case "$kind" in
+    flag|subcommand|tool|file|unit-path) ;;
+    *) echo "FAIL[allowlist] bad kind: $kind|$side|$item|$until"; exit 1 ;;
+  esac
+  case "$side" in
+    only-opns|only-junos) ;;
+    *) echo "FAIL[allowlist] bad side: $kind|$side|$item|$until"; exit 1 ;;
+  esac
+  case "$until" in
+    never|P[1-7]) ;;
+    *) echo "FAIL[allowlist] bad until: $kind|$side|$item|$until"; exit 1 ;;
+  esac
   if [ -z "${reason// /}" ]; then
     echo "FAIL[allowlist] entry has no reason: $kind|$side|$item"
     exit 1
