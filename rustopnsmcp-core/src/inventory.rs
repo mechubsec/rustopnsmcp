@@ -315,9 +315,8 @@ impl DeviceRegistry {
     /// The directory is only resolved (and therefore only required to
     /// exist) when `device` actually names a file-based credential or CA;
     /// an env-only device never touches it. Writing the canonical form back
-    /// means the value later persisted to `devices.json`, and compared in
-    /// [`Self::require_credentials_unused`], is the one actually checked
-    /// here — not a different spelling of the same path.
+    /// means the value persisted and later compared is the value that was
+    /// checked.
     fn require_credentials_confined(&self, device: &mut Device) -> Result<(), OpnsenseError> {
         let fields: [(&str, &mut Option<PathBuf>); 3] = [
             ("api_key_file", &mut device.api_key_file),
@@ -352,12 +351,7 @@ impl DeviceRegistry {
     ///
     /// Two devices sharing nothing is the only safe default; forbid any
     /// overlap rather than guessing which reuse was intended. Compares
-    /// canonicalized paths and, failing that, the underlying file's
-    /// `(device, inode)` so a hard link under a different name is still
-    /// caught. `device`'s own paths must already be canonicalized by
-    /// [`Self::require_credentials_confined`]. An existing entry whose path
-    /// cannot be canonicalized fails the add closed, since it can no longer
-    /// be ruled out as a collision.
+    /// resolved file identity, not path text.
     fn require_credentials_unused(
         devices: &serde_json::Map<String, serde_json::Value>,
         device: &Device,
