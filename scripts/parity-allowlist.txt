@@ -1,0 +1,70 @@
+# rustopnsmcp vs rustjunosmcp parity allowlist (read by scripts/parity-check.sh).
+# kind|side|item|until|reason
+#   until: the phase whose gate stops accepting the entry (P2..P7), or never.
+#
+# Scope note (not a name difference): cancel_opnsense_change_set is in
+# WRITE_TOOLS; rustjunosmcp leaves cancel_junos_change_set out. Cancel changes
+# stored state, so rustopnsmcp treats it as a write.
+
+# --- CLI flags ---
+flag|only-opns|--approval-digest-key-file|never|shared mecmcp_runtime::cli::Cli flag; rustjunosmcp builds its own Cli and has not adopted it; wired here to load_with_key
+flag|only-opns|--audit-forward-ca-file|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
+flag|only-opns|--audit-forward-endpoint|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
+flag|only-opns|--audit-forward-ledger|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
+flag|only-opns|--audit-forward-outbox|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
+flag|only-opns|--audit-forward-token-file|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
+flag|only-opns|--max-inflight-requests-per-device|never|the mecmcp LimitsConfig name; rustjunosmcp still spells it per-router
+flag|only-opns|--trusted-proxy|never|shared mecmcp_transport::LimitsConfig::trusted_proxies flag; rustjunosmcp at this pin has not adopted it
+flag|only-junos|--max-inflight-requests-per-router|never|rustjunosmcp's legacy spelling of --max-inflight-requests-per-device
+flag|only-opns|--otel-endpoint|never|shared mecmcp_runtime::cli::Cli flag; wired to AuditConfig::otel here
+flag|only-opns|--otel-service-name|never|shared mecmcp_runtime::cli::Cli flag; wired to AuditConfig::otel here
+flag|only-junos|--allow-password-auth-add|never|SSH password auth for add_device; OPNsense is reached only through its REST API with key and secret
+flag|only-junos|--allow-plane-owned-writes|never|Mist/Security Director plane ownership of Junos devices; OPNsense has no management plane in v1.0 scope
+flag|only-junos|--cleanup-timeout-secs|never|Junos file-transfer staging cleanup; no file transfer on OPNsense
+flag|only-junos|--device-lease-dir|P6|mecmcp-device leases arrive with firmware upgrade in P6
+flag|only-junos|--known-hosts-file|never|SSH host-key pinning; OPNsense uses TLS with ca_pem_path
+flag|only-junos|--ssh-accept-new-host-keys|never|SSH only
+flag|only-junos|--ssh-insecure-accept-any-host-key|never|SSH only
+flag|only-junos|--staging-dir|never|Junos file-transfer staging; no file transfer on OPNsense
+flag|only-junos|--support-bundle-staging-dir|never|SRX JTAC support bundles; no equivalent on OPNsense
+flag|only-junos|--support-bundle-staging-max-bytes|never|SRX JTAC support bundles; no equivalent on OPNsense
+
+# --- subcommands ---
+subcommand|only-junos|state|P5|state resolve lands with startup reconciliation of interrupted applies in P5
+
+# --- tools (vendor token normalised to VENDOR) ---
+tool|only-junos|get_VENDOR_candidate_fingerprint|never|OPNsense has no candidate configuration (spec §3.4); the equivalent is get_opnsense_config_fingerprint
+tool|only-opns|get_VENDOR_config_fingerprint|never|spec §3.1 name for the running-configuration fingerprint; rustjunosmcp fingerprints a candidate
+
+# --- packaging, scripts, workflows (service name normalised to SVC) ---
+file|only-junos|.github/workflows/release-image.yml|P2|release workflows land in P2
+file|only-junos|.github/workflows/release-sbom.yml|P2|release workflows land in P2
+file|only-junos|.github/workflows/release-sign-tarball.yml|P2|release workflows land in P2
+file|only-junos|.github/workflows/security.yml|P2|security.yml lands in P2
+file|only-junos|packaging/FILESYSTEM.md|P2|packaging docs land in P2
+file|only-junos|packaging/container/compose.example.yaml|P2|container example lands with HOW-TO-SETUP-DOCKER in P2
+file|only-junos|packaging/logrotate/SVC-audit|P2|logrotate lands in P2
+file|only-junos|packaging/lxc/install.sh|P2|LXC installer lands in P2
+file|only-junos|packaging/tests/package-smoke.sh|P2|package smoke test lands with the P2 dry-run install
+file|only-junos|packaging/tests/journald-dropin-ordering.sh|P2|lands with the unit and override.conf rework in P2
+file|only-junos|scripts/package-lxc.sh|P2|tarball script lands in P2
+file|only-junos|packaging/tests/container-scp-smoke.sh|never|SCP file transfer; no equivalent on OPNsense
+file|only-junos|packaging/tests/distribution-smoke.sh|never|rustopnsmcp supports Debian 13 LXC only (mecmcp PACKAGING.md §2)
+file|only-junos|scripts/test-lxc-distributions.sh|never|rustopnsmcp supports Debian 13 LXC only (mecmcp PACKAGING.md §2)
+file|only-junos|packaging/tests/token-migration-guard.sh|never|rustopnsmcp never had an /etc token store to migrate from
+file|only-junos|scripts/scan-known-hosts.sh|never|SSH host keys; OPNsense uses TLS
+file|only-opns|packaging/examples/README.md|never|example inventory docs; rustjunosmcp keeps devices-template.json at the repo root
+file|only-opns|packaging/examples/devices.example.json|never|example inventory; rustjunosmcp keeps devices-template.json at the repo root
+file|only-opns|packaging/systemd/SVC.sysusers|never|mecmcp FILESYSTEM-LAYOUT.md requires sysusers; rustjunosmcp predates the requirement
+file|only-opns|packaging/systemd/SVC.tmpfiles|never|mecmcp FILESYSTEM-LAYOUT.md requires tmpfiles; rustjunosmcp predates the requirement
+file|only-opns|scripts/check-mecmcp-pin.sh|never|the spec §3.3 one-pin check
+file|only-opns|scripts/parity-check.sh|never|this gate
+file|only-opns|scripts/parity-allowlist.txt|never|this gate's allowlist
+
+# --- unit file paths (directory base normalised to SVC) ---
+unit-path|only-junos|--device-lease-dir /var/lib/SVC/device-leases|P6|device leases land in P6
+unit-path|only-junos|--audit-hmac-key-file /var/lib/SVC/audit-hmac.key|never|rustjunosmcp keeps the key in /var/lib; spec §3.2 and FILESYSTEM-LAYOUT put it in /etc/<svc>
+unit-path|only-opns|--state-file /var/lib/SVC/changesets.json|P2|P2 renames it changeset-state.json (spec §2, §3.2)
+unit-path|only-opns|--tls-cert /etc/SVC/tls/fullchain.pem|P2|P2 moves TLS to the site override.conf (spec §3.2)
+unit-path|only-opns|--tls-key /etc/SVC/tls/privkey.pem|P2|P2 moves TLS to the site override.conf (spec §3.2)
+unit-path|only-opns|--audit-log-file /var/lib/SVC/audit.jsonl|P2|P2 reworks the unit to the spec §3.2 audit baseline
