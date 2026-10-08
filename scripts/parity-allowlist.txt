@@ -7,12 +7,6 @@
 # stored state, so rustopnsmcp treats it as a write.
 
 # --- CLI flags ---
-flag|only-opns|--approval-digest-key-file|never|shared mecmcp_runtime::cli::Cli flag; rustjunosmcp builds its own Cli and has not adopted it; wired here to load_with_key
-flag|only-opns|--audit-forward-ca-file|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
-flag|only-opns|--audit-forward-endpoint|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
-flag|only-opns|--audit-forward-ledger|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
-flag|only-opns|--audit-forward-outbox|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
-flag|only-opns|--audit-forward-token-file|never|shared mecmcp_runtime::cli::EvidenceArgs flag rustjunosmcp does not flatten; wired with the SSDF pipeline
 flag|only-opns|--max-inflight-requests-per-device|never|the mecmcp LimitsConfig name; rustjunosmcp still spells it per-router
 flag|only-opns|--trusted-proxy|never|shared mecmcp_transport::LimitsConfig::trusted_proxies flag; rustjunosmcp at this pin has not adopted it
 flag|only-junos|--max-inflight-requests-per-router|never|rustjunosmcp's legacy spelling of --max-inflight-requests-per-device
@@ -28,6 +22,13 @@ flag|only-junos|--ssh-insecure-accept-any-host-key|never|SSH only
 flag|only-junos|--staging-dir|never|Junos file-transfer staging; no file transfer on OPNsense
 flag|only-junos|--support-bundle-staging-dir|never|SRX JTAC support bundles; no equivalent on OPNsense
 flag|only-junos|--support-bundle-staging-max-bytes|never|SRX JTAC support bundles; no equivalent on OPNsense
+flag|only-junos|--oidc-audience|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
+flag|only-junos|--oidc-issuer|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
+flag|only-junos|--oidc-role-claim|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
+flag|only-junos|--require-verified-approver|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
+flag|only-junos|--approver-max-age-secs|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
+flag|only-junos|--approver-require-auth-time|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
+flag|only-junos|--approver-role|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
 
 # --- subcommands ---
 subcommand|only-junos|state|P5|state resolve lands with startup reconciliation of interrupted applies in P5
@@ -48,6 +49,16 @@ file|only-junos|packaging/lxc/install.sh|P2|LXC installer lands in P2
 file|only-junos|packaging/tests/package-smoke.sh|P2|package smoke test lands with the P2 dry-run install
 file|only-junos|packaging/tests/journald-dropin-ordering.sh|P2|lands with the unit and override.conf rework in P2
 file|only-junos|scripts/package-lxc.sh|P2|tarball script lands in P2
+file|only-junos|packaging/conformance.toml|P2|conformance-tool config lands with P2 packaging
+file|only-junos|packaging/tests/skip-build-provenance.sh|P2|skip-build provenance test lands with the P2 dry-run install, alongside package-smoke.sh
+file|only-junos|scripts/bench/bench.py|never|rust-junosmcp's own ad hoc MCP-server benchmark harness (predates mechubbench); not something rustopnsmcp needs to replicate
+file|only-junos|scripts/bench/.gitignore|never|part of the ad hoc bench harness above
+file|only-junos|scripts/bench/mock_netconf.py|never|part of the ad hoc bench harness above
+file|only-junos|scripts/bench/requirements/harness.txt|never|part of the ad hoc bench harness above
+file|only-junos|scripts/bench/requirements/shigechika-0.18.0.txt|never|part of the ad hoc bench harness above
+file|only-junos|scripts/bench/requirements/shigechika-0.22.0.txt|never|part of the ad hoc bench harness above
+file|only-junos|scripts/bench/servers.example.json|never|part of the ad hoc bench harness above
+file|only-junos|scripts/bench/setup.sh|never|part of the ad hoc bench harness above
 file|only-junos|packaging/tests/container-scp-smoke.sh|never|SCP file transfer; no equivalent on OPNsense
 file|only-junos|packaging/tests/distribution-smoke.sh|never|rustopnsmcp supports Debian 13 LXC only (mecmcp PACKAGING.md §2)
 file|only-junos|scripts/test-lxc-distributions.sh|never|rustopnsmcp supports Debian 13 LXC only (mecmcp PACKAGING.md §2)
