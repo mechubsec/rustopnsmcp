@@ -22,13 +22,11 @@ pub struct GatherFactsArgs {
 /// Arguments for `add_device`. The same fields as a `devices.json` entry,
 /// minus the environment-variable credential form.
 ///
-/// A model-callable add must not be able to bind an *existing* credential
-/// (one an operator already exported into the service's environment) to a
-/// new, caller-chosen endpoint. Naming an env var here would do exactly
-/// that, so only the file form is accepted; env refs stay operator-only, set
-/// by hand-editing `devices.json`. The API key and secret are referenced,
-/// never passed inline, and `add_device` additionally requires both files to
-/// resolve under the server's dedicated credentials directory (see
+/// Only the file form of a credential is accepted here; env refs stay
+/// operator-only, set by hand-editing `devices.json`. The API key and secret
+/// are referenced, never passed inline, and `add_device` additionally
+/// requires both files to resolve under the server's dedicated credentials
+/// directory and to be unused by any other device (see
 /// `DeviceRegistry::add_device`).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
