@@ -1,8 +1,10 @@
 //! Fleet-meta tools: the names and shapes every mechub MCP server shares.
 
+use crate::inventory::Device;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::PathBuf;
 
 /// Arguments for a tool that takes none. Any field is refused.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -15,6 +17,49 @@ pub struct EmptyArgs {}
 pub struct GatherFactsArgs {
     /// Which device, by its name in `devices.json`.
     pub device: String,
+}
+
+/// Arguments for `add_device`. The same fields as a `devices.json` entry,
+/// minus the environment-variable credential form.
+///
+/// Only the file form of a credential is accepted here; env refs stay
+/// operator-only, set by hand-editing `devices.json`. The API key and secret
+/// are referenced, never passed inline, and `add_device` additionally
+/// requires both files to resolve under the server's dedicated credentials
+/// directory and to be unused by any other device (see
+/// `DeviceRegistry::add_device`).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddDeviceArgs {
+    /// The new device's name.
+    pub device: String,
+    /// `https://` base URL.
+    pub endpoint: String,
+    /// Owner-only file holding the API key, under the credentials directory.
+    pub api_key_file: PathBuf,
+    /// Owner-only file holding the API secret, under the credentials directory.
+    pub api_secret_file: PathBuf,
+    /// PEM trust anchor for a device behind a private CA.
+    #[serde(default)]
+    pub ca_pem_path: Option<PathBuf>,
+}
+
+impl AddDeviceArgs {
+    /// The name and the inventory entry.
+    #[must_use]
+    pub fn into_device(self) -> (String, Device) {
+        (
+            self.device,
+            Device {
+                endpoint: self.endpoint,
+                api_key_env: None,
+                api_key_file: Some(self.api_key_file),
+                api_secret_env: None,
+                api_secret_file: Some(self.api_secret_file),
+                ca_pem_path: self.ca_pem_path,
+            },
+        )
+    }
 }
 
 /// The fact sheet for one device, from its system and firmware status.
@@ -68,5 +113,37 @@ mod tests {
     fn empty_args_refuse_any_field() {
         assert!(serde_json::from_value::<EmptyArgs>(serde_json::json!({})).is_ok());
         assert!(serde_json::from_value::<EmptyArgs>(serde_json::json!({ "device": "x" })).is_err());
+    }
+
+    #[test]
+    fn add_device_refuses_an_inline_secret() {
+        let inline = serde_json::json!({
+            "device": "fw-2", "endpoint": "https://fw-2.example.org",
+            "api_key_file": "/creds/fw-2.key", "api_secret_file": "/creds/fw-2.secret",
+            "api_key": "inline-key-must-not-parse",
+        });
+        assert!(serde_json::from_value::<AddDeviceArgs>(inline).is_err());
+    }
+
+    #[test]
+    fn add_device_refuses_an_env_credential() {
+        let env_ref = serde_json::json!({
+            "device": "fw-2", "endpoint": "https://fw-2.example.org",
+            "api_key_file": "/creds/fw-2.key", "api_secret_env": "S2",
+        });
+        assert!(serde_json::from_value::<AddDeviceArgs>(env_ref).is_err());
+    }
+
+    #[test]
+    fn add_device_into_device_never_names_an_env_var() {
+        let args: AddDeviceArgs = serde_json::from_value(serde_json::json!({
+            "device": "fw-2", "endpoint": "https://fw-2.example.org",
+            "api_key_file": "/creds/fw-2.key", "api_secret_file": "/creds/fw-2.secret",
+        }))
+        .unwrap();
+        let (name, device) = args.into_device();
+        assert_eq!(name, "fw-2");
+        assert!(device.api_key_env.is_none());
+        assert!(device.api_secret_env.is_none());
     }
 }
