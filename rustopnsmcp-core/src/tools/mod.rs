@@ -23,6 +23,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "get_device_list",
     "gather_device_facts",
     "opnsmcp_status",
+    "add_device",
+    "reload_devices",
     "get_opnsense_system_status",
     "get_opnsense_firmware_status",
     "list_opnsense_interfaces",
@@ -53,4 +55,6 @@ pub const WRITE_TOOLS: &[&str] = &[
     "cancel_opnsense_change_set",
     "confirm_opnsense_change_set",
     "create_opnsense_change_set",
+    "add_device",
+    "reload_devices",
 ];

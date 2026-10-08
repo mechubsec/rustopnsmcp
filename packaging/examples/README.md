@@ -15,3 +15,10 @@ Copy it into place, then:
   this server: a private CA is the only way to reach such a device.
 - `chmod 600 devices.json` and make sure it is owned by the service user —
   the loader refuses anything looser.
+
+The `add_device` tool (model-callable, refused under `--inventory-readonly`)
+only accepts the file form of a credential, never an environment variable,
+and requires `api_key_file`, `api_secret_file`, and `ca_pem_path` to resolve
+under a `credentials/` directory next to `devices.json`. Create that
+directory (mode 0700, owned by the service user) before using `add_device`;
+it also refuses to point at a credential file another device already uses.
