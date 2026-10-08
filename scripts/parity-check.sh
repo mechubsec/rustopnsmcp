@@ -49,8 +49,12 @@ tool_names() {
   grep -rhoE '^\s+name = "[a-z0-9_]+"' "$@" | sed -E 's/.*"(.*)"/\1/' | sort -u
 }
 packaging_files() {
+  # Fixtures and dated bench-run snapshots are regenerated/added on every run
+  # of their respective tools and carry no parity signal; excluded the same
+  # way so the gate does not need a new allowlist line each time one lands.
   git -C "$1" ls-files --cached --others --exclude-standard packaging scripts .github/workflows \
     | grep -v '^packaging/tests/fixtures/' \
+    | grep -v '^scripts/bench/results/' \
     | sed -E 's/rust-junosmcp|rustopnsmcp/SVC/g' | sort -u
 }
 unit_paths() {
