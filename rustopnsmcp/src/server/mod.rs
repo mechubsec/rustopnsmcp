@@ -512,9 +512,12 @@ impl OpnsenseServer {
     #[tool(
         name = "add_device",
         description = "Adds an OPNsense device to devices.json and reloads the inventory. \
-                       The API key and secret are referenced by environment variable or \
-                       owner-only file path, never passed inline. Refused when the server \
-                       runs with --inventory-readonly. \
+                       The API key and secret are referenced by owner-only file path, never \
+                       passed inline and never by environment variable (env refs are \
+                       operator-only, set by hand-editing devices.json). Every credential and \
+                       CA path must resolve under the dedicated credentials directory beside \
+                       devices.json and must not already be used by another device. Refused \
+                       when the server runs with --inventory-readonly. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \

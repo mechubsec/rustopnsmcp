@@ -16,6 +16,7 @@ use mecmcp_inventory::{FileInventory, Inventory, InventoryError};
 use mecmcp_secret::{OutboundSecret, SecretLimits, load_from_env, load_from_file};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// One OPNsense device.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -137,11 +138,43 @@ impl Device {
             .ok_or_else(|| OpnsenseError::Config("no api secret source".to_owned()))?;
         Ok(load_from_file(path, limits)?)
     }
+
+    /// Confirm every credential source actually loads, without building an
+    /// HTTP client.
+    ///
+    /// `add_device` calls this before persisting, so a device whose key,
+    /// secret, or CA cannot be loaded (missing file, unset env var, wrong
+    /// permissions) never reaches `devices.json`. Writing it first and
+    /// discovering this on the next reload would leave a dead entry that
+    /// fails every future `reload_devices` and the next server restart.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_api_key`] and [`Self::load_api_secret`], plus an I/O
+    /// error if `ca_pem_path` is set but unreadable.
+    pub fn probe_credentials(&self) -> Result<(), OpnsenseError> {
+        self.load_api_key()?;
+        self.load_api_secret()?;
+        if let Some(path) = &self.ca_pem_path {
+            std::fs::read_to_string(path).map_err(|error| {
+                OpnsenseError::Config(format!("ca_pem_path {}: {error}", path.display()))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// The loaded device inventory, hot-reloadable on SIGHUP.
 pub struct DeviceRegistry {
     inner: FileInventory<Device, ()>,
+    /// Serializes the read-modify-write-reload in [`Self::add_device`].
+    ///
+    /// Without it, two concurrent `add_device` calls (or one racing a
+    /// `reload_devices`) each read the file, insert into their own copy, and
+    /// write it back — the second write silently discards the first's
+    /// addition. Holding this for the whole operation, including the reload
+    /// that observes the write, makes `add_device` calls serialize instead.
+    write_lock: Mutex<()>,
 }
 
 impl DeviceRegistry {
@@ -153,6 +186,7 @@ impl DeviceRegistry {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, InventoryError> {
         Ok(Self {
             inner: FileInventory::load(path)?,
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -189,19 +223,32 @@ impl DeviceRegistry {
     /// `{"version": 1, "devices": {...}}` shape is edited; any other shape is
     /// refused rather than rewritten.
     ///
+    /// Three invariants a model-callable add must not be able to break:
+    /// - its credential and CA files must resolve under the dedicated
+    ///   `credentials` directory beside the inventory, not at an arbitrary
+    ///   owner-only path, and must not already be used by another device;
+    /// - the duplicate-name check is against the freshly read file, not a
+    ///   possibly stale in-memory view; and
+    /// - the credentials must actually load *before* anything is written, so
+    ///   a bad entry never reaches disk.
+    ///
     /// # Errors
     ///
-    /// Returns [`OpnsenseError`] for an invalid name or device, a duplicate
-    /// name, a non-canonical file, or any I/O failure.
+    /// Returns [`OpnsenseError`] for an invalid name or device, a credential
+    /// path outside the credentials directory, a reused credential, a
+    /// duplicate name, a credential that fails to load, a non-canonical
+    /// file, or any I/O failure.
     pub fn add_device(&self, name: &str, device: Device) -> Result<usize, OpnsenseError> {
         mecmcp_inventory::validate_device_name(name)
             .map_err(|error| OpnsenseError::Config(error.to_string()))?;
         device.validate()?;
-        if self.inner.get_device(name).is_ok() {
-            return Err(OpnsenseError::Config(format!(
-                "device {name} already exists"
-            )));
-        }
+        self.require_credentials_confined(&device)?;
+        device.probe_credentials()?;
+
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| OpnsenseError::Malformed("inventory write lock poisoned".to_owned()))?;
 
         let path = self.inner.source();
         let bytes = mecmcp_secret::read_hardened_file(&path, mecmcp_secret::FileLimits::default())?;
@@ -217,12 +264,125 @@ impl DeviceRegistry {
                     .to_owned(),
             ));
         };
+        if devices.contains_key(name) {
+            return Err(OpnsenseError::Config(format!(
+                "device {name} already exists"
+            )));
+        }
+        Self::require_credentials_unused(devices, &device)?;
+
         let entry = serde_json::to_value(&device)
             .map_err(|error| OpnsenseError::Malformed(error.to_string()))?;
         devices.insert(name.to_owned(), entry);
 
         write_owner_only(&path, &document)?;
         Ok(self.inner.reload()?)
+    }
+
+    /// The directory every `add_device` credential file and CA PEM must
+    /// resolve under: a dedicated `credentials` directory beside the
+    /// inventory file.
+    ///
+    /// Without this, a write-scoped caller could point `api_key_file` or
+    /// `ca_pem_path` at any owner-only file the service can read — the audit
+    /// HMAC key, a TLS private key — and exfiltrate it by triggering a read
+    /// against the device it just created. Confining it to a directory the
+    /// operator provisioned limits what a model-callable add can ever name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OpnsenseError::Config`] if the inventory path has no parent
+    /// or the `credentials` directory does not exist.
+    fn credentials_dir(&self) -> Result<PathBuf, OpnsenseError> {
+        let parent = self
+            .inner
+            .source()
+            .parent()
+            .map(Path::to_owned)
+            .ok_or_else(|| {
+                OpnsenseError::Config("inventory path has no parent directory".to_owned())
+            })?;
+        let dir = parent.join("credentials");
+        dir.canonicalize().map_err(|error| {
+            OpnsenseError::Config(format!(
+                "credentials directory {} must exist (create it, mode 0700, owned by the \
+                 service user) before add_device can be used: {error}",
+                dir.display()
+            ))
+        })
+    }
+
+    /// Require `device`'s credential and CA paths to resolve under
+    /// [`Self::credentials_dir`].
+    ///
+    /// The directory is only resolved (and therefore only required to
+    /// exist) when `device` actually names a file-based credential or CA;
+    /// an env-only device never touches it.
+    fn require_credentials_confined(&self, device: &Device) -> Result<(), OpnsenseError> {
+        let paths: Vec<(&str, &PathBuf)> = [
+            ("api_key_file", device.api_key_file.as_ref()),
+            ("api_secret_file", device.api_secret_file.as_ref()),
+            ("ca_pem_path", device.ca_pem_path.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(label, path)| path.map(|path| (label, path)))
+        .collect();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let creds_dir = self.credentials_dir()?;
+        for (label, path) in paths {
+            let canonical = path.canonicalize().map_err(|error| {
+                OpnsenseError::Config(format!("{label} {}: {error}", path.display()))
+            })?;
+            if !canonical.starts_with(&creds_dir) {
+                return Err(OpnsenseError::Config(format!(
+                    "{label} {} does not resolve under the credentials directory {}",
+                    path.display(),
+                    creds_dir.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a credential or CA path already bound to another device in
+    /// the freshly read document.
+    ///
+    /// Reusing an existing device's credential file would let a new,
+    /// caller-chosen endpoint authenticate as that device. Two devices
+    /// sharing nothing is the only safe default; forbid any overlap rather
+    /// than guessing which reuse was intended.
+    fn require_credentials_unused(
+        devices: &serde_json::Map<String, serde_json::Value>,
+        device: &Device,
+    ) -> Result<(), OpnsenseError> {
+        let new_paths: Vec<&PathBuf> = [
+            device.api_key_file.as_ref(),
+            device.api_secret_file.as_ref(),
+            device.ca_pem_path.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (other_name, other_value) in devices {
+            for field in ["api_key_file", "api_secret_file", "ca_pem_path"] {
+                let Some(other_path) = other_value.get(field).and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                if new_paths
+                    .iter()
+                    .any(|new_path| new_path.as_os_str() == std::ffi::OsStr::new(other_path))
+                {
+                    return Err(OpnsenseError::Config(format!(
+                        "{field} is already used by device {other_name}; credential files must \
+                         not be shared across devices"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -250,14 +410,24 @@ fn write_owner_only(path: &Path, document: &serde_json::Value) -> Result<(), Opn
         .mode(0o600)
         .open(&temporary)
         .map_err(|error| io("cannot write next to", error))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| io("cannot write next to", error))?;
+    if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&temporary);
+        return Err(io("cannot write next to", error));
+    }
     drop(file);
     std::fs::rename(&temporary, path).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         io("cannot replace", error)
-    })
+    })?;
+
+    // Best-effort: fsync the parent directory so the rename survives a crash.
+    // A failure here does not undo an already-visible rename; there is
+    // nothing safe to roll back to, so it is not treated as fatal.
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -431,11 +601,36 @@ mod tests {
         path
     }
 
-    fn new_device(endpoint: &str) -> Device {
+    /// Create `<dir>/credentials`, the directory `add_device` requires every
+    /// credential and CA path to resolve under.
+    fn credentials_dir(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("credentials");
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    /// Write an owner-only credential file under `creds_dir`.
+    fn credential_file(
+        creds_dir: &std::path::Path,
+        name: &str,
+        content: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = creds_dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+
+    /// A device whose credentials are files under `creds_dir`, loadable by
+    /// `probe_credentials`.
+    fn new_device(endpoint: &str, creds_dir: &std::path::Path) -> Device {
+        let key = credential_file(creds_dir, "fw-2.key", "key-value");
+        let secret = credential_file(creds_dir, "fw-2.secret", "secret-value");
         serde_json::from_value(serde_json::json!({
             "endpoint": endpoint,
-            "api_key_env": "K2",
-            "api_secret_env": "S2",
+            "api_key_file": key,
+            "api_secret_file": secret,
         }))
         .unwrap()
     }
@@ -445,10 +640,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = canonical_inventory(&dir);
+        let creds_dir = credentials_dir(&dir);
         let registry = super::DeviceRegistry::load(&path).unwrap();
 
         let count = registry
-            .add_device("fw-2", new_device("https://fw-2.example.org"))
+            .add_device("fw-2", new_device("https://fw-2.example.org", &creds_dir))
             .unwrap();
         assert_eq!(count, 2);
         assert!(registry.get("fw-2").is_ok());
@@ -466,22 +662,151 @@ mod tests {
     #[test]
     fn add_device_refuses_a_duplicate_a_bad_name_and_a_plaintext_endpoint() {
         let dir = tempfile::tempdir().unwrap();
+        let creds_dir = credentials_dir(&dir);
         let registry = super::DeviceRegistry::load(canonical_inventory(&dir)).unwrap();
         assert!(
             registry
-                .add_device("fw-1", new_device("https://x.example.org"))
+                .add_device("fw-1", new_device("https://x.example.org", &creds_dir))
                 .is_err()
         );
         assert!(
             registry
-                .add_device("../fw", new_device("https://x.example.org"))
+                .add_device("../fw", new_device("https://x.example.org", &creds_dir))
                 .is_err()
         );
         assert!(
             registry
-                .add_device("fw-3", new_device("http://x.example.org"))
+                .add_device("fw-3", new_device("http://x.example.org", &creds_dir))
                 .is_err()
         );
         assert_eq!(registry.names(), vec!["fw-1".to_owned()]);
+    }
+
+    #[test]
+    fn add_device_refuses_a_credential_file_outside_the_credentials_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_inventory(&dir);
+        credentials_dir(&dir);
+        let registry = super::DeviceRegistry::load(&path).unwrap();
+
+        let outside_key = credential_file(dir.path(), "outside.key", "key-value");
+        let outside_secret = credential_file(dir.path(), "outside.secret", "secret-value");
+        let device: Device = serde_json::from_value(serde_json::json!({
+            "endpoint": "https://fw-2.example.org",
+            "api_key_file": outside_key,
+            "api_secret_file": outside_secret,
+        }))
+        .unwrap();
+
+        let error = registry.add_device("fw-2", device).unwrap_err();
+        assert!(
+            error.to_string().contains("credentials directory"),
+            "unexpected error: {error}"
+        );
+        assert!(registry.get("fw-2").is_err());
+    }
+
+    #[test]
+    fn add_device_refuses_a_credential_file_already_used_by_another_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_inventory(&dir);
+        let creds_dir = credentials_dir(&dir);
+        let registry = super::DeviceRegistry::load(&path).unwrap();
+
+        registry
+            .add_device("fw-2", new_device("https://fw-2.example.org", &creds_dir))
+            .unwrap();
+
+        // fw-3 tries to reuse fw-2's api_key_file.
+        let reused_key = creds_dir.join("fw-2.key");
+        let secret = credential_file(&creds_dir, "fw-3.secret", "secret-value");
+        let device: Device = serde_json::from_value(serde_json::json!({
+            "endpoint": "https://fw-3.example.org",
+            "api_key_file": reused_key,
+            "api_secret_file": secret,
+        }))
+        .unwrap();
+
+        let error = registry.add_device("fw-3", device).unwrap_err();
+        assert!(
+            error.to_string().contains("already used"),
+            "unexpected error: {error}"
+        );
+        assert!(registry.get("fw-3").is_err());
+    }
+
+    /// A stale in-memory view (e.g. another process edited `devices.json`
+    /// without this registry reloading) must not let `add_device` overwrite
+    /// a name that already exists on disk.
+    #[test]
+    fn add_device_refuses_a_name_that_exists_only_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_inventory(&dir);
+        let creds_dir = credentials_dir(&dir);
+        let registry = super::DeviceRegistry::load(&path).unwrap();
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"devices":{
+                "fw-1":{"endpoint":"https://fw-1.example.org","api_key_env":"K1","api_secret_env":"S1"},
+                "fw-9":{"endpoint":"https://operator.example.org","api_key_env":"K9","api_secret_env":"S9"}
+            }}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            registry.get("fw-9").is_err(),
+            "the stale in-memory view must not already know fw-9"
+        );
+
+        let error = registry
+            .add_device(
+                "fw-9",
+                new_device("https://attacker.example.org", &creds_dir),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("already exists"),
+            "unexpected error: {error}"
+        );
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["devices"]["fw-9"]["endpoint"], "https://operator.example.org",
+            "the operator's entry must not be overwritten"
+        );
+    }
+
+    /// A credential that fails to load must refuse the add before anything
+    /// is written, so a dead entry never reaches `devices.json`.
+    #[test]
+    fn add_device_refuses_when_a_credential_fails_to_load_and_leaves_the_file_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_inventory(&dir);
+        let creds_dir = credentials_dir(&dir);
+        let registry = super::DeviceRegistry::load(&path).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let bad_key = credential_file(&creds_dir, "fw-2.key", "key-value");
+        // Too permissive for the hardened loader, so probe_credentials fails.
+        std::fs::set_permissions(&bad_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let secret = credential_file(&creds_dir, "fw-2.secret", "secret-value");
+        let device: Device = serde_json::from_value(serde_json::json!({
+            "endpoint": "https://fw-2.example.org",
+            "api_key_file": bad_key,
+            "api_secret_file": secret,
+        }))
+        .unwrap();
+
+        assert!(registry.add_device("fw-2", device).is_err());
+        assert!(registry.get("fw-2").is_err());
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            before, after,
+            "devices.json must be untouched when a credential fails to load"
+        );
     }
 }

@@ -19,8 +19,17 @@ pub struct GatherFactsArgs {
     pub device: String,
 }
 
-/// Arguments for `add_device`. The same fields as a `devices.json` entry; the
-/// API key and secret are referenced, never passed inline.
+/// Arguments for `add_device`. The same fields as a `devices.json` entry,
+/// minus the environment-variable credential form.
+///
+/// A model-callable add must not be able to bind an *existing* credential
+/// (one an operator already exported into the service's environment) to a
+/// new, caller-chosen endpoint. Naming an env var here would do exactly
+/// that, so only the file form is accepted; env refs stay operator-only, set
+/// by hand-editing `devices.json`. The API key and secret are referenced,
+/// never passed inline, and `add_device` additionally requires both files to
+/// resolve under the server's dedicated credentials directory (see
+/// `DeviceRegistry::add_device`).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddDeviceArgs {
@@ -28,18 +37,10 @@ pub struct AddDeviceArgs {
     pub device: String,
     /// `https://` base URL.
     pub endpoint: String,
-    /// Environment variable holding the API key.
-    #[serde(default)]
-    pub api_key_env: Option<String>,
-    /// Owner-only file holding the API key.
-    #[serde(default)]
-    pub api_key_file: Option<PathBuf>,
-    /// Environment variable holding the API secret.
-    #[serde(default)]
-    pub api_secret_env: Option<String>,
-    /// Owner-only file holding the API secret.
-    #[serde(default)]
-    pub api_secret_file: Option<PathBuf>,
+    /// Owner-only file holding the API key, under the credentials directory.
+    pub api_key_file: PathBuf,
+    /// Owner-only file holding the API secret, under the credentials directory.
+    pub api_secret_file: PathBuf,
     /// PEM trust anchor for a device behind a private CA.
     #[serde(default)]
     pub ca_pem_path: Option<PathBuf>,
@@ -53,10 +54,10 @@ impl AddDeviceArgs {
             self.device,
             Device {
                 endpoint: self.endpoint,
-                api_key_env: self.api_key_env,
-                api_key_file: self.api_key_file,
-                api_secret_env: self.api_secret_env,
-                api_secret_file: self.api_secret_file,
+                api_key_env: None,
+                api_key_file: Some(self.api_key_file),
+                api_secret_env: None,
+                api_secret_file: Some(self.api_secret_file),
                 ca_pem_path: self.ca_pem_path,
             },
         )
@@ -120,8 +121,31 @@ mod tests {
     fn add_device_refuses_an_inline_secret() {
         let inline = serde_json::json!({
             "device": "fw-2", "endpoint": "https://fw-2.example.org",
-            "api_key": "inline-key-must-not-parse", "api_secret_env": "S2",
+            "api_key_file": "/creds/fw-2.key", "api_secret_file": "/creds/fw-2.secret",
+            "api_key": "inline-key-must-not-parse",
         });
         assert!(serde_json::from_value::<AddDeviceArgs>(inline).is_err());
+    }
+
+    #[test]
+    fn add_device_refuses_an_env_credential() {
+        let env_ref = serde_json::json!({
+            "device": "fw-2", "endpoint": "https://fw-2.example.org",
+            "api_key_file": "/creds/fw-2.key", "api_secret_env": "S2",
+        });
+        assert!(serde_json::from_value::<AddDeviceArgs>(env_ref).is_err());
+    }
+
+    #[test]
+    fn add_device_into_device_never_names_an_env_var() {
+        let args: AddDeviceArgs = serde_json::from_value(serde_json::json!({
+            "device": "fw-2", "endpoint": "https://fw-2.example.org",
+            "api_key_file": "/creds/fw-2.key", "api_secret_file": "/creds/fw-2.secret",
+        }))
+        .unwrap();
+        let (name, device) = args.into_device();
+        assert_eq!(name, "fw-2");
+        assert!(device.api_key_env.is_none());
+        assert!(device.api_secret_env.is_none());
     }
 }
