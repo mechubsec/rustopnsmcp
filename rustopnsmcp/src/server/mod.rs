@@ -100,8 +100,9 @@ pub struct OpnsenseServer {
     /// Operator choices from the command line.
     ///
     /// `inventory_readonly` gates `add_device` and `reload_devices` (Task
-    /// 16). `web_enabled_approver` and `direct_commit` are not yet read by
-    /// any handler (Tasks 14 and 17 wire them in); `lab_mode` was the only
+    /// 16); `web_enabled_approver` gates the staged-action preview in change-set
+    /// status (Task 14). `direct_commit` is not yet read by any handler (a
+    /// later phase wires in commit-confirmed apply); `lab_mode` was the only
     /// field read here, and Task 12 removed it from this struct now that the
     /// coordinator is its sole holder.
     options: ServerOptions,
