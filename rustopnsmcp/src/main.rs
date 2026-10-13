@@ -81,8 +81,7 @@ async fn main() -> Result<()> {
             .map_err(|error| anyhow::anyhow!("{error}"));
     }
 
-    mecmcp_runtime::cli_validate::validate(&cli.common)
-        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    mecmcp_runtime::cli_validate::validate_or_exit(&cli.common);
 
     let audit_sink = init_audit(&cli.common)?;
 
