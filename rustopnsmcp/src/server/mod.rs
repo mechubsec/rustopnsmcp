@@ -352,6 +352,7 @@ impl OpnsenseServer {
         Ok(ChangeSetRecord {
             id: crate::changeset_state::new_change_set_id(),
             owner: owner.to_owned(),
+            owner_subject: None,
             device: device.to_owned(),
             expected_candidate_fingerprint: fingerprint.to_owned(),
             actions,
@@ -1895,6 +1896,7 @@ mod tests {
         ChangeSetRecord {
             id: crate::changeset_state::new_change_set_id(),
             owner: owner.to_owned(),
+            owner_subject: None,
             device: device.to_owned(),
             expected_candidate_fingerprint: fingerprint,
             actions: stored_actions,
@@ -1948,9 +1950,11 @@ mod tests {
             .approve_change_set(
                 id,
                 "home".to_owned(),
-                "alice".to_owned(),
+                &mecmcp_changeset::ApproverIdentity::TokenAsserted {
+                    principal: "alice".to_owned(),
+                    actor_type: mecmcp_audit::ActorType::Human,
+                },
                 digest,
-                mecmcp_audit::ActorType::Human,
             )
             .await
             .expect_err("self-approval must be refused");
@@ -1972,9 +1976,11 @@ mod tests {
             .approve_change_set(
                 id,
                 "home".to_owned(),
-                "bob".to_owned(),
+                &mecmcp_changeset::ApproverIdentity::TokenAsserted {
+                    principal: "bob".to_owned(),
+                    actor_type: mecmcp_audit::ActorType::Agent,
+                },
                 digest,
-                mecmcp_audit::ActorType::Agent,
             )
             .await
             .expect_err("an agent approver must be refused");
@@ -2017,9 +2023,11 @@ mod tests {
             .approve_change_set(
                 id,
                 "home".to_owned(),
-                "bob".to_owned(),
+                &mecmcp_changeset::ApproverIdentity::TokenAsserted {
+                    principal: "bob".to_owned(),
+                    actor_type: mecmcp_audit::ActorType::Human,
+                },
                 format!("sha256:{}", "0".repeat(64)),
-                mecmcp_audit::ActorType::Human,
             )
             .await
             .expect_err("a stale digest must be refused");

@@ -153,9 +153,11 @@ pub(crate) async fn approve(
         .approve_change_set(
             change_set_id.to_owned(),
             device.to_owned(),
-            approver.to_owned(),
+            &mecmcp_changeset::ApproverIdentity::TokenAsserted {
+                principal: approver.to_owned(),
+                actor_type: approver_actor_type,
+            },
             expected_digest.to_owned(),
-            approver_actor_type,
         )
         .await
         .map_err(|error| format!("approval refused ({}): {}", error.field(), error.message()))
@@ -390,6 +392,7 @@ mod tests {
         ChangeSetRecord {
             id: crate::changeset_state::new_change_set_id(),
             owner: owner.to_owned(),
+            owner_subject: None,
             device: device.to_owned(),
             expected_candidate_fingerprint: FINGERPRINT.to_owned(),
             actions,
