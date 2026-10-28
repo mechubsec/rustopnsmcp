@@ -5989,7 +5989,7 @@ Each phase below is an outline. Its first task writes the phase's detailed plan 
 
 **Goal:** Prove every existing rustopnsmcp tool against opnsense-lab on 26.7.x, correct what the device shows to be wrong, replace the synthetic fixtures with sanitized live captures, apply and roll back an alias and a rule change set, force a partial apply, and drop the under-construction banner.
 
-**Architecture:** Nothing in P3 adds a tool. Rust changes are corrections to `rustopnsmcp-core` (endpoints, read shapes, fingerprint, pre-image comparison), each written test-first against a mock that serves the shape the device was seen to return. The live run is driven by a small stdlib-Python MCP client (`scripts/live/mcp_call.py`) that prints key names and pass/fail only, so its output can go into a public gate comment. The server and the client run on the dev host that holds the owner-only lab credentials, so the credentials never leave it. Lab writes happen only in Tasks 12-15, each gated on the user.
+**Architecture:** Nothing in P3 adds a tool. Rust changes are corrections to `rustopnsmcp-core` (endpoints, read shapes, fingerprint, pre-image comparison), each written test-first against a mock that serves the shape the device was seen to return. The live run is driven by a small stdlib-Python MCP client (`scripts/live/mcp_call.py`) that prints key names and pass/fail only, so its output can go into a public gate comment. The server runs on a disposable test rig (`test-labmode-opns`, or `test-twoperson-opns` for the two-person run) that receives the owner-only lab credentials from the dev host as owner-only files; the client runs on the workstation over HTTP with a token minted on the rig. The binary is built in a Debian 13 container, because the workstation's glibc is newer than the rigs'. Lab writes happen only in Tasks 12-15, each gated on the user.
 
 **Tech Stack:** Rust (workspace as in P1), bash and Python 3 stdlib for `scripts/live/` and `scripts/sanitize-fixture.sh`, `jq`, the pinned `gitleaks` pre-push gate.
 
@@ -5999,9 +5999,9 @@ Each phase below is an outline. Its first task writes the phase's detailed plan 
 
 Everything in "Global Constraints" above applies. Restated where P3 can break it:
 
-- **Public-repo hygiene.** The plan, the scripts and the fixtures name the device only as "opnsense-lab" and its credentials only as "the owner-only lab credentials on the dev host". No IPs, hostnames, credential file paths, or secrets. Scripts take the host, credential file and CA file from environment variables (`LAB_HOST`, `LAB_ENV_FILE`, `LAB_CA_FILE`, `LAB_WORK`) whose values are never committed. Evidence pasted into a gate comment is key names, types, counts and pass/fail only.
-- **Lab rules.** Reads before writes. No write, apply, reconfigure, savepoint, revert, set, add, del or toggle call against the device outside Tasks 12-15, and none of those without the user's explicit go-ahead for that task in this session. Never start or stop the VM; a snapshot rollback is a Task 11 step the user approves by name.
-- **Credentials stay on the dev host.** Never print, log, commit or copy the API key or secret, the root password, any CA key, or an ssh key. Only the variable names of the credentials env file are ever read by an agent.
+- **Public-repo hygiene.** The plan, the scripts and the fixtures name the device only as "opnsense-lab" and its credentials only as "the owner-only lab credentials on the dev host". No IPs, hostnames, credential file paths, or secrets. Scripts take the host, credential file and CA file from environment variables (`LAB_HOST`, `LAB_ENV_FILE`, `LAB_CA_FILE`, `LAB_WORK`, `RIG_PVE`, `P3_WORK`) whose values are never committed; the rigs are named only `test-twoperson-opns` and `test-labmode-opns`, and their addresses, guest ids and node names are looked up at run time and appear in no committed file. Evidence pasted into a gate comment is key names, types, counts and pass/fail only.
+- **Lab rules.** Reads before writes. No write, apply, reconfigure, savepoint, revert, set, add, del or toggle call against the device outside Tasks 12-15, and none of those without the user's explicit go-ahead for that task in this session. Never start or stop the opnsense-lab VM; a snapshot rollback is a Task 11 step the user approves by name. A test rig is started for a run and stopped after it, only through `scripts/live/rig-ctl.sh`, which first proves the guest is `disposable` and not `protected`.
+- **Credentials only move dev host to rig, by pipe.** Never print, log, commit or copy the API key or secret, the root password, any CA key, or an ssh key. Only the variable names of the credentials env file are ever read by an agent. The key, secret and CA certificate reach a rig as 0600 files owned by the service user, streamed through pipes and never as an argument, an environment variable on a command line, a workstation file, or output. The final step of Task 15 deletes them from the rigs.
 - **Raw captures stay on the dev host.** Only sanitized output crosses to this repository, and it is reviewed by eye before `git add`.
 - **No new tool names.** `scripts/parity-check.sh --phase P1` must still pass and `scripts/parity-allowlist.txt` is untouched.
 - **CI gates** before every commit: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo fmt --all`, then `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, all with that same `CARGO_TARGET_DIR`.
@@ -6021,7 +6021,7 @@ All probes were `GET` requests with the lab API user, 2026-10-28, device on firm
 | `/api/firewall/filter/search_rule` | 200 | `{total,rowCount,current,rows:[...]}`; `searchRule` also 200 | Path matches. 38 rows: **31 are `legacy`+`is_automatic`** (32-char refs, not UUIDs), 7 are MVC (36-char UUIDs, no `legacy` key). `coverage` will read `complete` (26.7.5 is >= 25.1). |
 | `/api/firewall/source_nat/search_rule` | 200 | same envelope, 3 rows | Match. |
 | `/api/firewall/one_to_one/search_rule` | 200 | same envelope, 0 rows | Match. No live rows to capture. |
-| `/api/firewall/d_nat/search_rule` (**not in `endpoints.rs`**) | 200 | same envelope, 4 rows (`source.network`, `destination.port`, `local-port`, `descr`, `is_automatic`, ...) | **Code comment is wrong:** "DNatController exists only on core master". Port forwards are listable on 26.7.5. `list_opnsense_nat_rules` omits them. |
+| `/api/firewall/d_nat/search_rule` (**not in `endpoints.rs`**) | 200 | same envelope, 4 rows (`source.network`, `destination.port`, `local-port`, `descr`, `is_automatic`, ...) | **Code comment is wrong:** "DNatController exists only on core master". Port forwards are listable on 26.7.5. `list_opnsense_nat_rules` omits them. **Deferred to P4/P5.2 (Task 6).** |
 | `/api/routes/routes/search_route` | 200 | same envelope, 0 rows | Match. No live rows to capture. |
 | `/api/dhcpv4/leases/search_lease` (`DHCP_LEASES_SEARCH`) | **404** | `{errorMessage}` | **Wrong on 26.7.5: ISC DHCPv4 is gone.** `list_opnsense_dhcp_leases` fails. |
 | `/api/dnsmasq/settings/get` | 200 | `{dnsmasq:{enable:"1", interface:{...}, ...}}` | New. Dnsmasq is the **enabled** DHCP backend on the lab; service `dnsmasq` running. |
@@ -6051,11 +6051,11 @@ All probes were `GET` requests with the lab API user, 2026-10-28, device on firm
 | P3.4 "gateway `items`" | Confirmed correct. No change. |
 | P3.4 "`rowCount: -1` behaviour" | Works as the code assumes. No code change. The real fingerprint hazard is the volatile counters, not `-1`. |
 | P3.4 "ISC versus Kea/Dnsmasq" | ISC is absent (404), Dnsmasq is the enabled backend, Kea is installed but disabled. |
-| P3.4 NAT | Port forwards are listable (`d_nat`). The `endpoints.rs` comment and the tool description say they are not. |
+| P3.4 NAT | Port forwards are listable (`d_nat`); the `endpoints.rs` comment and the tool description say they are not. Not fixed in P3 (Task 6 is deferred). |
 | P3.5 "replacing the synthetic ones" | Three collections are **empty** on the baseline (one-to-one NAT, static routes, DHCP leases), so there is nothing to capture. Those fixtures stay synthetic and are labelled so. |
 | P3.7 "`never_attempted` must be listed" | The apply result carries `never_attempted` as a **count**, not a list. The pass condition is the count (and `action_count` from status). Listing the actions is a code change the plan does not make. |
 | P3.8 "the README's tool table" | `README.md` has no tool table; it has a Status section. Task 16 adds a short table of the P1 tool names. |
-| P3.6 "second principal" | stdio has one principal. The two-person run needs the HTTP transport with two tokens (Task 13). The lab-mode waiver run (Task 12) uses stdio. |
+| P3.6 "second principal" | A single principal cannot approve its own plan. The two-person run needs two tokens on `test-twoperson-opns` (Task 13); the lab-mode waiver runs use `test-labmode-opns`. |
 
 #### Overlap with P2
 
@@ -6065,9 +6065,10 @@ P2 (packaging) is being planned and written at the same time. Files both phases 
 |---|---|---|---|
 | `README.md` | P2.10 may link the new docs | Task 16 removes the banner and rewrites Status | Land Task 16 last; rebase onto P2's README change. The edits are in different sections (top banner and `## Status`). |
 | `.github/workflows/ci.yml` | P2.8 adds the conformance job | Task 9 adds one step running the sanitizer test | Append the step after "One mecmcp pin"; a trivial textual merge. |
-| `rustopnsmcp-core/src/endpoints.rs` | P2.7 (`/readyz` auth check) needs a cheap authenticated endpoint | Tasks 4-6 add and change constants | P2.7 should use `FIRMWARE_STATUS` or `SYSTEM_STATUS`: both answered 200 with the lab API user. P3 does not rename or remove either. |
+| `rustopnsmcp-core/src/endpoints.rs` | P2.7 (`/readyz` auth check) needs a cheap authenticated endpoint | Tasks 4-5 add and change constants | P2.7 should use `FIRMWARE_STATUS` or `SYSTEM_STATUS`: both answered 200 with the lab API user. P3 does not rename or remove either. |
+| `packaging/systemd/` | P2.2 reworks the unit; P2.4 adds `install.sh` | read only: Task 2 installs the packaged files and overrides `ExecStart` in a drop-in | No edit. A different unit shape does not break the drop-in. `install.sh` supersedes Task 2's manual install. |
 | `scripts/` | P2.5 adds `package-lxc.sh` | Adds `sanitize-fixture.sh`, `sanitize_fixture.py`, `live/`, `tests/` | Distinct names. `scripts/tests/` is new; if P2 also creates it, keep both. |
-| `CHANGELOG.md` | P2.10 creates it | none | P3 does not create it. Its user-visible changes (DHCP backends, NAT port forwards, fingerprint stability, facts) are listed in Task 16's commit message for P7 to carry. |
+| `CHANGELOG.md` | P2.10 creates it | none | P3 does not create it. Its user-visible changes (DHCP backends, fingerprint stability, facts) are listed in Task 16's commit message for P7 to carry. |
 | `scripts/parity-allowlist.txt`, `packaging/**`, `Cargo.toml`, `Cargo.lock`, `.gitleaks.toml` | edits | untouched | P3 adds no dependency, tool, flag or allowlist entry. |
 
 #### File structure
@@ -6075,14 +6076,16 @@ P2 (packaging) is being planned and written at the same time. Files both phases 
 | Path | Task | Responsibility |
 |---|---|---|
 | `scripts/live/lab-get.sh` | 1 | Read-only `GET` against the lab: shape mode (key names only) or raw mode (to a file on the dev host). Refuses any other method. |
-| `scripts/live/mcp_call.py` | 1 | Stdlib MCP client: stdio or HTTP, one PASS/FAIL line per call, shapes only. |
-| `scripts/live/lab-devices.sh` | 2 | Writes a 0600 `devices.json` for opnsense-lab from the credentials env file's variable names. |
-| `scripts/live/lab-server.sh` | 2 | Starts the server with the credentials loaded from the env file, for stdio or HTTP. |
+| `scripts/live/mcp_call.py` | 1 | Stdlib MCP client: stdio or HTTP, one PASS/FAIL line per call, shapes only. Runs on the workstation. |
+| `scripts/live/build-trixie.sh` | 2 | Builds the binary in a Debian 13 Rust container and checks its glibc floor. |
+| `scripts/live/rig-ctl.sh` | 2 | Evidence-checked start, stop, service control and state reset for a test rig. |
+| `scripts/live/emit-credential.sh`, `make-devices-json.py` | 2 | Stream one lab credential, or build `devices.json`, for a rig without it touching an argument, a variable or a file. |
+| `scripts/live/rig-install.sh`, `rig-override.conf.in`, `rig-token.sh` | 2 | Minimal manual install into a rig (superseded by P2's `install.sh`) and token minting. |
 | `scripts/tests/mcp_call_smoke.sh` | 1 | Local check of the client against the built server with no device. |
-| `rustopnsmcp-core/src/endpoints.rs` | 4, 5, 6 | DHCP backend, system time and destination NAT paths; corrected comments. |
-| `rustopnsmcp-core/src/tools/read.rs` | 4, 6 | DHCP backend selection; destination NAT in the NAT listing. |
+| `rustopnsmcp-core/src/endpoints.rs` | 4, 5 | DHCP backend and system time paths; corrected comments. |
+| `rustopnsmcp-core/src/tools/read.rs` | 4 | DHCP backend selection. |
 | `rustopnsmcp-core/src/tools/fleet.rs` | 5 | Facts from firmware status and system time. |
-| `rustopnsmcp/src/server/mod.rs` | 4, 5, 6 | Tool descriptions and the facts call. |
+| `rustopnsmcp/src/server/mod.rs` | 4, 5 | Tool descriptions and the facts call. |
 | `rustopnsmcp-core/src/changeset/fingerprint.rs`, `preimage.rs` | 7 | Wider `VOLATILE_FIELDS`; `same_configuration`. |
 | `rustopnsmcp-core/src/client.rs` | 7 | `preimage_matches` through `same_configuration`. |
 | `scripts/sanitize-fixture.sh`, `scripts/sanitize_fixture.py` | 9 | Fixture sanitizer and its self-check. |
@@ -6338,67 +6341,219 @@ git commit -m "scripts: lab read helper and shapes-only MCP client for live veri
 
 ---
 
-### P3-Task 2: Lab access and where the server runs (P3.2)
+### P3-Task 2: Test rigs and where the server runs (P3.2)
+
+**Decision: the server runs on a disposable test rig, not on the dev host.** Two stopped-by-default test LXCs follow the fleet's test-tier pattern (Debian 13, unprivileged, `nesting=1`, 1 core, 512 MB, no Rust toolchain):
+
+- `test-twoperson-opns`: the server in two-person mode. Task 13 runs here.
+- `test-labmode-opns`: the server with `--lab-mode`. Tasks 3, 8, 12, 14 and 15 run here.
+
+The production-tier pair waits for a release and is out of P3 scope. Each rig is started for a run and stopped afterwards; every start and stop first resolves the rig by name and checks its tags (`disposable`, never `protected`). The client, `mcp_call.py`, runs on the workstation over plain HTTP with a bearer token minted on the rig. The `test-*` names make the target obvious in every command.
+
+- **Binary.** The workstation's glibc (2.44) is newer than Debian 13's (2.41), and no release image exists yet, so the binary is built in the official Rust image on trixie at the toolchain in `rust-toolchain.toml`, and its glibc requirement is checked.
+- **Install.** A minimal manual install: service user and directories from the packaged `sysusers`/`tmpfiles`, the packaged unit with a drop-in that replaces `ExecStart`, `devices.json`, `tokens.json`. **Superseded by `packaging/lxc/install.sh` once P2 lands**; the drop-in leaves the packaged unit untouched, so P2's rework of it does not conflict. Plain HTTP with `--allow-insecure-bind` and `--allowed-host` naming the rig's address and short name, as the sibling test rigs do. No TLS.
+- **Credentials.** The lab API key, secret and CA certificate go from the dev host into each rig as owner-only files (0600, owned by the service user) under `/etc/rustopnsmcp/credentials/`, next to `devices.json`, which names them with `api_key_file`, `api_secret_file` and `ca_pem_path`. They stream dev host to rig through pipes: never a command-line argument, an environment variable, a file on the workstation, or output. `devices.json` is built from the endpoint the same way. The rig reaches opnsense-lab by IP literal, and the web certificate's SANs include that address, so whether the HTTP client accepts an IP-literal endpoint is answered by Step 6.
+- **Hygiene.** The scripts take the node, the dev host and the credentials file from `RIG_PVE`, `LAB_HOST` and `LAB_ENV_FILE` (never committed). Rig addresses and guest ids are looked up at run time and appear in no committed file.
 
 **Files:**
-- Create: `scripts/live/lab-devices.sh`, `scripts/live/lab-server.sh`, `scripts/live/calls/smoke.json`
-- Runtime only, never committed: the lab `devices.json`, the state file, tokens, raw captures, all under `$LAB_WORK` on the dev host (mode 0700, outside every repository).
-
-**Decision: the server and the client run on the dev host that holds the owner-only lab credentials.** This workstation drives them over ssh with `bash -s` scripts read from stdin (fish-safe: no quoting). The credentials are never copied here. The server binary holds no secrets, so it is built here and copied to the dev host; both hosts are the same distribution and glibc.
+- Create: `scripts/live/build-trixie.sh`, `scripts/live/rig-ctl.sh`, `scripts/live/emit-credential.sh`, `scripts/live/make-devices-json.py`, `scripts/live/rig-override.conf.in`, `scripts/live/rig-install.sh`, `scripts/live/rig-token.sh`, `scripts/live/calls/smoke.json`
+- Runtime only, never committed: the rig's `devices.json`, tokens, credentials, state file. On the workstation, a scratch directory `$P3_WORK` (mode 0700, outside every repository) holds the vars files, including `baseline.json`.
 
 **Interfaces:**
-- Consumes: the credentials env file defines `OPNSENSE_URL`, `OPNSENSE_API_KEY`, `OPNSENSE_API_SECRET` and `OPNSENSE_CA` (names only are relied on; `OPNSENSE_CA` is the CA file path).
-- Produces: `$LAB_WORK/devices.json` naming the device `opnsense-lab`, with `api_key_env: OPNSENSE_API_KEY`, `api_secret_env: OPNSENSE_API_SECRET` and `ca_pem_path` from `OPNSENSE_CA`, mode 0600. `lab-server.sh stdio|http <flags...>` execs the server with those variables exported.
+- Consumes: the lab credentials env file on the dev host defines `OPNSENSE_URL`, `OPNSENSE_API_KEY`, `OPNSENSE_API_SECRET` and `OPNSENSE_CA` (a certificate file path).
+- Produces: a running `rustopnsmcp` on each rig on port 30037, and `rig-token.sh <rig> <name> agent|human`, which prints a token alone for command substitution. Later tasks reach a rig at `http://$RIG_IP:30037/mcp`, with `RIG_IP` looked up by `ssh $RIG_PVE pct exec <id> -- hostname -I`.
 
-- [ ] **Step 1: Write `scripts/live/lab-devices.sh`**
-
-```bash
-#!/usr/bin/env bash
-# Write a 0600 devices.json for opnsense-lab. Runs on the dev host. The file holds the endpoint and
-# the CA path but only the NAMES of the credential variables, never their values.
-set -euo pipefail
-: "${LAB_ENV_FILE:?}" "${LAB_WORK:?}"
-set -a; . "$LAB_ENV_FILE"; set +a
-umask 077; mkdir -p "$LAB_WORK"; chmod 700 "$LAB_WORK"
-jq -n --arg endpoint "$OPNSENSE_URL" --arg ca "$OPNSENSE_CA" '{version:1, devices:{"opnsense-lab":{
-  endpoint:$endpoint, api_key_env:"OPNSENSE_API_KEY", api_secret_env:"OPNSENSE_API_SECRET", ca_pem_path:$ca}}}' \
-  > "$LAB_WORK/devices.json"
-chmod 600 "$LAB_WORK/devices.json"
-jq -r '.devices | keys | join(",")' "$LAB_WORK/devices.json"
-```
-
-- [ ] **Step 2: Write `scripts/live/lab-server.sh`**
+- [ ] **Step 1: Write the build script, `scripts/live/build-trixie.sh`.** (Checked while writing this plan: the image tag exists, the build takes about a minute warm, and the result needed `GLIBC_2.38`.)
 
 ```bash
 #!/usr/bin/env bash
-# Exec rustopnsmcp against opnsense-lab with the credentials in its environment only.
-#   lab-server.sh <server-binary> [server flags...]
+# Build rustopnsmcp for Debian 13 in the official Rust image, at the toolchain in rust-toolchain.toml.
+# The workstation's glibc is newer than Debian 13's, so a host-built binary does not start on a rig.
 set -euo pipefail
-: "${LAB_ENV_FILE:?}" "${LAB_WORK:?}"
-binary="${1:?server binary}"; shift
-set -a; . "$LAB_ENV_FILE"; set +a
-exec "$binary" --device-mapping "$LAB_WORK/devices.json" --state-file "$LAB_WORK/changeset-state.json" "$@"
+root=$(git rev-parse --show-toplevel)
+version=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$root/rust-toolchain.toml")
+cache="${P3_BUILD_CACHE:-$HOME/.cache/rustopnsmcp-p3-trixie}"; mkdir -p "$cache/target" "$cache/cargo"
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp -e RUSTUP_HOME=/usr/local/rustup -e RUSTUP_TOOLCHAIN="$version" \
+  -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
+  -v "$root":/src:ro -v "$cache":/cache -w /src "rust:${version}-trixie" \
+  cargo build --release --locked -p rustopnsmcp
+bin="$cache/target/release/rustopnsmcp"
+glibc=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+echo "$bin needs $glibc"
+[ "$(printf '%s\nGLIBC_2.41\n' "$glibc" | sort -V | tail -1)" = GLIBC_2.41 ] \
+  || { echo "needs glibc newer than Debian 13's 2.41" >&2; exit 1; }
 ```
 
-- [ ] **Step 3: Build, copy and generate (no device contact)**
+- [ ] **Step 2: Write `scripts/live/rig-ctl.sh`.** It is the only thing that starts, stops or runs a command inside a rig.
 
-The user sets `LAB_HOST` (ssh alias), `LAB_ENV_FILE`, `LAB_CA_FILE`, `LAB_WORK` in their shell; their values are not written anywhere in the repository.
+```bash
+#!/usr/bin/env bash
+# Control a P3 test rig (a disposable LXC) from the workstation.
+#   rig-ctl.sh check|start|stop <rig>      evidence check, then start or stop the guest
+#   rig-ctl.sh svc <rig> <systemctl verb>  systemctl <verb> rustopnsmcp inside the rig
+#   rig-ctl.sh reset-state <rig>           stop the service, delete its change-set state, start it
+#   rig-ctl.sh vmid <rig>                  print the guest id on stdout (for other scripts)
+# <rig> is test-twoperson-opns or test-labmode-opns. Needs RIG_PVE: the ssh alias of the node hosting them.
+set -euo pipefail
+action="${1:?check|start|stop|svc|vmid}"; name="${2:?rig name}"
+case "$name" in test-twoperson-opns|test-labmode-opns) ;; *) echo "not a P3 rig: $name" >&2; exit 2 ;; esac
+: "${RIG_PVE:?}"
+# Resolve the name to a guest and its tags every time; ids get recycled.
+info=$(ssh "$RIG_PVE" pvesh get /cluster/resources --type vm --output-format json | NAME="$name" python3 -I -c '
+import json, os, sys
+rows = [r for r in json.load(sys.stdin) if r.get("name") == os.environ["NAME"]]
+if len(rows) != 1:
+    sys.exit("expected exactly one guest named %s, found %d" % (os.environ["NAME"], len(rows)))
+guest = rows[0]
+tags = (guest.get("tags") or "").replace(",", ";").split(";")
+if guest.get("type") != "lxc" or "protected" in tags or "disposable" not in tags:
+    sys.exit("refusing: %s must be a disposable, unprotected LXC (tags: %s)" % (guest["name"], ";".join(tags)))
+print(guest["vmid"], guest["node"], guest["status"])')
+read -r vmid node status <<<"$info"
+[ "$node" = "$(ssh "$RIG_PVE" hostname -s)" ] || { echo "$name is on $node, not on the node $RIG_PVE reaches" >&2; exit 1; }
+echo "$name: node $node, $status, tags include disposable and not protected" >&2
+case "$action" in
+  vmid) echo "$vmid" ;;
+  check) ;;
+  start)
+    [ "$status" = running ] || ssh "$RIG_PVE" pct start "$vmid"
+    for _ in $(seq 30); do
+      [ -n "$(ssh "$RIG_PVE" pct exec "$vmid" -- hostname -I 2>/dev/null | tr -d ' \n')" ] && exit 0
+      sleep 2
+    done
+    echo "$name has no address after 60 s" >&2; exit 1 ;;
+  stop) [ "$status" = stopped ] || ssh "$RIG_PVE" pct shutdown "$vmid" --timeout 30 ;;
+  svc) ssh "$RIG_PVE" pct exec "$vmid" -- systemctl "${3:?verb}" rustopnsmcp ;;
+  reset-state)
+    ssh "$RIG_PVE" pct exec "$vmid" -- systemctl stop rustopnsmcp
+    ssh "$RIG_PVE" pct exec "$vmid" -- rm -f /var/lib/rustopnsmcp/changeset-state.json
+    ssh "$RIG_PVE" pct exec "$vmid" -- systemctl start rustopnsmcp ;;
+  *) echo "unknown action $action" >&2; exit 2 ;;
+esac
+```
+
+- [ ] **Step 3: Write the install scripts.** `emit-credential.sh` runs on the dev host. The three small files and `rig-install.sh` run on the workstation.
+
+```bash
+#!/usr/bin/env bash
+# Runs on the dev host (ssh ... bash -s -- <what> < emit-credential.sh). Writes one lab credential to
+# stdout and nothing else, for piping straight into a rig. Never run it with its output on a terminal.
+set -euo pipefail
+: "${LAB_ENV_FILE:?}"
+set -a; . "$LAB_ENV_FILE"; set +a
+case "${1:?key|secret|ca|endpoint}" in
+  key) printf '%s' "$OPNSENSE_API_KEY" ;;
+  secret) printf '%s' "$OPNSENSE_API_SECRET" ;;
+  ca) cat "$OPNSENSE_CA" ;;
+  endpoint) printf '%s' "$OPNSENSE_URL" ;;
+  *) exit 2 ;;
+esac
+```
+
+```python
+#!/usr/bin/env python3
+"""Read the lab endpoint on stdin, write the rig's devices.json on stdout. The endpoint is never printed elsewhere."""
+import json, sys
+endpoint = sys.stdin.read().strip()
+if not endpoint.startswith("https://"):
+    sys.exit("endpoint must be https://")
+base = "/etc/rustopnsmcp/credentials/"
+json.dump({"version": 1, "devices": {"opnsense-lab": {
+    "endpoint": endpoint, "api_key_file": base + "api-key", "api_secret_file": base + "api-secret",
+    "ca_pem_path": base + "ca.pem"}}}, sys.stdout)
+```
+
+`scripts/live/rig-override.conf.in`:
+
+```ini
+# P3 manual install. Superseded by packaging/lxc/install.sh once P2 lands.
+# Replaces the packaged ExecStart: plain HTTP for a throwaway test rig, no TLS, the inventory read-only.
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rustopnsmcp \
+    --device-mapping /etc/rustopnsmcp/devices.json \
+    --tokens-file /var/lib/rustopnsmcp/tokens.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --transport streamable-http --host @RIG_IP@ --port 30037 --allow-insecure-bind \
+    --allowed-host @RIG_IP@ --allowed-host @RIG_IP@:30037 \
+    --allowed-host @RIG_NAME@ --allowed-host @RIG_NAME@:30037 \
+    --inventory-readonly @LAB_MODE@
+EnvironmentFile=
+```
+
+```bash
+#!/usr/bin/env bash
+# Minimal manual install of rustopnsmcp into a P3 test rig. Superseded by packaging/lxc/install.sh once P2 lands.
+#   rig-install.sh <rig> <binary>
+# Needs RIG_PVE (node ssh alias), LAB_HOST (dev host ssh alias), LAB_ENV_FILE (path on the dev host).
+# Credentials stream dev host -> rig through pipes: never an argument, a variable, a file here, or output.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd); root=$(git -C "$here" rev-parse --show-toplevel)
+rig="${1:?rig}"; binary="${2:?binary}"
+vmid=$("$here/rig-ctl.sh" vmid "$rig")
+inrig() { ssh "$RIG_PVE" pct exec "$vmid" -- "$@"; }
+ip=$(inrig hostname -I | awk '{print $1}')
+mode=""; [ "$rig" = test-labmode-opns ] && mode="--lab-mode"
+emit() { ssh "$LAB_HOST" env "LAB_ENV_FILE=$LAB_ENV_FILE" bash -s -- "$1" < "$here/emit-credential.sh"; }
+tmp=$(ssh "$RIG_PVE" mktemp -d); local_tmp=$(mktemp -d)
+trap 'ssh "$RIG_PVE" rm -rf "$tmp"; rm -rf "$local_tmp"' EXIT
+sed -e "s/@RIG_IP@/$ip/g" -e "s/@RIG_NAME@/$rig/g" -e "s/@LAB_MODE@/$mode/" "$here/rig-override.conf.in" > "$local_tmp/override.conf"
+scp -q "$binary" "$root/packaging/systemd/rustopnsmcp.service" "$root/packaging/systemd/rustopnsmcp.sysusers" \
+  "$root/packaging/systemd/rustopnsmcp.tmpfiles" "$local_tmp/override.conf" "$RIG_PVE:$tmp/"
+push() { ssh "$RIG_PVE" pct push "$vmid" "$tmp/$1" "$2" --perms "$3"; }
+inrig mkdir -p /etc/systemd/system/rustopnsmcp.service.d
+push rustopnsmcp /usr/local/bin/rustopnsmcp 0755
+push rustopnsmcp.service /etc/systemd/system/rustopnsmcp.service 0644
+push override.conf /etc/systemd/system/rustopnsmcp.service.d/override.conf 0644
+push rustopnsmcp.sysusers /usr/lib/sysusers.d/rustopnsmcp.conf 0644
+push rustopnsmcp.tmpfiles /usr/lib/tmpfiles.d/rustopnsmcp.conf 0644
+inrig systemd-sysusers
+inrig systemd-tmpfiles --create
+inrig install -d -m 0700 -o rustopnsmcp -g rustopnsmcp /etc/rustopnsmcp/credentials
+# umask 077 and the stream: the file is created 0600; ownership is fixed afterwards.
+put() { ssh "$RIG_PVE" "pct exec $vmid -- sh -c 'umask 077; cat > $1'"; inrig chown rustopnsmcp:rustopnsmcp "$1"; }
+emit key    | put /etc/rustopnsmcp/credentials/api-key
+emit secret | put /etc/rustopnsmcp/credentials/api-secret
+emit ca     | put /etc/rustopnsmcp/credentials/ca.pem
+emit endpoint | python3 -I "$here/make-devices-json.py" | put /etc/rustopnsmcp/devices.json
+inrig systemctl daemon-reload
+# Sizes and modes only; a zero size means the rig did not forward stdin (see the plan's fallback).
+inrig stat -c '%a %U %s %n' /etc/rustopnsmcp/devices.json /etc/rustopnsmcp/credentials/api-key \
+  /etc/rustopnsmcp/credentials/api-secret /etc/rustopnsmcp/credentials/ca.pem | sed 's#/etc/rustopnsmcp/##'
+```
+
+```bash
+#!/usr/bin/env bash
+# Mint a bearer token on a rig for opnsense-lab and print it alone on stdout, for command substitution.
+#   rig-token.sh <rig> <token-name> agent|human
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+rig="${1:?rig}"; name="${2:?name}"; actor="${3:?agent|human}"
+vmid=$("$here/rig-ctl.sh" vmid "$rig")
+ssh "$RIG_PVE" pct exec "$vmid" -- runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \
+  --tokens-file /var/lib/rustopnsmcp/tokens.json --name "$name" --devices opnsense-lab --tools '\*' --actor-type "$actor"
+```
+
+- [ ] **Step 4: Build and check, no rig contact.**
 
 ```fish
-env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo build --release -p rustopnsmcp
-ssh $LAB_HOST "mkdir -p -m 700 $LAB_WORK/bin"
-scp $HOME/.cache/rustopnsmcp-p3-target/release/rustopnsmcp $LAB_HOST:$LAB_WORK/bin/rustopnsmcp
-scp scripts/live/lab-server.sh scripts/live/mcp_call.py $LAB_HOST:$LAB_WORK/bin/
-ssh $LAB_HOST "env LAB_ENV_FILE=$LAB_ENV_FILE LAB_WORK=$LAB_WORK bash -s" < scripts/live/lab-devices.sh
+bash scripts/live/build-trixie.sh
 ```
 
-Expected: the last command prints `opnsense-lab`. `ssh $LAB_HOST "stat -c '%a %U' $LAB_WORK/devices.json"` prints `600` and the service user.
+Expected: the last line reads `... needs GLIBC_2.38` (anything up to `GLIBC_2.41` is acceptable). The binary is at `$HOME/.cache/rustopnsmcp-p3-trixie/target/release/rustopnsmcp`. Run `for f in scripts/live/*.sh; bash -n $f; end` and expect no output.
 
-- [ ] **Step 4: Smoke the first device contact (read-only)**
+- [ ] **Step 5: Evidence check and first install. Needs the user's go-ahead (starts a rig and puts the lab credentials on it).** The user sets `RIG_PVE`, `LAB_HOST` and `LAB_ENV_FILE` in their shell.
 
-`devices.json` carries the endpoint as an IP literal, which the web certificate covers. If the HTTP client refuses an IP-literal endpoint or a private destination, stop and report; the fallback is a host-file entry for `opnsense-lab` on the dev host, which is a change to that host and needs the user's go-ahead.
+```fish
+bash scripts/live/rig-ctl.sh check test-labmode-opns
+bash scripts/live/rig-ctl.sh start test-labmode-opns
+bash scripts/live/rig-install.sh test-labmode-opns $HOME/.cache/rustopnsmcp-p3-trixie/target/release/rustopnsmcp
+```
 
-Write `scripts/live/calls/smoke.json` (no host detail in it) and copy it to `$LAB_WORK`:
+Expected: the check prints the rig's tag evidence; the install ends by printing `600 rustopnsmcp <size> ...` for `devices.json` and the three credential files, all sizes non-zero. A zero size means `pct exec` did not forward stdin; stop, and fall back to staging each secret in a 0700 directory on the node with `umask 077`, `pct push` it with `--perms 0600`, then delete the staging directory and report. Repeat the same three commands for `test-twoperson-opns`.
+
+- [ ] **Step 6: Mint a token and smoke the first device contact (read-only).** The calls file `scripts/live/calls/smoke.json`:
 
 ```json
 [
@@ -6407,15 +6562,23 @@ Write `scripts/live/calls/smoke.json` (no host detail in it) and copy it to `$LA
 ]
 ```
 
-Run: `ssh $LAB_HOST "env LAB_ENV_FILE=$LAB_ENV_FILE LAB_WORK=$LAB_WORK python3 -I $LAB_WORK/bin/mcp_call.py $LAB_WORK/smoke.json --stdio -- $LAB_WORK/bin/lab-server.sh $LAB_WORK/bin/rustopnsmcp --inventory-readonly"`
-Expected: two `PASS`. Add `--stderr $LAB_WORK/server.log` to keep the server's audit lines for diagnosing an unexpected failure; they stay on the dev host.
+```fish
+set -x P3_LAB_TOKEN (bash scripts/live/rig-token.sh test-labmode-opns p3-lab agent)
+bash scripts/live/rig-ctl.sh svc test-labmode-opns restart
+set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-labmode-opns) -- hostname -I | awk '{print $1}')
+python3 -I scripts/live/mcp_call.py scripts/live/calls/smoke.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN
+```
 
-- [ ] **Step 5: Commit**
+Expected: two `PASS`. If `opnsmcp_status` is refused with a Host-header error, adjust the `--allowed-host` entries in the rig's `override.conf` (the template lists the address and name with and without the port). **If the rig cannot reach opnsense-lab, or the HTTP client refuses an IP-literal or private-address endpoint, stop and report**; the fallback is a host-file entry naming `opnsense-lab` on the rig, which needs the user's go-ahead. The token is never printed; the rig keeps its audit lines in the journal, not in any output pasted into a gate comment.
+
+- [ ] **Step 7: Stop the rigs when the run ends:** `bash scripts/live/rig-ctl.sh stop test-labmode-opns` (and the other). Each stop repeats the tag evidence check. The credentials remain on the rig's disk until Task 15's final step removes them.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-chmod +x scripts/live/lab-devices.sh scripts/live/lab-server.sh
-git add scripts/live/lab-devices.sh scripts/live/lab-server.sh scripts/live/calls/smoke.json
-git commit -m "scripts: lab inventory and server launcher that keep credentials on the dev host (#425)"
+chmod +x scripts/live/*.sh
+git add scripts/live/build-trixie.sh scripts/live/rig-ctl.sh scripts/live/emit-credential.sh scripts/live/make-devices-json.py scripts/live/rig-override.conf.in scripts/live/rig-install.sh scripts/live/rig-token.sh scripts/live/calls/smoke.json
+git commit -m "scripts: test-rig build, install and control for the live run (#425)"
 ```
 
 ---
@@ -6474,9 +6637,9 @@ Fleet-meta and the nine reads, each with the key or pointer that shows the right
 
 The `confirm_timeout_mins` refusal needs an existing change set and is exercised in Task 12 (Step 6), before its apply.
 
-- [ ] **Step 3: Run both against the lab**, copying the two files to `$LAB_WORK` first
+- [ ] **Step 3: Run both against the lab**
 
-`ssh $LAB_HOST "env LAB_ENV_FILE=... LAB_WORK=... python3 -I $LAB_WORK/bin/mcp_call.py $LAB_WORK/reads.json --stdio -- $LAB_WORK/bin/lab-server.sh $LAB_WORK/bin/rustopnsmcp --inventory-readonly"`, then the same with `refusals.json`.
+Start `test-labmode-opns` (Task 2 Step 5), then on the workstation `python3 -I scripts/live/mcp_call.py scripts/live/calls/reads.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`, then the same with `refusals.json`. Both rigs run with `--inventory-readonly`, which the `add_device` and `reload_devices` rows rely on. Stop the rig afterwards.
 
 If `error_contains` for `add_device` does not match the server's real wording, set it to what the run shows; the wording is not part of the contract, the refusal is.
 
@@ -6493,7 +6656,7 @@ If `error_contains` for `add_device` does not match the server's real wording, s
 | 7 | `list_opnsense_gateways` | PASS | | |
 | 8 | `list_opnsense_firewall_rules` (+ page 2) | PASS, `coverage: complete`, total 38 | | 31 rows are legacy/automatic |
 | 9 | `list_opnsense_aliases` (+ search, max_bytes) | PASS; UUIDs survive redaction | | Verify no row is over-redacted |
-| 10 | `list_opnsense_nat_rules` | PASS (outbound 3, one-to-one 0, no port forwards) | | d_nat added in Task 6 |
+| 10 | `list_opnsense_nat_rules` | PASS (outbound 3, one-to-one 0; port forwards not listed) | | port forwards deferred to P4/P5.2 |
 | 11 | `list_opnsense_routes` | PASS (0 rows) | | |
 | 12 | `list_opnsense_dhcp_leases` | **FAIL** (upstream 404) | | Fixed in Task 4 |
 | 13 | `get_opnsense_config_fingerprint` | PASS | | Stability checked in Task 8 |
@@ -6748,37 +6911,9 @@ Update `a_missing_fact_is_null_not_invented` to drop its `cpu_type` assertion an
 
 ---
 
-### P3-Task 6: Port forwards in the NAT listing (P3.4)
+### P3-Task 6: Port forwards in the NAT listing: deferred
 
-**Files:**
-- Modify: `rustopnsmcp-core/src/endpoints.rs` (add `NAT_DESTINATION_SEARCH`, correct the `NAT_ONE_TO_ONE_SEARCH` comment), `rustopnsmcp-core/src/tools/read.rs` (`list_nat_rules`), `rustopnsmcp/src/server/mod.rs` (description)
-- Test: `rustopnsmcp-core/tests/read_tools.rs`
-
-**Interfaces:**
-- Produces: `endpoints::NAT_DESTINATION_SEARCH = "/api/firewall/d_nat/search_rule"`; `list_nat_rules` returns `{outbound, one_to_one, destination}`, three pages sharing the byte budget by thirds.
-
-This is additive on an existing read and removes a false statement from the tool description. If the reviewer prefers to leave NAT breadth to P4/P5.2, drop this task; nothing else depends on it.
-
-- [ ] **Step 1: Failing test**
-
-```rust
-#[tokio::test]
-async fn list_nat_rules_includes_port_forwards() {
-    let mut routes = default_routes();
-    routes.insert(
-        rustopnsmcp_core::endpoints::NAT_DESTINATION_SEARCH.to_owned(),
-        serde_json::json!({ "rows": [{ "uuid": "11111111-1111-4111-8111-111111111111", "descr": "web" }],
-                            "rowCount": 1, "total": 1, "current": 1 }),
-    );
-    let client = client_against(routes).await;
-    let nat = read::list_nat_rules(&client, &no_filter()).await.expect("nat");
-    assert_eq!(nat["destination"]["rows"][0]["descr"], "web");
-}
-```
-
-- [ ] **Step 2: Run, expect compile failure.** **Step 3: Implement**: a third `search_page` with `max_bytes: page.max_bytes / 3` for all three, and the extra `"destination"` key. Add the constant with this comment: "Port forwards (destination NAT). Seen on 26.7.5 (opnsense-lab, HTTP 200). The earlier claim that `DNatController` exists only on core master was wrong for this release." Update the existing `list_nat_rules_combines_outbound_and_one_to_one` routes with a `NAT_DESTINATION_SEARCH` fixture entry (`default_routes()` gets one; Task 10 replaces it with the live capture). Description: replace "Port forwards (destination NAT) are NOT included." with "Outbound, 1:1 and destination NAT (port forwards), side by side."
-
-- [ ] **Step 4: Gates and commit** (`feat: list port forwards with the other NAT rules (#425)`).
+**Deferred to P4 / P5.2 by the user's decision; nothing to do in P3.** The probe finding to carry forward: `GET /api/firewall/d_nat/search_rule` answers 200 on 26.7.5 with the usual envelope (4 rows on the baseline), so the `endpoints.rs` comment that `DNatController` "exists only on core master" and the `list_opnsense_nat_rules` description ("Port forwards ... are NOT included") are wrong for this release. The task number is kept so the list stays stable. Until then Task 3's NAT row passes with outbound and one-to-one rules only, and the README (Task 16) must say port forwards are not listed.
 
 ---
 
@@ -6864,10 +6999,10 @@ In `client.rs`, `preimage_matches`: replace `Some(live) if live == recorded => {
 
 **Needs user acknowledgement:** same as Task 3 (read-only, `POST` searches).
 
-- [ ] **Step 1: Rebuild and copy** the release binary to the dev host (Task 2, Step 3).
-- [ ] **Step 2: Re-run `reads.json` and `refusals.json`.** Expected: every row of the Task 3 table is PASS, including `list_opnsense_dhcp_leases` (`backend: dnsmasq`), `gather_device_facts` (non-null name, uptime and load), and `list_opnsense_nat_rules` (a non-empty `destination`).
-- [ ] **Step 3: Stability check.** Run `reads.json` a second time 30 seconds after the first, with `--save-vars $LAB_WORK/fp-run2.json`, and the first with `--save-vars $LAB_WORK/fp-run1.json`; `cmp` the two files on the dev host. Expected: identical. Before Task 7 they would differ whenever an alias counter ticked.
-- [ ] **Step 4: Record the baseline.** The first clean run's `fp-run1.json` is copied to `$LAB_WORK/baseline.json` after renaming its `fp` key to `baseline` (`jq '{baseline: .fp}'`). Every later write task requires the live fingerprint to equal it. It is a hash of configuration, not a secret, but it lives on the dev host so the plan stays free of device facts.
+- [ ] **Step 1: Rebuild and reinstall.** Run `scripts/live/build-trixie.sh`, start `test-labmode-opns`, and re-run `scripts/live/rig-install.sh` (it overwrites the binary and leaves `tokens.json`; restart the service with `rig-ctl.sh svc test-labmode-opns restart`).
+- [ ] **Step 2: Re-run `reads.json` and `refusals.json`.** Expected: every row of the Task 3 table is PASS, including `list_opnsense_dhcp_leases` (`backend: dnsmasq`), `gather_device_facts` (non-null name, uptime and load), and `list_opnsense_nat_rules` (outbound and one-to-one only; port forwards are deferred).
+- [ ] **Step 3: Stability check.** Run `reads.json` a second time 30 seconds after the first, with `--save-vars $P3_WORK/fp-run2.json`, and the first with `--save-vars $P3_WORK/fp-run1.json`; `cmp` the two files. Expected: identical. Before Task 7 they would differ whenever an alias counter ticked.
+- [ ] **Step 4: Record the baseline.** The first clean run's `fp-run1.json` is copied to `$P3_WORK/baseline.json` after renaming its `fp` key to `baseline` (`jq '{baseline: .fp}'`). Every later write task requires the live fingerprint to equal it. It is a hash of configuration, not a secret, but it lives in `$P3_WORK` so the plan stays free of device facts. Stop the rig.
 - [ ] **Step 5: Update the Task 3 table's Result column** and commit the plan file (`docs(plan): P3 live read results after endpoint fixes (#425)`).
 
 ### P3-Task 9: Fixture sanitizer (P3.5)
@@ -7096,7 +7231,7 @@ exec python3 -I "$(dirname "$0")/sanitize_fixture.py" "$@"
 
 **Files:**
 - Replace: `rustopnsmcp-core/tests/fixtures/{system_status,firmware_status,interfaces,gateways,firewall_rules,aliases,nat_outbound}.json`
-- Create: `rustopnsmcp-core/tests/fixtures/{nat_destination,alias_get_item,rule_get_item}.json`
+- Create: `rustopnsmcp-core/tests/fixtures/{alias_get_item,rule_get_item}.json`
 - Keep synthetic: `nat_one_to_one.json`, `routes.json`, `dhcp_leases.json` (empty on the baseline)
 - Modify: `rustopnsmcp-core/src/testing.rs` (header), the assertions in `tests/read_tools.rs`, `src/tools/fleet.rs` and `src/changeset/validate.rs` that name old fixture values
 - Create (dev host only): `$LAB_WORK/deny.txt`, one name per line, the lab's own hostnames and domain
@@ -7112,7 +7247,6 @@ exec python3 -I "$(dirname "$0")/sanitize_fixture.py" "$@"
 | `firewall_rules` | `/api/firewall/filter/search_rule` | 8 |
 | `aliases` | `/api/firewall/alias/search_item` | |
 | `nat_outbound` | `/api/firewall/source_nat/search_rule` | |
-| `nat_destination` | `/api/firewall/d_nat/search_rule` | |
 | `alias_get_item` | `/api/firewall/alias/getItem/<uuid of an alias with a non-empty content>` | |
 | `rule_get_item` | `/api/firewall/filter/getRule/<uuid of an MVC rule>` | |
 
@@ -7124,7 +7258,7 @@ The two uuids are read from the capture of the matching search on the dev host.
 
 - [ ] **Step 4: Copy only `clean/` to this repository's fixtures directory** (`scp`). `git diff --stat` shows fixtures only.
 
-- [ ] **Step 5: Fix the tests to the real values.** Failing tests drive this: run `cargo test --workspace --locked`, and for each failure change the assertion to the sanitized fixture's value (for example `system_status` becomes `status["metadata"]["system"]["status"]`, `interfaces` expects 5 rows and `rows[0].identifier` from the capture, `firewall_rules` expects `coverage: complete` and a `product_version` of `26.7.5`, `rule_listing` tests keep their own inline versions). Update `default_routes()` for `NAT_DESTINATION_SEARCH`. Replace `testing.rs`'s header with: "Most fixtures under `tests/fixtures/` are sanitized captures from opnsense-lab on 26.7.5 (see `scripts/sanitize-fixture.sh`). `nat_one_to_one`, `routes` and `dhcp_leases` are synthetic: those collections are empty on the baseline, so there is nothing to capture."
+- [ ] **Step 5: Fix the tests to the real values.** Failing tests drive this: run `cargo test --workspace --locked`, and for each failure change the assertion to the sanitized fixture's value (for example `system_status` becomes `status["metadata"]["system"]["status"]`, `interfaces` expects 5 rows and `rows[0].identifier` from the capture, `firewall_rules` expects `coverage: complete` and a `product_version` of `26.7.5`, `rule_listing` tests keep their own inline versions).  Replace `testing.rs`'s header with: "Most fixtures under `tests/fixtures/` are sanitized captures from opnsense-lab on 26.7.5 (see `scripts/sanitize-fixture.sh`). `nat_one_to_one`, `routes` and `dhcp_leases` are synthetic: those collections are empty on the baseline, so there is nothing to capture."
 
 - [ ] **Step 6: Use the real pre-image shapes.** Two new tests in `src/changeset/validate.rs`:
 
@@ -7155,32 +7289,33 @@ The probes confirmed all names are present on 26.7.5. Then replace the "none has
 
 ### P3-Task 11: Baseline reset procedure and preflight (precondition for Tasks 12-15)
 
-**Needs user go-ahead, by name, for any snapshot rollback.** Reading the guest's tags and snapshot list needs none.
+**The user approved a snapshot rollback to `baseline-seeded` before each of Tasks 12-15; each rollback is still a named go-ahead step at run time.** Reading the guest's tags and snapshot list needs none. Starting and stopping a rig is covered in Task 2 and repeated here because every write task begins and ends with it.
 
 **Files:** none. The procedure is recorded here so it is used identically each time.
 
-**Reset procedure (generic):**
+**Reset and run procedure (generic):**
 
-1. Resolve the VM by name and tag, never by a remembered id: `opnsense-lab`, tagged `disposable`, `lab` and `rustopnsmcp`, and confirm it is **not** tagged `protected`. Print its name, node, tags and snapshot list.
+1. Resolve the opnsense-lab VM by name and tag, never by a remembered id: tagged `disposable`, `lab` and `rustopnsmcp`, and **not** `protected`. Print its name, node, tags and snapshot list.
 2. Confirm the `baseline-seeded` snapshot exists.
-3. With the user's go-ahead, roll the VM back to `baseline-seeded` through the Proxmox tooling (MCP or the cluster CLI, per the lab guardrails). If the snapshot has no memory state, start the VM afterwards. Do not stop or start the VM for any other reason.
-4. Wait until `lab-get.sh shape /api/core/firmware/info` answers `HTTP 200`.
-5. Run the fingerprint call; it must equal `baseline` in `$LAB_WORK/baseline.json` (Task 8). A mismatch means the device is not at baseline: stop.
-6. The server's own state file (`$LAB_WORK/changeset-state.json`) is deleted between runs so a stale change set cannot be applied.
+3. With the user's go-ahead for this rollback, roll opnsense-lab back to `baseline-seeded` through the Proxmox tooling (MCP or the cluster CLI, per the lab guardrails). If the snapshot has no memory state, start the VM afterwards. Do not stop or start the opnsense-lab VM for any other reason.
+4. Wait until `lab-get.sh shape /api/core/firmware/info` (on the dev host) answers `HTTP 200`.
+5. Start the rig for the task (`rig-ctl.sh start <rig>`) and clear its change-set state (`rig-ctl.sh reset-state <rig>`), so a stale change set cannot be applied.
+6. Run a fingerprint call (`pointers: {"/fingerprint": "$baseline"}`, `--vars $P3_WORK/baseline.json`). A mismatch means the device is not at baseline: stop.
+7. After the task, stop the rig (`rig-ctl.sh stop <rig>`; it re-checks the tags).
 
-- [ ] **Step 1: Preflight, read-only.** Run steps 1-2 and 4-5 (skip 3). Expected: tags as above, snapshot present, API 200, fingerprint equals the baseline (`pointers: {"/fingerprint": "$baseline"}` on a fingerprint call).
-- [ ] **Step 2: Ask the user** to approve Tasks 12-15 individually, naming the writes each performs (listed in each task), and whether the end-of-run rollback in Task 15 Step 7 is wanted.
+- [ ] **Step 1: Preflight, read-only.** Run steps 1-2, 4 and 6 with the rig started (skip 3 and 5). Expected: tags as above, snapshot present, API 200, fingerprint equals the baseline.
+- [ ] **Step 2: Ask the user** to approve Tasks 12-15 individually, naming the writes each performs (listed in each task) and the rollback before each, and whether the final credential cleanup in Task 15 Step 5 is wanted.
 
 ---
 
 ### P3-Task 12: Alias change set, live, lab-mode waiver (P3.6)
 
-**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: creates, updates and deletes one alias named `p3_live_hosts`, and runs the alias `reconfigure` three times. Nothing else is touched. The server runs on stdio with `--lab-mode`: the waiver is applied at creation, and the owner is never their own approver, so this run has no approve step.
+**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: creates, updates and deletes one alias named `p3_live_hosts`, and runs the alias `reconfigure` three times. Nothing else is touched. The server is `test-labmode-opns` (`--lab-mode`): the waiver is applied at creation, and the owner is never their own approver, so this run has no approve step.
 
 **Files:**
 - Create: `scripts/live/calls/alias.json`
 
-- [ ] **Step 1: Write `scripts/live/calls/alias.json`.** Run with `--vars $LAB_WORK/baseline.json` (Task 8) so the last call can require the baseline fingerprint.
+- [ ] **Step 1: Write `scripts/live/calls/alias.json`.** Run with `--vars $P3_WORK/baseline.json` (Task 8) so the last call can require the baseline fingerprint.
 
 ```json
 [
@@ -7210,8 +7345,8 @@ The probes confirmed all names are present on 26.7.5. Then replace the "none has
 
 The waived state may be spelled differently from `approved`; set the pointer to what the first run shows. The refused `confirm_timeout_mins` call must leave the change set unclaimed (Review Focus 2), which is why status is read right after it.
 
-- [ ] **Step 2: Reset to the baseline** (Task 11 procedure, with the user's go-ahead), delete `$LAB_WORK/changeset-state.json`.
-- [ ] **Step 3: Run** on the dev host: `python3 -I mcp_call.py alias.json --vars baseline.json --stdio -- lab-server.sh rustopnsmcp --lab-mode`. Expected: every line PASS, including the last (the fingerprint after the inverse change set equals the baseline).
+- [ ] **Step 2: Reset to the baseline** (Task 11 procedure, with the user's go-ahead for the rollback).
+- [ ] **Step 3: Run** on the workstation: `python3 -I scripts/live/mcp_call.py scripts/live/calls/alias.json --vars $P3_WORK/baseline.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`. Expected: every line PASS, including the last (the fingerprint after the inverse change set equals the baseline).
 - [ ] **Step 4: Evidence for the gate comment:** the PASS/FAIL lines only (key names, states, counts). Not the alias content or any address.
 - [ ] **Step 5: Record any defect found** as a new task with a failing test before changing code. Candidates the probes cannot settle: whether `reconfigure` answers `status: ok` (required by `interpret_reconfigure_response`); whether `setItem`, replaying a rolled-back alias, accepts the flattened `proto` and the list-valued `categories` that `flatten_field` passes through unchanged; whether `addItem` accepts `\n`-joined `content`.
 - [ ] **Step 6: Commit** the calls file (`scripts: live alias change-set run (#425)`).
@@ -7273,32 +7408,39 @@ The waived state may be spelled differently from `approved`; set the pointer to 
 ]
 ```
 
-- [ ] **Step 2: Reset to the baseline** (Task 11) and delete the state file.
-- [ ] **Step 3: Mint two tokens on the dev host:** `rustopnsmcp token add --tokens-file $LAB_WORK/tokens.json --name p3-owner --devices opnsense-lab --tools '*' --actor-type agent` and the same with `--name p3-approver --actor-type human`. Each command prints the token alone on stdout, once: capture it with command substitution into `P3_OWNER_TOKEN` / `P3_APPROVER_TOKEN` inside the dev-host script that runs the calls, and never echo it. (Checked locally: `token add` with exactly these flags works, and the client authenticates with the result.)
-- [ ] **Step 4: Start the server in the background on the dev host,** no `--lab-mode`: `lab-server.sh rustopnsmcp --transport streamable-http --host 127.0.0.1 --port 30077 --tokens-file $LAB_WORK/tokens.json`. A local trial needed no `--allowed-host` or TLS flags for loopback; if the lab run answers 403 for the Host header, add `--allowed-host 127.0.0.1:30077`.
-- [ ] **Step 5: Run in this order,** each with `--url http://127.0.0.1:30077/mcp`, `--vars` set to the baseline file for the first and `$LAB_WORK/tp.json` after, and `--save-vars $LAB_WORK/tp.json` (`tp.json` starts as a copy of `baseline.json`):
-  1. owner: `two-person-owner-create.json` (`--token-env P3_OWNER_TOKEN`)
-  2. approver: `two-person-approver.json` (`P3_APPROVER_TOKEN`)
+- [ ] **Step 2: Reset to the baseline** (Task 11) with `test-twoperson-opns` as the rig.
+- [ ] **Step 3: Mint two tokens on the rig,** capturing each by command substitution so it is never printed:
+
+```fish
+set -x P3_OWNER_TOKEN (bash scripts/live/rig-token.sh test-twoperson-opns p3-owner agent)
+set -x P3_APPROVER_TOKEN (bash scripts/live/rig-token.sh test-twoperson-opns p3-approver human)
+bash scripts/live/rig-ctl.sh svc test-twoperson-opns restart
+set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-twoperson-opns) -- hostname -I | awk '{print $1}')
+```
+
+- [ ] **Step 4: Run in this order,** each with `--url http://$RIG_IP:30037/mcp`, `--vars $P3_WORK/baseline.json` for the first and `$P3_WORK/tp.json` after, and `--save-vars $P3_WORK/tp.json` (`tp.json` starts as a copy of `baseline.json`):
+  1. owner (`--token-env P3_OWNER_TOKEN`): `two-person-owner-create.json`
+  2. approver (`--token-env P3_APPROVER_TOKEN`): `two-person-approver.json`
   3. owner: `two-person-owner-apply.json`
   4. approver: `two-person-approver.json`
   5. owner: `two-person-owner-finish.json`
 
   Expected: every line PASS. This is Review Focus 5 live: a stale digest refused with the change set left `planned`, a drifted fingerprint refused with nothing written.
-- [ ] **Step 6: Stop the server; delete `tokens.json`, `tp.json` and the state file; unset the token variables.**
-- [ ] **Step 7: Evidence:** the PASS/FAIL lines and states only. **Step 8: Commit** the four files (`scripts: live two-person change-set run (#425)`).
+- [ ] **Step 5: Stop the rig, delete `$P3_WORK/tp.json`, unset the token variables.** The rig's tokens stay on its disk until Task 15's cleanup.
+- [ ] **Step 6: Evidence:** the PASS/FAIL lines and states only. **Step 7: Commit** the four files (`scripts: live two-person change-set run (#425)`).
 
 ---
 
 ### P3-Task 14: Filter-rule change set, live (P3.6)
 
-**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: one MVC filter rule `p3_live_rule`, created **disabled** (`enabled: "0"`, so it cannot change traffic or lock out management), updated, then deleted by its inverse, plus three filter `apply` calls. Lab-mode on stdio, as Task 12.
+**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: one MVC filter rule `p3_live_rule`, created **disabled** (`enabled: "0"`, so it cannot change traffic or lock out management), updated, then deleted by its inverse, plus three filter `apply` calls. Run on `test-labmode-opns`, as Task 12.
 
 **Files:**
 - Create: `scripts/live/calls/rule.json`, `scripts/live/calls/rule-legacy.json`
 
 `interface: "lan"` is OPNsense's default LAN identifier; confirm it appears in `list_opnsense_interfaces` before running, and substitute the identifier the device shows if not.
 
-- [ ] **Step 1: Write `scripts/live/calls/rule.json`** (run with `--vars baseline.json --lab-mode`):
+- [ ] **Step 1: Write `scripts/live/calls/rule.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
 
 ```json
 [
@@ -7324,7 +7466,7 @@ The waived state may be spelled differently from `approved`; set the pointer to 
 ]
 ```
 
-- [ ] **Step 2: Write `scripts/live/calls/rule-legacy.json`.** Legacy and automatic rules cannot be changed; this must be refused at creation and write nothing. The reference is any `legacy: true` row's 32-character `uuid` from the listing; save it by hand into `$LAB_WORK/legacy.json` as `{"fp": "<current fingerprint>", "legacy_ref": "<ref>"}` (a rule reference is not sensitive).
+- [ ] **Step 2: Write `scripts/live/calls/rule-legacy.json`.** Legacy and automatic rules cannot be changed; this must be refused at creation and write nothing. The reference is any `legacy: true` row's 32-character `uuid` from the listing; save it by hand into `$P3_WORK/legacy.json` as `{"fp": "<current fingerprint>", "legacy_ref": "<ref>"}` (a rule reference is not sensitive).
 
 ```json
 [
@@ -7351,7 +7493,7 @@ This step writes nothing to the device (the refusal happens before any claim), a
 
 The failing second action is deterministic: an alias **name that already exists**. The device validates name uniqueness and answers HTTP 200 with `result: "failed"` (Review Focus 3). The file reads an existing alias name from the device at run time, so no device value is committed.
 
-- [ ] **Step 1: Write `scripts/live/calls/partial.json`** (run with `--vars baseline.json --lab-mode`):
+- [ ] **Step 1: Write `scripts/live/calls/partial.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
 
 ```json
 [
@@ -7375,7 +7517,7 @@ The `action_count` key and the `rollback_failures` rendering are as the code bui
 - [ ] **Step 2: Reset to the baseline (Task 11), run it.** Expected: every line PASS.
 - [ ] **Step 3: Evidence:** the PASS/FAIL lines and counts only.
 - [ ] **Step 4: If the rollback leaves `p3_part_a` behind** (`partial_rollback_failed`), do not fix the lab by hand. Record it, write a failing test first, and reset to the baseline (Task 11) with the user's go-ahead.
-- [ ] **Step 5: Final reset (optional, the user's decision from Task 11 Step 2):** run the reset procedure and confirm the fingerprint equals the baseline. Delete `$LAB_WORK/changeset-state.json` and the raw captures.
+- [ ] **Step 5: Final reset and cleanup (optional, the user's decision from Task 11 Step 2):** run the reset procedure and confirm the fingerprint equals the baseline. Then, with the user's go-ahead, remove the lab credentials and tokens from each rig (`rig-ctl.sh svc <rig> stop`, then delete `/etc/rustopnsmcp/credentials`, `/etc/rustopnsmcp/devices.json` and `/var/lib/rustopnsmcp/tokens.json` inside it), stop the rigs, and delete the raw captures on the dev host and `$P3_WORK`.
 - [ ] **Step 6: Commit** (`scripts: live partial-apply run (#425)`).
 
 ---
@@ -7388,7 +7530,7 @@ The `action_count` key and the `rollback_failures` rendering are as the code bui
 **Precondition:** Tasks 3, 8, 12, 13, 14 and 15 passed with no open defect. Rebase onto P2's README change if P2 has landed (see "Overlap with P2").
 
 - [ ] **Step 1: Remove the banner.** Delete the `> [!WARNING]` block at the top of `README.md` (the "Under construction" line).
-- [ ] **Step 2: Rewrite `## Status`.** Replace the phase list and the "None of this has been exercised against a live OPNsense" paragraph with: what v1.0 will cover; "Verified against OPNsense 26.7.5 (opnsense-lab): reads, fingerprint, alias and filter-rule change sets, a forced partial apply"; the limits stated plainly ("writes persist to `config.xml` immediately and take effect on `apply`; a partial apply is a reachable, reported outcome; `confirm_timeout_mins` is refused until filter-rule commit-confirm lands; automatic and legacy filter rules can be listed but not changed; not yet released or packaged").
+- [ ] **Step 2: Rewrite `## Status`.** Replace the phase list and the "None of this has been exercised against a live OPNsense" paragraph with: what v1.0 will cover; "Verified against OPNsense 26.7.5 (opnsense-lab): reads, fingerprint, alias and filter-rule change sets, a forced partial apply"; the limits stated plainly ("writes persist to `config.xml` immediately and take effect on `apply`; a partial apply is a reachable, reported outcome; `confirm_timeout_mins` is refused until filter-rule commit-confirm lands; automatic and legacy filter rules can be listed but not changed; NAT port forwards are not listed yet (deferred to P4/P5.2); not yet released or packaged").
 - [ ] **Step 3: Add the tool table** (names from `TOOL_NAMES`):
 
 | Group | Tools |
@@ -7398,7 +7540,7 @@ The `action_count` key and the `rollback_failures` rendering are as the code bui
 | Change control | `get_opnsense_config_fingerprint`, `create_opnsense_change_set`, `approve_opnsense_change_set`, `apply_opnsense_change_set`, `confirm_opnsense_change_set`, `cancel_opnsense_change_set`, `get_opnsense_change_set_status`, `list_opnsense_change_sets` |
 
 - [ ] **Step 4: Check the names against the code:** `grep -o '"[a-z_]*_opnsense_[a-z_]*"' rustopnsmcp-core/src/tools/mod.rs | sort -u` and diff against the README table; they must match. Run `scripts/parity-check.sh --junos-src <rustjunosmcp checkout> --phase P1`: still exit 0.
-- [ ] **Step 5: CI gates, then commit.** Commit message: `docs(readme): drop the under-construction banner after live verification on 26.7.5 (#425)`, with a body listing the user-visible changes for the P7 CHANGELOG: DHCP leases from Dnsmasq/Kea, port forwards in the NAT listing, fingerprint and pre-image stable under live counters, corrected device facts.
+- [ ] **Step 5: CI gates, then commit.** Commit message: `docs(readme): drop the under-construction banner after live verification on 26.7.5 (#425)`, with a body listing the user-visible changes for the P7 CHANGELOG: DHCP leases from Dnsmasq/Kea, fingerprint and pre-image stable under live counters, corrected device facts.
 
 ### P3 gate
 
@@ -7407,7 +7549,7 @@ The `action_count` key and the `rollback_failures` rendering are as the code bui
 - [ ] Fixtures: sanitizer self-test green in CI, `--verify` clean on every committed fixture, pre-push secret gate passed unmodified.
 - [ ] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, `scripts/check-mecmcp-pin.sh` and `scripts/parity-check.sh --phase P1` green; CI green on `main` after the last P3 merge.
 - [ ] Banner removed, README status and table accurate.
-- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5), and what's next (P4).
+- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (port forwards not listed, deferred; three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5), and what's next (P4).
 
 ## P4 — Read breadth
 
