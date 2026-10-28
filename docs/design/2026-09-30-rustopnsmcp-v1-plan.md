@@ -6013,12 +6013,12 @@ The P1 Global Constraints above all still apply (public-repo hygiene, commit tra
 #### Decisions (the plan commits to these; the user can overrule before P2 starts)
 
 - **D1. Bump the mecmcp pin to v0.30.1 as the first P2 commit.** Reasons: rustjunosmcp (the parity target) is already on v0.30.1; the workflows and conformance action get one reachable SHA instead of a different one per file; and the bump is cheap *today*. Evidence gathered on a scratch copy of `main`: the only breakage is `error[E0063]: missing field owner_verified in initializer of ChangeSetRecord` at three sites (`rustopnsmcp/src/server/mod.rs:352` and `:1896`, `rustopnsmcp/src/server/lifecycle.rs:392`; mecmcp 0.30.0, `ChangeSetRecord.owner_verified`); `cargo test --workspace --locked` passes after the fix; `--help` lists the same 60 flags before and after (so no parity allowlist change); the `Cargo.lock` diff is 44 lines, all the eleven `mecmcp-*` entries. mecmcp 0.29.0's "rollback break" (state files written by OAuth callers) does not apply: nothing is deployed. `CallerCtx` gains `token_created_at`/`token_expires_at` in an unreleased mecmcp change; rustopnsmcp has no `CallerCtx` struct literal, so that is not a P2 concern. Alternative considered: stay on v0.28.1 and pin the workflows to v0.28.2's SHA. Rejected because the bump only gets harder as P3–P6 add code.
-- **D2. `/readyz` is passive and counts only HTTP 401.** It follows the rustpanosmcp precedent (`auth_health_check`): a device that has made no request reports healthy; the first 401 flips `/readyz` to 503; the next 2xx clears it. 403 does not flip it, because on OPNsense a user without a privilege for one endpoint gets 403 while the key is fine (the same distinction cost six days on the Proxmox MCP). This is an assumption about OPNsense's status codes that P2 cannot verify; Task 33 records it as a P3.3 check (wrong key → 401 → `/readyz` 503; privilege-short key → 403 → `/readyz` stays 200).
+- **D2. `/readyz` is passive and counts only HTTP 401.** It follows the rustpanosmcp precedent (`auth_health_check`): a device that has made no request reports healthy; the first 401 flips `/readyz` to 503; the next 2xx clears it. 403 does not flip it, because on OPNsense a user without a privilege for one endpoint gets 403 while the key is fine (the same distinction cost six days on the Proxmox MCP). Confirmed by the user as written. This is an assumption about OPNsense's status codes that P2 cannot verify; P2 therefore carries a dependency on P3.3: it must confirm OPNsense returns 403 for a missing privilege before this decision is treated as proven. Task 33 records it as a P3.3 check (wrong key → 401 → `/readyz` 503; privilege-short key → 403 → `/readyz` stays 200).
 - **D3. The tarball is built on the pinned runner, not in a container.** `runs-on: ubuntu-24.04` with the toolchain from `rust-toolchain.toml` gives a glibc floor of 2.39, below Debian 13's 2.41, and the floor is measured into BUILD-INFO and enforced by the installer. This matches rustpanosmcp/rustunifimcp. Alternative (build inside the Dockerfile's digest-pinned builder, glibc 2.41) is stricter but needs git and binutils installed into the builder on every release; revisit if the floor ever rises above 2.41.
-- **D4. The release image is pushed to GHCR only.** No `dockerhub-image` input. Nothing is published before the v1.0.0 tag anyway (the workflows trigger on version tags and `release: published`), but adding Docker Hub later is a one-line change with the board's org secrets. `reusable-registry-publish.yml` (MCP Registry) is out of scope until P7 and needs a `server.json`.
+- **D4. The release image is pushed to GHCR and Docker Hub, and both signatures are verified.** Confirmed by the user. Task 30 follows rustjunosmcp's `release-image.yml`: `dockerhub-image: docker.io/mechub/rustopnsmcp`, the secrets mapped explicitly (`dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}`, `dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}`, never `secrets: inherit`), and the reusable workflow's "Verify signatures (hard gate)" step, which runs `cosign verify` against every registry the image was pushed to. Docker Hub images are linux/amd64 only, so `platforms` stays at its default. Nothing is published before a version tag. Prerequisites that need the user's action are listed under "Prerequisites before the first release". `reusable-registry-publish.yml` (MCP Registry) stays out of scope until P7 and needs a `server.json`.
 - **D5. `security.yml` adds only Trivy.** `ci.yml` already runs `gitleaks`, `cargo audit` and `cargo deny` under the job names `Secret scan` and `Supply-chain policy`. Moving them would rename required checks and strand every open PR (a renamed required check goes permanently pending). `security.yml` therefore holds the Trivy filesystem and image scans only, and the parity gate needs the file to exist, not to duplicate jobs.
 - **D6. The binary generates a missing `audit-hmac.key` itself** (`create_new`, mode 0600, 32 bytes from `/dev/urandom`, never rewrites an existing file). In LXC the installer creates the key first, so this is a no-op there. In the distroless image there is no shell for an entrypoint wrapper, so this is the only way the image can run keyed audit (conformance `audit_hmac_flag`, R7).
-- **D7. A new job, `Package conformance`, is added to `ci.yml`** and builds the real tarball on every PR. It is not a required check until the board adds it to branch protection (Open question 3).
+- **D7. A new job, `Package conformance`, is added to `ci.yml`** and builds the real tarball on every PR. It becomes a required check only when the user or board changes branch protection (confirmed as wanted; Task 33 step 6). The required-check names are `Package conformance` and `Trivy (filesystem and image)`; neither carries a version, which matters because renaming a required check leaves every open PR permanently pending.
 
 #### Verification performed while writing this plan
 
@@ -6035,14 +6035,22 @@ The code in Tasks 19–22, 25–27 and 29 was not only read: it was extracted fr
 
 **Not run, and why:** the GitHub workflows (they need GitHub; `actionlint` was not installed), the `Package conformance` and `container-guard` jobs as jobs, `scripts/parity-check.sh --phase P2` (it needs the allowlist edit it gates), `trivy` 0.73.0 (the workstation has 0.70.0; the SBOM check was run with that), and the dry-run install on a real guest (Task 33 step 3 needs the user's go-ahead). Ownership, apt and systemd behaviour of the installer are therefore unproven until that dry run.
 
-#### Open questions for the user (answers needed before Task 19 starts unless noted)
+#### Decisions confirmed by the user, and what still needs the user
 
-1. **D1:** confirm the v0.30.1 bump, or choose to stay on v0.28.1.
-2. **D4:** GHCR only for now, or add Docker Hub (`docker.io/mechub/rustopnsmcp`) to the release workflow in Task 30? (Not blocking; needs the org secrets either way.)
-3. **Branch protection:** may the board add `Package conformance` and `Trivy` to the required checks once Tasks 28 and 30 land? (Not blocking P2; blocks nothing but enforcement.)
-4. **`/readyz` semantics (D2):** passive 401-only is the plan. Do you want an active periodic probe (a background `GET /api/core/system/status` per device) instead? It makes `/readyz` meaningful on a quiet server but adds an outbound request cadence the audit trail would have to explain.
-5. **Task 33 step 3:** the dry-run install needs a disposable Debian 13 LXC. Which VMID band and node should it use, and may Claude create and destroy it (unprivileged, `nesting=1`, no `protected` tag)? Nothing is created until you answer.
-6. **Task 26:** the installer writes `/etc/systemd/journald.conf.d/20-audit-retention.conf` (`Storage=persistent`, `SystemMaxUse=512M`) only when no file of that name exists. Confirm that this fleet-shared name is right for a new server, or say so if it should be skipped on guests that already carry fleet journald policy.
+1. **D1, pin bump to v0.30.1:** confirmed.
+2. **Registry:** GHCR and Docker Hub (D4, Task 30).
+3. **Required checks:** `Package conformance` and `Trivy (filesystem and image)` are to become required checks. Changing branch protection needs the user or board; Task 33 step 6 is that request. Names carry no version.
+4. **`/readyz`:** passive, 401 only (D2), with the dependency on P3.3 confirming 403 for a missing privilege.
+5. **P2.12 dry run:** a throwaway LXC, not the P3 test rigs, which P3 uses in parallel (Task 33 step 3). Creating and destroying it are each a named go-ahead.
+6. **Installer journald drop-in:** `20-audit-retention.conf` is written only when no file of that name exists (Task 26): confirmed.
+
+#### Prerequisites before the first release (need the user's action)
+
+Nothing in P2 publishes, so none of these blocks P2 itself; all must exist before the first version tag (P7). Claude cannot create any of them.
+
+- **A Docker Hub repository** `mechub/rustopnsmcp` (public), with a description the board is happy to show: the reusable workflow overwrites the repository overview with `README.md` on every release.
+- **Two secrets visible to this repository:** `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, the org-level secrets rustjunosmcp already uses, with this repository added to their repository-access list. The token needs read/write on `mechub/rustopnsmcp` (repository-overview update included). Without them the reusable workflow logs a warning and silently pushes to GHCR only, so the first release must be checked for a Docker Hub tag, not assumed.
+- **GHCR:** the repository's Actions need package write permission (the job grants `packages: write`); the first push creates the package, which the user then sets public.
 
 #### File Structure (P2)
 
@@ -7951,6 +7959,7 @@ services:
   rustopnsmcp:
     image: ghcr.io/mechubsec/rustopnsmcp:latest
     # image: ghcr.io/mechubsec/rustopnsmcp@sha256:...   # a digest is what you reviewed
+    # Docker Hub equivalent: docker.io/mechub/rustopnsmcp:<version>
     container_name: rustopnsmcp
     user: "65532:65532"
     read_only: true
@@ -8028,7 +8037,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `scripts/package-lxc.sh` and `packaging/tests/package-smoke.sh` (Tasks 25, 27); mecmcp reusable workflows at `8557155ed1ecd24e7ae25948d70485f0fc8c8451` (v0.30.1).
-- Produces: on a version tag, a signed GHCR image; on `release: published`, a tarball, its checksum and cosign bundle, and an SBOM attached to the release. **None of these runs from a PR or a branch push**, so no signing or publishing happens before the board's v1.0.0 tag.
+- Produces: on a version tag, an image pushed to GHCR and Docker Hub and signed on both; on `release: published`, a tarball, its checksum and cosign bundle, and an SBOM attached to the release. **None of these runs from a PR or a branch push**, so no signing or publishing happens before the board's v1.0.0 tag.
 
 - [ ] **Step 1: `release-image.yml`**
 
@@ -8036,7 +8045,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 name: Release image
 
 # Builds, SBOMs, pushes and keyless-signs the image on every version tag, by
-# calling mecmcp's reusable workflow (docs/RELEASE-WORKFLOWS.md). GHCR only.
+# calling mecmcp's reusable workflow (docs/RELEASE-WORKFLOWS.md). Pushes to GHCR
+# and Docker Hub, then cosign-verifies the signature on both (a hard gate).
 on:
   push:
     tags:
@@ -8063,10 +8073,21 @@ jobs:
     uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
     with:
       image: ghcr.io/${{ github.repository }}
+      # Docker Hub images are linux/amd64 only; platforms keeps its default.
+      dockerhub-image: docker.io/mechub/rustopnsmcp
       description: 'OPNsense MCP server'
       version: ${{ github.event.inputs.version }}
       ref: ${{ github.event.inputs.ref }}
+    # Mapped by name, never `secrets: inherit`, which would hand the reusable
+    # workflow every repository and org secret this job can see.
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
 ```
+
+If the Docker Hub secrets are not visible to the run, the reusable workflow warns and pushes to GHCR only; it does not fail. The first release therefore needs a manual check that the Docker Hub tag exists (see the prerequisites above).
+
+**Known flake, and its remedy.** On rustjunosmcp's release-image runs the hard-gate verify of the *Docker Hub* copy has failed with `Error: no signatures found` (exit 10) right after signing, while the GHCR verify passed; the failure skipped the downstream MCP Registry publish. Rerunning only the failed job (`gh run rerun <run-id> --failed`) passed cleanly. So: if only the Docker Hub verify step fails with `no signatures found`, rerun the failed job before investigating a signing fault; then confirm the downstream publish ran. rustopnsmcp has no MCP Registry publish job until P7 adds `registry-publish` (it needs a `server.json`); from then on, "confirm it ran" means checking that job, because it is skipped when the image job fails. Record any occurrence in the release notes.
 
 - [ ] **Step 2: `release-sbom.yml`**
 
@@ -8369,6 +8390,8 @@ git merge-base --is-ancestor v0.30.1 origin/main   # run in a mecmcp checkout
 ```
 Expected: the last-but-one prints the pin message (every `uses:` carries a 40-hex SHA; the `./`-style local paths do not appear), the trivy scan exits 0 on the current lockfile, and in a mecmcp checkout `git rev-parse v0.30.1^{commit}` equals `8557155ed1ecd24e7ae25948d70485f0fc8c8451`.
 
+Check the Docker Hub wiring statically: `grep -n 'dockerhub' .github/workflows/release-image.yml` must show the image and both secret mappings, and must not show `secrets: inherit`.
+
 Nothing in P2 pushes a tag. The release workflows are first exercised at P7; their risk until then is that they have never run. Reduce it now with a dry run of the tarball half: `scripts/package-lxc.sh && packaging/tests/package-smoke.sh dist/*.tar.gz` (already done by Task 28's CI job on every PR) and, once, a `workflow_dispatch` of `release-sign-tarball.yml` against a throwaway signed tag on a fork if the board wants that proof before P7. State in the P2 gate comment which of these was done.
 
 - [ ] **Step 7: Commit**
@@ -8474,7 +8497,7 @@ Expected: FAIL (`has no override-example block`, README links), proving the gate
 For each file, the required contents and how to obtain them:
 
 1. `docs/HOW-TO-SETUP-LXC.md`: Debian 13 unprivileged `nesting=1` and why (systemd 257 reports `degraded` with three failed mounts without it); download, `sha256sum -c`, extract, `sudo packaging/lxc/install.sh` (the archive's installer, from the extracted root); edit `devices.json` and `credentials.env`; mint the first token; start; verify with `curl -fsS http://127.0.0.1:30037/readyz`; the site override walk-through with the shipped example embedded between `<!-- override-example:start -->` / `<!-- override-example:end -->` inside a fenced `ini` block, and the explanation that the empty `ExecStart=` is required; TLS files created `0600 rustopnsmcp:rustopnsmcp` under `/etc/rustopnsmcp/`; a lab-mode override (same file plus `--lab-mode`); journald persistence and remote forwarding (`systemd-journal-upload` or rsyslog, configured at provisioning because it replaces Forward Secure Sealing in an unprivileged LXC); upgrade with a guest snapshot first; a troubleshooting section naming the real error strings: `non-loopback bind '<host>' requires at least one --allowed-host`, `… --allowed-origin`, a 421 `Host … is not allowed`, a 403 `Origin … is not allowed`, and `Permission denied` on `tokens.json` (copy each string from running the binary, not from this plan).
-2. `docs/HOW-TO-SETUP-DOCKER.md`: the DOCKER-STANDARD structure verbatim in order (prerequisites, prepare host directories with `chown -R 65532:65532` placed immediately before the `docker run` that needs it, run, TLS, compose, health, platform notes, building locally), the note that `--audit-format json` (not `--audit-journald`) is correct in a container and the key is created in the state volume on first start, how to run `token add` through the image, and `--allowed-host` plus `--allowed-origin` for a non-loopback bind. Every `docker run` is run once against `rustopnsmcp:ci` before the PR.
+2. `docs/HOW-TO-SETUP-DOCKER.md`: the DOCKER-STANDARD structure verbatim in order (prerequisites, prepare host directories with `chown -R 65532:65532` placed immediately before the `docker run` that needs it, run, TLS, compose, health, platform notes, building locally), the note that `--audit-format json` (not `--audit-journald`) is correct in a container and the key is created in the state volume on first start, how to run `token add` through the image, the Docker Hub and GHCR image names (`docker.io/mechub/rustopnsmcp`, `ghcr.io/mechubsec/rustopnsmcp`) and a `cosign verify` example for each, and `--allowed-host` plus `--allowed-origin` for a non-loopback bind. Every `docker run` is run once against `rustopnsmcp:ci` before the PR.
 3. `docs/AUDIT.md`: the per-call record. Generate it: `target/debug/rustopnsmcp --transport stdio --audit-format json < /dev/null 2>&1 | head`, then drive one call with the `audit_coverage` harness and paste a real redacted record. Document each field, the `devices=hmac` pseudonymisation, key custody, the `direct_commit_denied` reason, and the evidence pipeline flags (`--ssdf-audit-*`, `--audit-forward-*`) as they appear in `--help`.
 4. `docs/METRICS.md`: start the server with `--enable-metrics`, `curl -s http://127.0.0.1:30037/metrics`, and list the metric names, types and labels actually returned; say that `/metrics` is loopback-only regardless of bind and carries no bearer auth.
 5. `docs/THREAT-MODEL.md`: assets (device API key/secret, bearer tokens, audit key, change-set state), trust boundaries (MCP caller, server, OPNsense), and a table of threats with the control and where it is enforced: scope escape (token scopes and the `device` target preflight), credential exposure (`OutboundSecret`, redaction, 0600 files), a partial apply (state `partial`, recorded `Failed`), a GUI edit loaded by `reconfigure`, a stale digest or fingerprint, audit tampering (journald forwarding), supply chain (one pin, cosign, SBOM). A "limits" paragraph: `IPAddressAllow` is inert in an unprivileged LXC, there is no candidate configuration on OPNsense, and no sandbox is a substitute for a network ACL on the management plane.
@@ -8568,7 +8591,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 33: Gate evidence — conformance, dry-run install, and the mecmcp note (P2.12)
 
-**This task creates nothing on the Proxmox cluster until the user answers Open question 5 and says go.** Steps 1, 2, 4, 5 and 6 need no guest.
+**This task creates nothing on the Proxmox cluster until the user gives the named go-ahead in step 3.** Steps 1, 2, 4, 5 and 6 need no guest.
 
 - [ ] **Step 1: Repo gates, all green on the PR head**
 
@@ -8588,12 +8611,14 @@ Expected: every command exits 0.
 
 The `Package conformance` job (Task 28) is green on the PR head: R1–R5 pass, R6 passes with the `--host 0.0.0.0` override, R7 passes through `audit_hmac_flag`, and the only `WARN` is R3 clause 3 (not run, because the tarball is compiled by the script, not supplied prebuilt). Link the run in the gate comment. The `container-guard` job (Task 29) is green, including the first-run key check.
 
-- [ ] **Step 3: Dry-run install on a disposable Debian 13 LXC (needs the user's go-ahead)**
+- [ ] **Step 3: Dry-run install on a throwaway Debian 13 LXC (two named go-aheads)**
 
-Ask: "May I create a disposable unprivileged Debian 13 LXC (`nesting=1`, tagged `disposable`) on <node> as VMID <vmid> to dry-run the installer, and destroy it afterwards?" Do nothing until the answer is yes. Then, on the guest's own node (`pct` and `qm` only work on the node that owns the guest):
+This guest is deliberately **not** one of the P3 test rigs, which P3 uses in parallel. It is a new throwaway container on the Proxmox node the operator uses for disposable guests, in the operator's test VMID band, unprivileged, `nesting=1`, tagged `disposable`. The plan names no node, VMID or address; those are chosen at run time.
 
-1. **Before creating anything:** list the cluster's guests and tags and confirm the chosen VMID is unused and that no `protected`-tagged guest is in play (query the tag; a remembered list is not evidence). Take the guest's address from the operator's address registry, never from a ping sweep, or use DHCP, and record the allocation there in the same change.
-2. Create the container from the Debian 13 template: unprivileged, `--features nesting=1`, `--tags disposable`, 1 vCPU, 512 MB RAM, 4 GB disk. Start it. Check `systemctl is-system-running` inside prints `running` (not `degraded`); if it prints `degraded`, `nesting=1` did not apply and the dry run is invalid.
+**Go-ahead 1: create.** Ask: "May I create a throwaway unprivileged Debian 13 LXC (`nesting=1`, tagged `disposable`) on the disposable-guest node to dry-run the installer?" Do nothing until the answer is yes. Then, on the node that will own the guest (`pct` and `qm` only work on the guest's own node):
+
+1. **Before creating anything:** pick the VMID with `pvesh get /cluster/nextid`, then list the cluster's guests with their tags and confirm that VMID is unused, that its band is the operator's test band, and that no `protected`-tagged guest is involved (query the tag now; a remembered list is not evidence, and a VMID can be recycled). Address: use a plain DHCP lease. The static range is full, so do not take a static address, and do not choose one from a ping sweep. Record the lease in the operator's address registry at run time, in the same change, and remove it at teardown. No address, VMID or node name goes into the repository.
+2. Create the container from the Debian 13 template: unprivileged, `--features nesting=1`, `--tags disposable`, 1 vCPU, 512 MB RAM, 4 GB disk, DHCP. Start it. Check `systemctl is-system-running` inside prints `running` (not `degraded`); if it prints `degraded`, `nesting=1` did not apply and the dry run is invalid.
 3. Take a snapshot named `pre-install`.
 4. Copy in the tarball and its `.sha256` from the PR's `Package conformance` artifact or a local `scripts/package-lxc.sh` run; do not rebuild on the guest.
 5. **Follow `docs/HOW-TO-SETUP-LXC.md` literally, command by command.** Every deviation you needed is a documentation bug: fix the doc in this PR.
@@ -8610,7 +8635,7 @@ Ask: "May I create a disposable unprivileged Debian 13 LXC (`nesting=1`, tagged 
    - `systemd-analyze security rustopnsmcp --no-pager` (record the exposure score; do not gate on it).
    - Confirm in `journalctl -k` that no `SIGSYS`/seccomp kill appears after a token mint and a change-set write (the `chown` failure class that killed a sibling server).
 7. **P3.3 carry-over, recorded now so it is not lost:** with a real OPNsense later, a wrong key must give HTTP 401 and flip `/readyz` to 503, and a key that lacks one privilege must give 403 and leave `/readyz` at 200 (Decision D2 is an assumption until then).
-8. Destroy the guest only after printing its name, node, tag (`disposable`, not `protected`) and config, and stating that the evidence above is saved. Delete the registry allocation.
+8. **Go-ahead 2: destroy.** Ask: "The evidence is saved; may I destroy the throwaway LXC?" Do nothing until the answer is yes. Then run the evidence check before the destroy command, and print all of it: the guest's name, node and full config; the `disposable` tag present and **no `protected` tag**; the VMID resolved to that name just now (not from memory); and a statement of why this evidence supports destroying this specific guest (it was created in this task, carries `disposable`, and its name matches). Only then destroy it. Afterwards remove the DHCP lease from the address registry and confirm the VMID no longer appears in the guest list.
 
 - [ ] **Step 4: The mecmcp status row**
 
@@ -8618,9 +8643,13 @@ Read mecmcp `docs/FILESYSTEM-LAYOUT.md` at `origin/main` and confirm the `rustop
 
 - [ ] **Step 5: Write the gate comment**
 
-The comment on the epic lists: the PR link and merge commit; the green conformance and container-guard run links; the parity-check P2 output; the dry-run evidence from Step 3 (or "not run: awaiting go-ahead", in which case the gate is not passed); the answers to the Open questions; and the sabotage results recorded in Tasks 20–29.
+The comment on the epic lists: the PR link and merge commit; the green conformance and container-guard run links; the parity-check P2 output; the dry-run evidence from Step 3 (or "not run: awaiting go-ahead", in which case the gate is not passed); the user's confirmations listed under "Decisions confirmed by the user"; and the sabotage results recorded in Tasks 20–29.
 
-- [ ] **Step 6: Commit any doc fixes the dry run forced**
+- [ ] **Step 6: Ask the user or board to make the checks required**
+
+Claude does not change branch protection. Ask the user (or board) to add exactly these required status checks on `main`: `Package conformance` (ci.yml) and `Trivy (filesystem and image)` (security.yml), alongside the existing ones. Both names carry no version, which is the rule: a required check whose name embeds a version or toolchain goes permanently pending the day the name changes, with no override under `enforce_admins`. Do this only after both jobs have been seen green on `main`, so the check names exist in GitHub's list. Record the user's answer in the gate comment.
+
+- [ ] **Step 7: Commit any doc fixes the dry run forced**
 
 ```bash
 git add docs/ packaging/
