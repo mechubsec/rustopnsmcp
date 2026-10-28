@@ -5969,6 +5969,2700 @@ Each phase below is an outline. Its first task writes the phase's detailed plan 
 - [ ] P2.11 Remove every `until=P2` entry from `scripts/parity-allowlist.txt`, add `never` entries for the unit's final paths with reasons, and run `scripts/parity-check.sh --phase P2` to exit 0.
 - [ ] P2.12 Gate evidence: the conformance job green, and a dry-run install of the tarball on a disposable Debian 13 LXC (unprivileged, `nesting=1`, per mecmcp PACKAGING.md §2) with the service reaching `/readyz`. Then add the `rustopnsmcp` "verified" note to mecmcp FILESYSTEM-LAYOUT.md's status table (mecmcp PR).
 
+### P2 detailed plan (P2.1)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make rustopnsmcp installable and operable like its siblings: a conformant LXC tarball and installer, a loopback unit with a documented site override, a container image that meets the Docker standard, signed release workflows, an auth-aware `/readyz`, operator docs, and a parity-check that exits 0 at `--phase P2`.
+
+**Architecture:** One small code phase (pin bump, audit-key self-generation, readiness) followed by packaging that is verified by scripts which can fail. The tarball is produced by `scripts/package-lxc.sh`, checked by `packaging/tests/package-smoke.sh`, installed by `packaging/lxc/install.sh` (tested against a staged root, then once for real on a disposable Debian 13 LXC), and judged by mecmcp's own `packaging/conformance` action. Release workflows are thin callers of mecmcp's reusable workflows, pinned to the v0.30.1 commit.
+
+**Tech Stack:** bash, POSIX tools, `jq`, `trivy` (SBOM), `systemd-analyze`, GitHub Actions, Docker, Rust 1.98.1 (workspace edition 2024, MSRV 1.89), mecmcp v0.30.1.
+
+**Spec:** `docs/design/2026-09-30-rustopnsmcp-v1-design.md` (§3.2 files and unit, §3.3 `/readyz`, §4 P2).
+
+**Code as it stands:** this plan was written against rustopnsmcp `main` at `1556ce2` (P0 and P1 merged; mecmcp pin v0.28.1) and mecmcp `origin/main` at `8557155` (tag v0.30.1). Line numbers move; each edit step names the code to find.
+
+#### Global Constraints for P2
+
+The P1 Global Constraints above all still apply (public-repo hygiene, commit trailer, CI gates, "a flag that is present but ignored is worse than one that is absent"). P2 adds these, copied from the mecmcp standards:
+
+- **Layout.** Config in `/etc/rustopnsmcp/`, state in `/var/lib/rustopnsmcp/`, service user `rustopnsmcp`. `devices.json`, `audit-hmac.key`, `credentials.env` are `0600 rustopnsmcp:rustopnsmcp`. `/etc/rustopnsmcp` is `0750 root:rustopnsmcp`; `/var/lib/rustopnsmcp` is `0700 rustopnsmcp:rustopnsmcp` (mecmcp `FILESYSTEM-LAYOUT.md`, "Permissions").
+- **Installer requirements 1–8** (FILESYSTEM-LAYOUT): sysusers, tmpfiles, `tokens.json` `{"version":1,"tokens":[]}` if absent, `chmod 0600`, `chown`, `audit-hmac.key` generated if absent, state files never overwritten, next steps printed. Plus the PACKAGING.md installer contract: validate the package before mutating the host, derive paths from the package root, never enable or start the service, never install a config that cannot boot.
+- **Artifact.** `rustopnsmcp-v<version>-<target-triple>.tar.gz` with a root directory `rustopnsmcp-v<version>`, the binary at `bin/rustopnsmcp`, the installer at `packaging/lxc/install.sh`, a `.sha256` generated from inside the output directory, `BUILD-INFO`, `SBOM.cdx.json`, a generated package README, `LICENSE`, `SECURITY.md` (RELEASE-ARTIFACTS §1–§5, §7, §9).
+- **BUILD-INFO** carries both the RELEASE-ARTIFACTS keys (`release_status`, `version`, `git_commit`, `source_date_epoch`, `target`, `mecmcp_ref`, `glibc_floor`, `rustc`) and the conformance keys (`binary_sha256`; `rustc` must be `unknown (…)` when the binary was not compiled by the script).
+- **Image.** `gcr.io/distroless/cc-debian13:nonroot`, `USER 65532:65532`, digest-pinned bases, config and security flags in `ENTRYPOINT`, only operator-replaceable flags in `CMD`, no shell-based `HEALTHCHECK` (DOCKER-STANDARD, PACKAGING §1).
+- **Audit baseline** in the unit: `--audit-format json --audit-journald --audit-redact devices=hmac --audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key`. In the image: the same without `--audit-journald`, with the key under `/var/lib/rustopnsmcp/` (the only writable mount).
+- **Actions** are pinned to commit SHAs. Reusable workflows and the conformance action are pinned to `8557155ed1ecd24e7ae25948d70485f0fc8c8451` (mecmcp tag v0.30.1, reachable from mecmcp `main`; verified with `git merge-base --is-ancestor v0.30.1 origin/main`).
+- **No hostnames, IPs or credential paths of the real lab** in anything committed. Use `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `example.org`, `*.example.org`.
+- **No guest is created and nothing runs on the Proxmox cluster** until the user says so (Task 33 step 3 is the one place this matters).
+
+#### Checklist items that are wrong or already done
+
+| Item | Finding | Evidence | What this plan does |
+|---|---|---|---|
+| P2.12 "add the `rustopnsmcp` 'verified' note to mecmcp FILESYSTEM-LAYOUT.md's status table" | **Already done in P0.** The row exists. | mecmcp `docs/FILESYSTEM-LAYOUT.md`, "Status" table: `rustopnsmcp … none needed -- ships /var/lib-only from its first release (verified at its P2 packaging gate, not yet released)`. | Task 33 step 4 re-reads the row after the gate and opens a mecmcp PR only if the wording needs to change (it will not if the gate passes). |
+| P2.2 baseline audit flags vs P2.6 `logrotate` of `/var/lib/rustopnsmcp/audit.jsonl` | **Contradiction.** The P2.2 baseline has no `--audit-log-file`, so nothing writes `audit.jsonl` in the stock unit. The current unit passes `--audit-log-file /var/lib/rustopnsmcp/audit.jsonl`, and the allowlist entry says P2 drops it ("reworks the unit to the spec §3.2 audit baseline"). rustjunosmcp ships the same combination: logrotate for `audit.jsonl`, no `--audit-log-file` in its unit. | `packaging/systemd/rustopnsmcp.service` ExecStart; `scripts/parity-allowlist.txt` last `unit-path` line; `RustJunosMCP/packaging/systemd/rust-junosmcp.service`; spec §3.2 line 130. | Follow the spec: the stock unit drops `--audit-log-file`. The logrotate fragment still ships (`missingok`) for operators who add `--audit-log-file /var/lib/rustopnsmcp/audit.jsonl` in their override. Task 24 tests rotation against a real file. |
+| P2.2 "update `rustopnsmcp.tmpfiles` if the rework needs it" | **Not needed.** Every file the rework adds lives inside the two directories tmpfiles already creates with the right modes. | `packaging/systemd/rustopnsmcp.tmpfiles` (`/etc/rustopnsmcp 0750 root rustopnsmcp`, `/var/lib/rustopnsmcp 0700 rustopnsmcp rustopnsmcp`). | No tmpfiles change. Task 22 adds a test that pins the two lines. |
+| P2.3 "`packaging/tests/journald-dropin-ordering.sh`" listed under the `override.conf` item | **Mis-filed.** The sibling test of that name is about the journald drop-in directory (`/etc/systemd/journald.conf.d`), not the service override. | `RustJunosMCP/packaging/tests/journald-dropin-ordering.sh` header. | Task 26 ships a journald drop-in and the test of that name. Task 22 ships the service-override test as `unit-contract.sh`. |
+| P2.5 "BUILD-INFO and naming per `RELEASE-ARTIFACTS.md`" | **The siblings do not follow that standard** (`rustunifimcp_<ver>_<arch>.tar.gz`, binary at the archive root, a four-key BUILD-INFO). Following them would pass conformance and fail the standard. | `RustJunosMCP`/`rustunifimcp` `scripts/package-lxc.sh`; RELEASE-ARTIFACTS §1–§3. | Follow the standard. Conformance R1–R3 only need the manifest to name the paths, so both pass. |
+| P2.9 "a `Dockerfile` check against `DOCKER-STANDARD.md`" | **Two standard items do not apply to a distroless image**, and three real gaps exist. Not applicable: the `HEALTHCHECK ["kill","-0","1"]` example (distroless has no `kill` binary; the standard's own checklist allows "omitted") and `WORKDIR /app` + `CMD ["<binary>"]` (the config flags must live in `ENTRYPOINT`, which R6 enforces). Real gaps: the `ENTRYPOINT` has no `--state-file` (the container loses every change set on restart), no audit flags (unkeyed, unredacted audit, mecmcp#376), and `/var/lib/rustopnsmcp` does not exist in the image (a named volume would be root-owned and unwritable by uid 65532). | `Dockerfile` ENTRYPOINT and the absence of any `mkdir`/`COPY --chown`; DOCKER-STANDARD §5 and "Dockerfile requirements". | Task 29. |
+| P2.7 "wired in `http_transport.rs`" | **Incomplete as written.** The probe needs state that does not exist yet: `OpnsenseClient` records nothing about authentication. | `rustopnsmcp-core/src/client.rs` `get`/`post` (`self.http.send`, lines 96 and 132) discard the status after the `>= 300` check. | Task 21 adds the tracker to the client, the probe to the server, and the wiring in `http_transport.rs`. |
+| P2.8/P2.9 "a pin reachable from mecmcp `main` or a tag" | **Satisfiable at the current pin**, but a bump is still recommended (Decision D1). | `git merge-base --is-ancestor v0.28.1 origin/main` and `… v0.30.1 …` both succeed. | Task 19. |
+
+#### Decisions (the plan commits to these; the user can overrule before P2 starts)
+
+- **D1. Bump the mecmcp pin to v0.30.1 as the first P2 commit.** Reasons: rustjunosmcp (the parity target) is already on v0.30.1; the workflows and conformance action get one reachable SHA instead of a different one per file; and the bump is cheap *today*. Evidence gathered on a scratch copy of `main`: the only breakage is `error[E0063]: missing field owner_verified in initializer of ChangeSetRecord` at three sites (`rustopnsmcp/src/server/mod.rs:352` and `:1896`, `rustopnsmcp/src/server/lifecycle.rs:392`; mecmcp 0.30.0, `ChangeSetRecord.owner_verified`); `cargo test --workspace --locked` passes after the fix; `--help` lists the same 60 flags before and after (so no parity allowlist change); the `Cargo.lock` diff is 44 lines, all the eleven `mecmcp-*` entries. mecmcp 0.29.0's "rollback break" (state files written by OAuth callers) does not apply: nothing is deployed. `CallerCtx` gains `token_created_at`/`token_expires_at` in an unreleased mecmcp change; rustopnsmcp has no `CallerCtx` struct literal, so that is not a P2 concern. Alternative considered: stay on v0.28.1 and pin the workflows to v0.28.2's SHA. Rejected because the bump only gets harder as P3–P6 add code.
+- **D2. `/readyz` is passive and counts only HTTP 401.** It follows the rustpanosmcp precedent (`auth_health_check`): a device that has made no request reports healthy; the first 401 flips `/readyz` to 503; the next 2xx clears it. 403 does not flip it, because on OPNsense a user without a privilege for one endpoint gets 403 while the key is fine (the same distinction cost six days on the Proxmox MCP). This is an assumption about OPNsense's status codes that P2 cannot verify; Task 33 records it as a P3.3 check (wrong key → 401 → `/readyz` 503; privilege-short key → 403 → `/readyz` stays 200).
+- **D3. The tarball is built on the pinned runner, not in a container.** `runs-on: ubuntu-24.04` with the toolchain from `rust-toolchain.toml` gives a glibc floor of 2.39, below Debian 13's 2.41, and the floor is measured into BUILD-INFO and enforced by the installer. This matches rustpanosmcp/rustunifimcp. Alternative (build inside the Dockerfile's digest-pinned builder, glibc 2.41) is stricter but needs git and binutils installed into the builder on every release; revisit if the floor ever rises above 2.41.
+- **D4. The release image is pushed to GHCR only.** No `dockerhub-image` input. Nothing is published before the v1.0.0 tag anyway (the workflows trigger on version tags and `release: published`), but adding Docker Hub later is a one-line change with the board's org secrets. `reusable-registry-publish.yml` (MCP Registry) is out of scope until P7 and needs a `server.json`.
+- **D5. `security.yml` adds only Trivy.** `ci.yml` already runs `gitleaks`, `cargo audit` and `cargo deny` under the job names `Secret scan` and `Supply-chain policy`. Moving them would rename required checks and strand every open PR (a renamed required check goes permanently pending). `security.yml` therefore holds the Trivy filesystem and image scans only, and the parity gate needs the file to exist, not to duplicate jobs.
+- **D6. The binary generates a missing `audit-hmac.key` itself** (`create_new`, mode 0600, 32 bytes from `/dev/urandom`, never rewrites an existing file). In LXC the installer creates the key first, so this is a no-op there. In the distroless image there is no shell for an entrypoint wrapper, so this is the only way the image can run keyed audit (conformance `audit_hmac_flag`, R7).
+- **D7. A new job, `Package conformance`, is added to `ci.yml`** and builds the real tarball on every PR. It is not a required check until the board adds it to branch protection (Open question 3).
+
+#### Verification performed while writing this plan
+
+The code in Tasks 19–22, 25–27 and 29 was not only read: it was extracted from this document into a scratch copy of `main` (outside the repository and outside the mecmcp checkout) and run. What was observed:
+
+- **Task 19:** the bump fails with exactly three `E0063 … owner_verified` errors; after the fix `cargo test --workspace --locked` passes and the unique-flag count stays 60.
+- **Task 20:** the five unit tests and the end-to-end test pass; deleting the `main.rs` call makes the end-to-end test fail with `invalid --audit-redact: audit hmac key file unreadable`. (That message is also the evidence for why the image needs the generation: today the binary refuses to start on a missing key.)
+- **Task 21:** both `readyz_auth` tests pass; removing the readiness wiring fails the first (`HTTP/1.1 200 OK` where 503 is required); making `403` count as a failure fails `a_403_alone_never_fails_readiness`. `cargo clippy --workspace --all-targets --all-features -- -D warnings` is clean after `cargo fmt --all`.
+- **Task 22:** `unit-contract.sh` passes on the reworked unit and fails (`override example drops stock flags: --audit-redact`) when a flag is removed from the example; `systemd-analyze verify` reports only the expected "not executable" line.
+- **Tasks 24–27:** `package-lxc.sh` produced a tarball that `package-smoke.sh` accepts; `skip-build-provenance.sh`, `logrotate.sh`, `installer-idempotence.sh` and `journald-dropin-ordering.sh` pass; four separate sabotages of the installer (overwrite guard, symlink guard, binary-hash check, journald guard) each fail the matching test; `shellcheck` is clean on every script.
+- **Task 28:** mecmcp's own `verify-package.sh` (extracted from tag v0.30.1) exits 0 on the staged tarball with the manifest above, with the single R3 clause-3 WARN described there.
+- **Task 29:** the modified Dockerfile built; the argv-after-`--host` check, `--version`, the non-root user, the named-volume first run (key created `600`, uid 65532, 32 bytes), an HTTP run on the compose example's flags (`/readyz` ok, no WARN/ERROR) and mecmcp's `verify-image.sh` (R6) all passed.
+- **Task 31:** `check-docs.sh` is shellcheck-clean and was seen to fail on a non-documentation address, a `.local` hostname, a dead link, an unlisted README doc, a misspelled flag and a drifted override block.
+
+**Not run, and why:** the GitHub workflows (they need GitHub; `actionlint` was not installed), the `Package conformance` and `container-guard` jobs as jobs, `scripts/parity-check.sh --phase P2` (it needs the allowlist edit it gates), `trivy` 0.73.0 (the workstation has 0.70.0; the SBOM check was run with that), and the dry-run install on a real guest (Task 33 step 3 needs the user's go-ahead). Ownership, apt and systemd behaviour of the installer are therefore unproven until that dry run.
+
+#### Open questions for the user (answers needed before Task 19 starts unless noted)
+
+1. **D1:** confirm the v0.30.1 bump, or choose to stay on v0.28.1.
+2. **D4:** GHCR only for now, or add Docker Hub (`docker.io/mechub/rustopnsmcp`) to the release workflow in Task 30? (Not blocking; needs the org secrets either way.)
+3. **Branch protection:** may the board add `Package conformance` and `Trivy` to the required checks once Tasks 28 and 30 land? (Not blocking P2; blocks nothing but enforcement.)
+4. **`/readyz` semantics (D2):** passive 401-only is the plan. Do you want an active periodic probe (a background `GET /api/core/system/status` per device) instead? It makes `/readyz` meaningful on a quiet server but adds an outbound request cadence the audit trail would have to explain.
+5. **Task 33 step 3:** the dry-run install needs a disposable Debian 13 LXC. Which VMID band and node should it use, and may Claude create and destroy it (unprivileged, `nesting=1`, no `protected` tag)? Nothing is created until you answer.
+6. **Task 26:** the installer writes `/etc/systemd/journald.conf.d/20-audit-retention.conf` (`Storage=persistent`, `SystemMaxUse=512M`) only when no file of that name exists. Confirm that this fleet-shared name is right for a new server, or say so if it should be skipped on guests that already carry fleet journald policy.
+
+#### File Structure (P2)
+
+| Path | Task | Responsibility |
+|---|---|---|
+| `Cargo.toml`, `Cargo.lock`, `rustopnsmcp/src/server/{mod,lifecycle}.rs` | 19 | v0.30.1 pin and `owner_verified: false` at three literals. |
+| `rustopnsmcp/src/startup.rs`, `rustopnsmcp/src/main.rs`, `rustopnsmcp/tests/audit_key_first_start.rs` | 20 | `ensure_audit_hmac_key`, called before the audit subscriber is built. |
+| `rustopnsmcp-core/src/client.rs`, `rustopnsmcp/src/server/mod.rs`, `rustopnsmcp/src/http_transport.rs`, `rustopnsmcp/tests/readyz_auth.rs` | 21 | Authentication tracker, `auth_health_check`, `/readyz` wiring. |
+| `packaging/systemd/rustopnsmcp.service`, `packaging/systemd/rustopnsmcp.override.conf.example`, `packaging/tests/unit-contract.sh` | 22 | Loopback unit and the site override example. |
+| `docs/OPERATIONS.md`, `packaging/FILESYSTEM.md` | 23 | Inputs to the tarball; behaviours settled by Tasks 19–22. |
+| `packaging/logrotate/rustopnsmcp-audit`, `packaging/tests/logrotate.sh` | 24 | Rotation with `postrotate` SIGHUP. |
+| `scripts/package-lxc.sh`, `packaging/package-README.md.in`, `packaging/journald/mecmcp.conf`, `packaging/tests/skip-build-provenance.sh` | 25 | Tarball, BUILD-INFO, SBOM, checksum. |
+| `packaging/lxc/install.sh`, `packaging/tests/installer-idempotence.sh`, `packaging/tests/journald-dropin-ordering.sh` | 26 | Installer and its tests. |
+| `packaging/tests/package-smoke.sh` | 27 | RELEASE-ARTIFACTS §8 checks 1–10. |
+| `packaging/conformance.toml`, `.github/workflows/ci.yml` | 28 | Manifest and the `Package conformance` job. |
+| `Dockerfile`, `.dockerignore`, `packaging/container/compose.example.yaml`, `.github/workflows/ci.yml` | 29 | Image brought to DOCKER-STANDARD; first-run key test. |
+| `.github/workflows/{release-image,release-sign-tarball,release-sbom,security}.yml`, `.github/dependabot.yml`, `trivy.yaml` | 30 | Release and supply-chain workflows. |
+| `docs/HOW-TO-SETUP-LXC.md`, `docs/HOW-TO-SETUP-DOCKER.md`, `docs/AUDIT.md`, `docs/METRICS.md`, `docs/THREAT-MODEL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `AGENTS.md`, `scripts/check-docs.sh`, `README.md` | 31 | Operator docs and the doc gate. |
+| `scripts/parity-allowlist.txt` | 32 | P2 entries removed, final `never` entries added. |
+
+---
+
+### Task 19: Bump the mecmcp pin to v0.30.1 (P2.8, P2.9 prerequisite)
+
+**Files:**
+- Modify: `Cargo.toml` (the eleven `mecmcp-*` lines), `Cargo.lock`
+- Modify: `rustopnsmcp/src/server/mod.rs` (`ChangeSetRecord {` literals near lines 352 and 1896), `rustopnsmcp/src/server/lifecycle.rs` (near line 392)
+
+**Interfaces:**
+- Consumes: mecmcp v0.30.1 `ChangeSetRecord.owner_verified: bool` (`#[serde(default, skip_serializing_if = "Not::not")]`, true only when the proposer was IdP-verified).
+- Produces: one pin, `tag = "v0.30.1"`, for every later task.
+
+- [ ] **Step 1: Prove the bump breaks compilation in exactly three places**
+
+Run: `sed -i 's/"0\.28\.1"/"0.30.1"/; s/"v0\.28\.1"/"v0.30.1"/' Cargo.toml && grep -c '0\.30\.1' Cargo.toml && grep -c '0\.28\.1' Cargo.toml`
+Expected: `11` then `0` (eleven lines, each naming the version and the tag).
+
+Run: `CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p2-target cargo check --workspace --all-targets 2>&1 | grep -E '^error'`
+Expected: three `error[E0063]: missing field \`owner_verified\`` lines (lib production site plus two test literals), and nothing else.
+
+- [ ] **Step 2: Add the field at each literal**
+
+In each of the three `ChangeSetRecord { … }` initializers add `owner_verified: false,` directly after `owner_subject: None,`. `false` is correct: this server never verifies a proposer's identity with an IdP (the `--oidc-*` and `--require-verified-*` flags are rustjunosmcp-only, see the allowlist).
+
+```rust
+        Ok(ChangeSetRecord {
+            id: crate::changeset_state::new_change_set_id(),
+            owner: owner.to_owned(),
+            owner_subject: None,
+            owner_verified: false,
+            device: device.to_owned(),
+```
+
+- [ ] **Step 3: Verify with the repo's own CI commands**
+
+Run, in order:
+```
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --locked
+scripts/check-mecmcp-pin.sh
+git diff --stat Cargo.lock
+```
+Expected: all green; `check-mecmcp-pin.sh` prints `OK: every mecmcp crate resolves to tag=v0.30.1#8557155e`; the lock diff touches only `mecmcp-*` entries (44 changed lines).
+
+- [ ] **Step 4: Prove the flag surface did not move**
+
+Run: `cargo run -q -p rustopnsmcp -- --help | grep -oE -- '--[a-z0-9-]+' | sort -u | wc -l`
+Expected: `60`, the same unique-flag count as on `main` before the bump (so `scripts/parity-allowlist.txt` needs no change for this task).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Cargo.toml Cargo.lock rustopnsmcp/src/server/mod.rs rustopnsmcp/src/server/lifecycle.rs
+git commit -m "build: bump mecmcp pin to v0.30.1
+
+Every mecmcp crate moves together. ChangeSetRecord gained owner_verified in
+0.30.0; this server never verifies a proposer, so the three literals set
+false. The parity target (rustjunosmcp) is already on v0.30.1, and the P2
+workflows pin the v0.30.1 commit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 20: Generate a missing `audit-hmac.key` at first start (P2.9; conformance R7)
+
+**Why this is in P2:** the distroless image has no shell, so the only way it can run keyed audit on first start is for the binary to create the key. Conformance rule R7 (fatal once `audit_hmac_flag` is declared) requires that behaviour, and Task 29 puts the flag in `ENTRYPOINT`. In LXC the installer creates the key first and this is a no-op. Without it, the current binary refuses to start when `--audit-redact devices=hmac` names a key file that does not exist (observed: `invalid --audit-redact: audit hmac key file unreadable`), so a container that mounts an empty state volume could never start with keyed audit.
+
+**Files:**
+- Modify: `rustopnsmcp/src/startup.rs` (new function and unit tests)
+- Modify: `rustopnsmcp/src/main.rs` (`init_audit`, around line 53)
+- Create: `rustopnsmcp/tests/audit_key_first_start.rs`
+
+**Interfaces:**
+- Produces: `pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String>` in `rustopnsmcp::startup`. `Ok(())` means a file exists at `path` (created now or already there).
+
+- [ ] **Step 1: Write the failing unit tests**
+
+Append to the `#[cfg(test)] mod tests` in `rustopnsmcp/src/startup.rs`:
+
+```rust
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_missing_key_is_created_32_bytes_and_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        ensure_audit_hmac_key(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert_ne!(bytes, vec![0u8; 32], "the key must be random, not zeroed");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn two_generated_keys_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.key");
+        let second = dir.path().join("b.key");
+        ensure_audit_hmac_key(&first).unwrap();
+        ensure_audit_hmac_key(&second).unwrap();
+        assert_ne!(std::fs::read(first).unwrap(), std::fs::read(second).unwrap());
+    }
+
+    #[test]
+    fn an_existing_key_is_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        std::fs::write(&path, b"installer-made-key-0123456789abcdef").unwrap();
+        ensure_audit_hmac_key(&path).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"installer-made-key-0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn a_symlink_is_left_for_the_hardened_reader_to_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        let link = dir.path().join("audit-hmac.key");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        ensure_audit_hmac_key(&link).unwrap();
+        assert!(!target.exists(), "must not create through a symlink");
+    }
+
+    #[test]
+    fn an_uncreatable_key_names_the_installer() {
+        let message = ensure_audit_hmac_key(std::path::Path::new(
+            "/nonexistent-dir-for-test/audit-hmac.key",
+        ))
+        .unwrap_err();
+        assert!(message.contains("audit-hmac.key"), "{message}");
+        assert!(message.contains("install.sh"), "{message}");
+    }
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cargo test -p rustopnsmcp --lib startup::tests::a_missing_key 2>&1 | tail -5`
+Expected: `error[E0425]: cannot find function \`ensure_audit_hmac_key\``.
+
+- [ ] **Step 3: Implement**
+
+Add above `audit_config` in `rustopnsmcp/src/startup.rs`:
+
+```rust
+/// Create `path` holding 32 random bytes when nothing exists there.
+///
+/// An existing file, including a symlink, is left alone: the hardened reader
+/// in `mecmcp-audit` refuses a bad one, and rotating a good one would break
+/// verification of every record already written under it. Linux only, as are
+/// all mechub MCP servers, so there is no fallback entropy source.
+///
+/// # Errors
+///
+/// Returns a message naming the file when it cannot be created or the
+/// entropy source cannot be read. A half-written key is removed.
+pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "--audit-hmac-key-file {}: cannot create the key: {error}. The LXC installer \
+                 (packaging/lxc/install.sh) creates it; in a container mount a writable state \
+                 directory",
+                path.display()
+            ));
+        }
+    };
+    let mut key = [0u8; 32];
+    let written = std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut key))
+        .and_then(|()| file.write_all(&key));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "--audit-hmac-key-file {}: cannot write a generated key: {error}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+```
+
+Call it in `init_audit` in `rustopnsmcp/src/main.rs`, before `startup::audit_config(args)`:
+
+```rust
+    if let Some(path) = args.audit_hmac_key_file.as_deref() {
+        rustopnsmcp::startup::ensure_audit_hmac_key(path)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    }
+```
+
+- [ ] **Step 4: Write the end-to-end test that proves `main` calls it**
+
+Create `rustopnsmcp/tests/audit_key_first_start.rs`:
+
+```rust
+#![allow(clippy::unwrap_used)]
+//! The binary creates a missing audit HMAC key on first start. A unit test of
+//! the helper cannot prove `main` calls it; this starts the real binary.
+
+use std::os::unix::fs::PermissionsExt as _;
+use std::process::{Command, Stdio};
+
+#[test]
+fn first_start_creates_the_key_and_a_second_start_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let inventory = dir.path().join("devices.json");
+    std::fs::write(&inventory, r#"{"version":1,"devices":{}}"#).unwrap();
+    std::fs::set_permissions(&inventory, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let key = dir.path().join("audit-hmac.key");
+
+    let start = || {
+        Command::new(env!("CARGO_BIN_EXE_rustopnsmcp"))
+            .args([
+                "--device-mapping",
+                inventory.to_str().unwrap(),
+                "--transport",
+                "stdio",
+                "--audit-format",
+                "json",
+                "--audit-redact",
+                "devices=hmac",
+                "--audit-hmac-key-file",
+                key.to_str().unwrap(),
+            ])
+            .stdin(Stdio::null()) // EOF on stdin ends the stdio server
+            .output()
+            .unwrap()
+    };
+
+    // A stdio server whose stdin is already closed exits non-zero
+    // ("connection closed: initialize request"). That is expected: the key is
+    // created during startup, before the handshake, and is all this test reads.
+    let first = start();
+    let generated = std::fs::read(&key).unwrap_or_else(|error| {
+        panic!("no key created ({error}); stderr: {}", String::from_utf8_lossy(&first.stderr))
+    });
+    assert_eq!(generated.len(), 32);
+    assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+
+    let _ = start();
+    assert_eq!(std::fs::read(&key).unwrap(), generated, "second start rotated the key");
+}
+```
+
+- [ ] **Step 5: Run everything, then sabotage**
+
+Run: `cargo test -p rustopnsmcp --locked 2>&1 | grep -E 'test result|FAILED'`
+Expected: all `ok`.
+
+Sabotage (delete the integration point yourself): comment out the `ensure_audit_hmac_key` call in `init_audit`, run `cargo test -p rustopnsmcp --test audit_key_first_start`, expect it to FAIL with `no key created … invalid --audit-redact: audit hmac key file unreadable`, then restore the call and re-run to see it pass. Record both outcomes in the PR description.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add rustopnsmcp/src/startup.rs rustopnsmcp/src/main.rs rustopnsmcp/tests/audit_key_first_start.rs
+git commit -m "startup: create a missing audit HMAC key at first start
+
+The distroless image has no shell to run a key-generating entrypoint, so the
+binary does it (create_new, 0600, 32 random bytes, never rewrites). In LXC
+the installer creates the key first and this is a no-op.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 21: `/readyz` OPNsense API auth readiness (P2.7)
+
+**Files:**
+- Modify: `rustopnsmcp-core/src/client.rs` (struct, `new`, `get`, `post`; `grep -n 'http.send' rustopnsmcp-core/src/client.rs` must show exactly two hits)
+- Modify: `rustopnsmcp/src/server/mod.rs` (add `auth_health_check` to `impl OpnsenseServer`, next to `rebuild_clients`)
+- Modify: `rustopnsmcp/src/http_transport.rs` (readiness check)
+- Modify: `rustopnsmcp/Cargo.toml` (dev-dependency `tokio-rustls.workspace = true`; `rustls` and `rcgen` are already there or workspace-available, check with `cargo tree -p rustopnsmcp -e dev | grep -E 'rcgen|rustls'`)
+- Create: `rustopnsmcp/tests/readyz_auth.rs`
+
+**Interfaces:**
+- Consumes: `mecmcp_secret::AuthFailureTracker` (`new`, `record_success`, `record_failure`, `is_failing`) and `mecmcp_transport::ReadinessCheck::new(name, Fn() -> Result<(), &'static str>)`.
+- Produces: `OpnsenseClient::is_auth_healthy(&self) -> bool`; `OpnsenseServer::auth_health_check(&self) -> Result<(), &'static str>`; a `/readyz` check named `opnsense_auth`.
+
+- [ ] **Step 1: Write the failing end-to-end test**
+
+Create `rustopnsmcp/tests/readyz_auth.rs`. It runs a TLS mock whose status code the test controls, drives one tool call in process (the same duplex pattern as `audit_coverage.rs`), and reads `/readyz` over a real socket served by `serve_router`.
+
+```rust
+#![allow(clippy::unwrap_used)]
+//! `/readyz` reports a device that refuses the configured API key.
+//!
+//! The probe is passive: a server that has made no request is ready; the
+//! first 401 makes it not ready; the next 2xx makes it ready again. A 403
+//! (a key that works but lacks one privilege) must not change anything.
+
+use rmcp::ServiceExt as _;
+use rmcp::model::CallToolRequestParams;
+use rustopnsmcp::server::{OpnsenseServer, ServerOptions};
+use rustopnsmcp_core::inventory::DeviceRegistry;
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+fn tls_material() -> (String, rustls::ServerConfig) {
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+    let cert = params.self_signed(&key_pair).unwrap();
+    let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut server_config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], key_der)
+        .unwrap();
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    (cert.pem(), server_config)
+}
+
+/// A TLS device that answers every request with the status in `status`.
+async fn mock_device(status: Arc<AtomicU16>) -> (u16, String) {
+    let (cert_pem, server_config) = tls_material();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { return };
+            let acceptor = acceptor.clone();
+            let status = Arc::clone(&status);
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(stream).await else { return };
+                let mut seen = Vec::new();
+                let mut byte = [0u8; 1];
+                while tls.read_exact(&mut byte).await.is_ok() {
+                    seen.push(byte[0]);
+                    if seen.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let code = status.load(Ordering::SeqCst);
+                let body = r#"{"status":"ok"}"#;
+                let reply = format!(
+                    "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tls.write_all(reply.as_bytes()).await;
+                let _ = tls.flush().await;
+            });
+        }
+    });
+    (port, cert_pem)
+}
+
+fn secret(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, "test-value").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn server_for(port: u16, cert_pem: &str, dir: &std::path::Path) -> OpnsenseServer {
+    let ca = dir.join("ca.pem");
+    std::fs::File::create(&ca).unwrap().write_all(cert_pem.as_bytes()).unwrap();
+    let inventory = dir.join("devices.json");
+    std::fs::write(
+        &inventory,
+        serde_json::json!({"version":1,"devices":{"fw-1":{
+            "endpoint": format!("https://localhost:{port}"),
+            "api_key_file": secret(dir, "key"),
+            "api_secret_file": secret(dir, "secret"),
+            "ca_pem_path": ca,
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&inventory, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let registry = Arc::new(DeviceRegistry::load(&inventory).unwrap());
+    let coordinator =
+        rustopnsmcp::changeset_state::build_coordinator(None, Duration::from_secs(3600), false)
+            .unwrap();
+    OpnsenseServer::new(registry, ServerOptions::default(), coordinator).unwrap()
+}
+
+/// One in-process call to a read tool, so the client sees the device's reply.
+async fn call_status(server: &OpnsenseServer) {
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let serving = server.clone();
+    let task = tokio::spawn(async move {
+        let running = serving.serve(tokio::io::split(server_io)).await.unwrap();
+        let _ = running.waiting().await;
+    });
+    let client = ().serve(tokio::io::split(client_io)).await.unwrap();
+    let serde_json::Value::Object(arguments) = serde_json::json!({"device":"fw-1"}) else {
+        unreachable!()
+    };
+    let _ = client
+        .call_tool(
+            CallToolRequestParams::new("get_opnsense_system_status".to_owned())
+                .with_arguments(arguments),
+        )
+        .await;
+    client.cancel().await.unwrap();
+    let _ = task.await;
+}
+
+/// `GET /readyz` against the router, over a real socket.
+async fn readyz(server: &OpnsenseServer) -> (u16, String) {
+    let plan = rustopnsmcp::http_transport::build_http_router(
+        server.clone(),
+        None,
+        vec![],
+        vec![],
+        mecmcp_transport::LimitsConfig::default(),
+        false,
+        false,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    // `serve_router_on_listener` is not re-exported, so reserve a port and
+    // hand its address over; the window between drop and bind is tiny and a
+    // collision fails the connect below, never passes silently.
+    let address = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let serving = tokio::spawn(mecmcp_transport::serve_router(
+        plan,
+        address,
+        None,
+        Duration::from_secs(1),
+    ));
+    let mut attempts = 0;
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(address).await {
+            Ok(stream) => break stream,
+            Err(error) if attempts < 50 => {
+                attempts += 1;
+                let _ = error;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("router never listened: {error}"),
+        }
+    };
+    stream
+        .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+    serving.abort();
+    let code = raw.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (code, raw)
+}
+
+#[tokio::test]
+async fn readyz_follows_the_device_refusing_and_accepting_the_key() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let status = Arc::new(AtomicU16::new(200));
+    let (port, cert_pem) = mock_device(Arc::clone(&status)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_for(port, &cert_pem, dir.path());
+
+    assert_eq!(readyz(&server).await.0, 200, "no request yet: ready");
+
+    status.store(401, Ordering::SeqCst);
+    call_status(&server).await;
+    let (code, raw) = readyz(&server).await;
+    assert_eq!(code, 503, "a refused key must fail readiness: {raw}");
+    assert!(raw.contains("opnsense_auth"), "{raw}");
+    assert!(!raw.contains("localhost") && !raw.contains("fw-1"), "{raw}");
+
+    status.store(403, Ordering::SeqCst);
+    call_status(&server).await;
+    assert_eq!(readyz(&server).await.0, 503, "403 must not clear a prior 401");
+
+    status.store(200, Ordering::SeqCst);
+    call_status(&server).await;
+    assert_eq!(readyz(&server).await.0, 200, "an accepted key recovers readiness");
+}
+
+#[tokio::test]
+async fn a_403_alone_never_fails_readiness() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let status = Arc::new(AtomicU16::new(403));
+    let (port, cert_pem) = mock_device(Arc::clone(&status)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_for(port, &cert_pem, dir.path());
+    call_status(&server).await;
+    assert_eq!(readyz(&server).await.0, 200);
+}
+```
+
+`tls_material` repeats the helper in `rustopnsmcp-core/tests/rollback_delete_idempotent.rs:33-51` because integration-test crates cannot share it. Add `tokio-rustls.workspace = true` and, if absent, `rcgen.workspace = true` under `[dev-dependencies]` in `rustopnsmcp/Cargo.toml`.
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p rustopnsmcp --test readyz_auth 2>&1 | tail -8`
+Expected: FAIL. Either `no field auth` / compile error until Step 3, or, if the harness compiles, the first `503` assertion fails with `200` (nothing records the 401 yet).
+
+- [ ] **Step 3: Implement the tracker in the client**
+
+In `rustopnsmcp-core/src/client.rs`, add `use mecmcp_secret::AuthFailureTracker;`, a field, and the recording:
+
+```rust
+pub struct OpnsenseClient {
+    endpoint: String,
+    http: std::sync::Arc<HttpClient>,
+    basic_auth: OutboundSecret,
+    /// Whether the device last accepted this client's API key. Clones share it.
+    auth: AuthFailureTracker,
+}
+```
+
+In `new`, add `auth: AuthFailureTracker::new(),` to the returned struct. After each of the two `let response = self.http.send(request).await?;` lines (in `get` and `post`) add `self.note_auth_outcome(response.status());`, and add:
+
+```rust
+    /// Record what a reply says about the API key. Only 401 is an
+    /// authentication failure: OPNsense answers 403 when a working key lacks
+    /// the privilege for one endpoint, which says nothing about the key.
+    fn note_auth_outcome(&self, status: u16) {
+        match status {
+            401 => self.auth.record_failure(),
+            200..=299 => self.auth.record_success(),
+            _ => {}
+        }
+    }
+
+    /// `false` once the device's most recent reply was a 401. A client that
+    /// has made no request yet reports healthy: readiness reflects proven
+    /// failure, not silence.
+    #[must_use]
+    pub fn is_auth_healthy(&self) -> bool {
+        !self.auth.is_failing()
+    }
+```
+
+- [ ] **Step 4: Implement the probe and wire it**
+
+In `rustopnsmcp/src/server/mod.rs`, inside `impl OpnsenseServer` after `rebuild_clients`:
+
+```rust
+    /// `/readyz` probe: `Err` while any device's most recent reply was a 401.
+    ///
+    /// The reason is a fixed string because `/readyz` is unauthenticated: no
+    /// device name or endpoint may reach a caller. A SIGHUP that rebuilds the
+    /// clients resets the state to healthy until the next call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the static reason when a device refuses the key or the client
+    /// table is unavailable.
+    pub fn auth_health_check(&self) -> Result<(), &'static str> {
+        let Ok(clients) = self.clients.read() else {
+            return Err("OPNsense client table unavailable");
+        };
+        if clients.values().all(OpnsenseClient::is_auth_healthy) {
+            return Ok(());
+        }
+        Err("OPNsense authentication failed for one or more devices")
+    }
+```
+
+In `rustopnsmcp/src/http_transport.rs` add `ReadinessCheck` to the `mecmcp_transport` import list; clone the handler before it is moved, and attach the check once, after the `let config = if … else …;` block and before `build_streamable_http_router`:
+
+```rust
+    let readiness_handler = handler.clone();
+    // … existing identity / host_origin / config construction …
+    let config = config.with_readiness_check(ReadinessCheck::new("opnsense_auth", move || {
+        readiness_handler.auth_health_check()
+    }));
+
+    build_streamable_http_router(move || Ok::<_, std::io::Error>(handler.clone()), config)
+```
+
+- [ ] **Step 5: Run to verify it passes, then sabotage**
+
+Run: `cargo test -p rustopnsmcp --test readyz_auth 2>&1 | grep -E 'test result|FAILED'`
+Expected: `test result: ok. 2 passed`.
+
+Sabotage 1 (delete the integration point): remove the `with_readiness_check` call; the first `503` assertion must FAIL. Restore.
+Sabotage 2: change `401 =>` to `401 | 403 =>` in `note_auth_outcome`; `a_403_alone_never_fails_readiness` must FAIL. Restore. Record both in the PR.
+
+- [ ] **Step 6: Gates and commit**
+
+Run: `cargo fmt --all && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --locked`
+Expected: green. Also run `cargo test -p rustopnsmcp --test audit_coverage` (new `auth_health_check` is not a tool, so no change).
+
+```bash
+git add rustopnsmcp-core/src/client.rs rustopnsmcp/src/server/mod.rs rustopnsmcp/src/http_transport.rs rustopnsmcp/tests/readyz_auth.rs rustopnsmcp/Cargo.toml Cargo.lock
+git commit -m "http: /readyz fails while a device refuses the API key
+
+Passive, as rustpanosmcp: no request yet is ready, a 401 is not ready, the
+next 2xx recovers. 403 is ignored because it means a missing privilege on a
+working key. The reason string is fixed; /readyz is unauthenticated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 22: Loopback unit and the site override example (P2.2, P2.3)
+
+**Files:**
+- Modify: `packaging/systemd/rustopnsmcp.service` (the `ExecStart`, `EnvironmentFile` lines; hardening block unchanged)
+- Create: `packaging/systemd/rustopnsmcp.override.conf.example`
+- Create: `packaging/tests/unit-contract.sh`
+
+**Interfaces:**
+- Produces: the stock unit's exact flag set, which Tasks 26, 28 and 32 and `docs/HOW-TO-SETUP-LXC.md` restate; the override example, which Task 25 ships in the tarball.
+
+- [ ] **Step 1: Write the failing contract test**
+
+Create `packaging/tests/unit-contract.sh` (mode 0755):
+
+```bash
+#!/usr/bin/env bash
+# The stock unit is loopback-only with the audit baseline and no placeholders.
+# The site override example restates every flag, because a systemd drop-in can
+# only replace ExecStart, never append to it: an override that forgets
+# --audit-redact silently turns redaction off.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+unit=$root/packaging/systemd/rustopnsmcp.service
+override=$root/packaging/systemd/rustopnsmcp.override.conf.example
+tmpfiles=$root/packaging/systemd/rustopnsmcp.tmpfiles
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# The last non-empty ExecStart= with its line continuations joined.
+exec_line() {
+    sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' "$1" | grep -E '^ExecStart=.' | tail -n 1
+}
+flags_of() { grep -oE -- ' --[a-z0-9-]+' | sort -u; }
+
+stock=$(exec_line "$unit")
+site=$(exec_line "$override")
+
+# 1. No placeholders: the installer no longer rewrites the unit.
+if grep -qE '@[A-Z][A-Z_]*@' "$unit"; then fail "unit still carries @PLACEHOLDER@ tokens"; fi
+
+# 2. The stock unit says exactly what spec 3.2 says.
+for needle in \
+    '--device-mapping /etc/rustopnsmcp/devices.json' \
+    '--tokens-file /var/lib/rustopnsmcp/tokens.json' \
+    '--state-file /var/lib/rustopnsmcp/changeset-state.json' \
+    '--inventory-readonly' \
+    '--host 127.0.0.1' \
+    '--audit-format json' \
+    '--audit-journald' \
+    '--audit-redact devices=hmac' \
+    '--audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key'; do
+    grep -qF -- "$needle" <<<"$stock" || fail "stock unit lacks: $needle"
+done
+for forbidden in '--audit-log-file' 'changesets.json' '--tls-cert' '--tls-key' \
+    '--allowed-host' '--allowed-origin' '--lab-mode' '--allow-direct-commit'; do
+    if grep -qF -- "$forbidden" <<<"$stock"; then fail "stock unit must not contain: $forbidden"; fi
+done
+grep -qx 'EnvironmentFile=-/etc/rustopnsmcp/credentials.env' "$unit" \
+    || fail "EnvironmentFile must be -/etc/rustopnsmcp/credentials.env"
+if grep -q 'secrets.env' "$unit"; then fail "secrets.env was renamed credentials.env"; fi
+
+# 3. The override example resets ExecStart first, then restates every stock flag.
+grep -qx 'ExecStart=' "$override" || fail "override example must clear ExecStart= before setting it"
+missing=$(comm -23 <(flags_of <<<"$stock") <(flags_of <<<"$site"))
+[[ -z "$missing" ]] || fail "override example drops stock flags:$missing"
+for needle in '--tls-cert' '--tls-key' '--allowed-host' '--allowed-origin' \
+    '--audit-redact devices=hmac' '--audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key'; do
+    grep -qF -- "$needle" <<<"$site" || fail "override example lacks: $needle"
+done
+
+# 4. tmpfiles needs no change for the rework; pin the two lines it relies on.
+grep -qx 'd /etc/rustopnsmcp 0750 root rustopnsmcp -' "$tmpfiles" || fail "tmpfiles /etc line changed"
+grep -qx 'd /var/lib/rustopnsmcp 0700 rustopnsmcp rustopnsmcp -' "$tmpfiles" || fail "tmpfiles /var/lib line changed"
+
+# 5. systemd agrees the stock unit is well formed. The binary is not installed
+# where the unit names it, which is the one diagnostic mecmcp's R5 also drops.
+if command -v systemd-analyze >/dev/null; then
+    scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+    cp "$unit" "$scratch/rustopnsmcp.service"
+    problems=$(systemd-analyze verify "$scratch/rustopnsmcp.service" 2>&1 \
+        | grep -v 'is not executable: No such file or directory' || true)
+    [[ -z "$problems" ]] || fail "systemd-analyze verify: $problems"
+fi
+echo "unit-contract: ok"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `chmod +x packaging/tests/unit-contract.sh && packaging/tests/unit-contract.sh`
+Expected: `FAIL: unit still carries @PLACEHOLDER@ tokens`.
+
+- [ ] **Step 3: Rework the unit**
+
+In `packaging/systemd/rustopnsmcp.service` replace the `ExecStart` block and the `EnvironmentFile` line. Leave every hardening line, the `IPAddress*` comment and `TimeoutStopSec` exactly as they are.
+
+```ini
+ExecStart=/usr/local/bin/rustopnsmcp \
+    --device-mapping /etc/rustopnsmcp/devices.json \
+    --tokens-file /var/lib/rustopnsmcp/tokens.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --inventory-readonly \
+    --transport streamable-http \
+    --host 127.0.0.1 --port 30037 \
+    --audit-format json \
+    --audit-journald \
+    --audit-redact devices=hmac \
+    --audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key
+Restart=on-failure
+RestartSec=5
+UMask=0077
+EnvironmentFile=-/etc/rustopnsmcp/credentials.env
+```
+
+`--inventory-readonly` is correct for the stock unit: `/etc/rustopnsmcp` is read-only to the service under `ProtectSystem=strict`, so `add_device` could not write anyway, and refusing it up front gives a clear error instead of `EROFS`.
+
+- [ ] **Step 4: Create the override example**
+
+`packaging/systemd/rustopnsmcp.override.conf.example`:
+
+```ini
+# Site drop-in for rustopnsmcp. Install as
+#   /etc/systemd/system/rustopnsmcp.service.d/override.conf
+# then: systemctl daemon-reload && systemctl restart rustopnsmcp
+#
+# A drop-in can only REPLACE ExecStart, so this restates every flag of the
+# stock unit. Keep it in step with /etc/systemd/system/rustopnsmcp.service;
+# packaging/tests/unit-contract.sh fails if this example drops a stock flag.
+# Addresses and names below are documentation values (RFC 5737, example.org).
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rustopnsmcp \
+    --device-mapping /etc/rustopnsmcp/devices.json \
+    --tokens-file /var/lib/rustopnsmcp/tokens.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --inventory-readonly \
+    --transport streamable-http \
+    --host 192.0.2.10 --port 30037 \
+    --allowed-host rustopnsmcp.example.org:30037 \
+    --allowed-host 192.0.2.10:30037 \
+    --allowed-origin https://console.example.org \
+    --tls-cert /etc/rustopnsmcp/fullchain.pem \
+    --tls-key /etc/rustopnsmcp/privkey.pem \
+    --audit-format json \
+    --audit-journald \
+    --audit-redact devices=hmac \
+    --audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key
+```
+
+- [ ] **Step 5: Run to verify it passes, then sabotage**
+
+Run: `packaging/tests/unit-contract.sh`
+Expected: `unit-contract: ok`.
+
+Sabotage: delete `--audit-redact devices=hmac \` from the override example and re-run; expect `FAIL: override example drops stock flags: --audit-redact`. Restore. Then re-add `--audit-log-file /var/lib/rustopnsmcp/audit.jsonl` to the stock unit; expect `stock unit must not contain`. Restore.
+
+- [ ] **Step 6: Prove the unit still starts the real binary**
+
+The unit's argument list is the thing that must boot. Run it by hand against a scratch directory (the paths differ, the flags do not):
+
+```
+d=$(mktemp -d); printf '{"version":1,"devices":{}}\n' >$d/devices.json
+printf '{"version":1,"tokens":[]}\n' >$d/tokens.json; chmod 600 $d/devices.json $d/tokens.json
+cargo build -q -p rustopnsmcp
+(timeout 5 target/debug/rustopnsmcp --device-mapping $d/devices.json --tokens-file $d/tokens.json \
+  --state-file $d/changeset-state.json --inventory-readonly --transport streamable-http \
+  --host 127.0.0.1 --port 30937 --audit-format json --audit-redact devices=hmac \
+  --audit-hmac-key-file $d/audit-hmac.key &) ; sleep 2; curl -s http://127.0.0.1:30937/readyz
+```
+(Use `CARGO_TARGET_DIR` if set, and fish users wrap this in `bash -c '…'`.) Expected: `{"status":"ok"}`, and `$d/audit-hmac.key` now exists (Task 20). `--audit-journald` is omitted only because a workstation has no journald socket under the test harness; the installed unit has it.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packaging/systemd/rustopnsmcp.service packaging/systemd/rustopnsmcp.override.conf.example packaging/tests/unit-contract.sh
+git commit -m "packaging: loopback unit with the audit baseline, plus a site override example
+
+The unit no longer carries placeholders: it binds loopback and the installer
+stops rewriting it. Bind address, allowed host and TLS live in a drop-in whose
+example is tested to restate every stock flag. state file is
+changeset-state.json, credentials come from credentials.env.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 23: `OPERATIONS.md` and `packaging/FILESYSTEM.md` (P2.10, first half)
+
+These two documents are inputs to the tarball (`docs/operations.md` ships in the archive), so they land before `package-lxc.sh`. They describe behaviour that already exists after Tasks 19–22. The install walk-through (`HOW-TO-SETUP-LXC.md`) is Task 31, after the installer exists.
+
+**Files:**
+- Create: `docs/OPERATIONS.md`
+- Create: `packaging/FILESYSTEM.md`
+
+- [ ] **Step 1: Write `packaging/FILESYSTEM.md`**
+
+Content, in this order, each fact checked against the unit and tmpfiles:
+1. The two directory trees exactly as in the P1 Global Constraints "Files" line, with owner, group and mode per path (the mecmcp Permissions table rows for `devices.json`, `audit-hmac.key`, `credentials.env`, `tokens.json`, `changeset-state.json`, `audit.jsonl`).
+2. "Why `tokens.json` and `changeset-state.json` are under `/var/lib`": the service writes them atomically with a temp file in the same directory, `/etc/rustopnsmcp` is read-only to the service (`ProtectSystem=strict`, `ReadWritePaths=/var/lib/rustopnsmcp`).
+3. "Why `audit-hmac.key` is under `/etc`": generated once by the installer, never rewritten by the server (the binary creates it only when nothing exists, Task 20). In a container it lives in the state volume instead.
+4. The sysusers and tmpfiles lines verbatim, and the install-time commands `systemd-sysusers` / `systemd-tmpfiles --create`.
+5. A note that `rustopnsmcp` uses its full binary name as the directory base (P0 decision), unlike `jmcp`/`proxmoxmcp`/`unifimcp`.
+
+- [ ] **Step 2: Write `docs/OPERATIONS.md`**
+
+Sections, each ending with the command that proves it:
+1. **Reloading with SIGHUP.** What reloads (inventory, token store, audit file reopen) and what does not (flags, TLS material, the unit). Source: `rustopnsmcp/src/main.rs` `perform_sighup_reload`. Command: `systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service`, then `journalctl -u rustopnsmcp -n 20` showing the reload lines. Say that a SIGHUP rebuilds the device clients and so resets the `/readyz` auth state to healthy until the next call.
+2. **`add_device` versus `--inventory-readonly`.** The stock unit is read-only; `add_device` and `reload_devices` are refused (they are on the audit trail as refused). To add a device, edit `devices.json` as root, keep it `0600 rustopnsmcp:rustopnsmcp`, and SIGHUP. Command: `stat -c '%a %U:%G' /etc/rustopnsmcp/devices.json` expecting `600 rustopnsmcp:rustopnsmcp`.
+3. **Lab mode.** `--lab-mode` is CLI-only, belongs in the override, records `approver: null` with `approval_waiver: "lab-mode"`, and warns at startup. Never in product config.
+4. **Health and readiness.** `/healthz` (process up) and `/readyz` (503 listing `opnsense_auth` after a device returns 401; passive, so a quiet server is ready; 403 does not count). Commands: `curl -fsS http://127.0.0.1:30037/readyz`.
+5. **Audit.** Baseline flags, what `--audit-redact devices=hmac` does, where the key lives, why journald forwarding is the integrity control in an unprivileged LXC (PACKAGING §2), logrotate for an optional `audit.jsonl`.
+6. **Upgrading.** Snapshot the guest first; the installer never overwrites `tokens.json`, `changeset-state.json`, `devices.json`, `credentials.env` or `audit-hmac.key`; it replaces the unit and says so if the installed one differed (Task 26).
+7. **The IPAddressAllow caveat.** The unit's `IPAddressDeny`/`IPAddressAllow` are accepted and reported by `systemctl show` but are not enforced in an unprivileged LXC; do not read them as active protection. Command to check what the guest enforces is left to the operator's egress firewall; say so.
+
+- [ ] **Step 3: Verify every command and path in both files against the code**
+
+Run: `grep -rn 'perform_sighup_reload\|inventory_readonly' rustopnsmcp/src | head` and confirm each behaviour claimed in sections 1–2 appears in the code. Run `scripts/check-docs.sh` once Task 31 lands; until then, `grep -nE '([0-9]{1,3}\.){3}[0-9]{1,3}' docs/OPERATIONS.md packaging/FILESYSTEM.md` must print nothing outside RFC 5737 ranges.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/OPERATIONS.md packaging/FILESYSTEM.md
+git commit -m "docs: operations guide and filesystem layout
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 24: logrotate fragment (P2.6)
+
+**Files:**
+- Create: `packaging/logrotate/rustopnsmcp-audit`
+- Create: `packaging/tests/logrotate.sh`
+
+- [ ] **Step 1: Write the failing test**
+
+`packaging/tests/logrotate.sh` runs the fragment under real `logrotate` against a scratch directory, with a fake `systemctl` on `PATH` that records its arguments. It proves the `postrotate` fires the signal, which is the only thing that makes the server reopen the file.
+
+```bash
+#!/usr/bin/env bash
+# Rotation must rename the audit file AND signal the server, or the renamed
+# file keeps growing while the new audit.jsonl stays empty forever.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+fragment=$root/packaging/logrotate/rustopnsmcp-audit
+command -v logrotate >/dev/null || { echo "logrotate not installed; skipping"; exit 0; }
+
+scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+mkdir -p "$scratch/bin" "$scratch/var"
+cat >"$scratch/bin/systemctl" <<EOF
+#!/bin/sh
+echo "\$@" >> "$scratch/systemctl.log"
+EOF
+chmod +x "$scratch/bin/systemctl"
+head -c 2000 /dev/zero | tr '\0' 'x' >"$scratch/var/audit.jsonl"
+
+# Same directives, scratch path, no ownership change (not root here).
+sed -e "s#/var/lib/rustopnsmcp/audit.jsonl#$scratch/var/audit.jsonl#" \
+    -e '/^[[:space:]]*create /d' -e '/^[[:space:]]*su /d' "$fragment" >"$scratch/rotate.conf"
+PATH="$scratch/bin:$PATH" logrotate --force --state "$scratch/state" "$scratch/rotate.conf"
+
+[[ -f "$scratch/var/audit.jsonl.1" ]] || { echo "FAIL: audit.jsonl was not rotated"; exit 1; }
+grep -q -- '--signal=HUP rustopnsmcp.service' "$scratch/systemctl.log" \
+    || { echo "FAIL: postrotate did not signal the server"; exit 1; }
+grep -q -- '--kill-whom=main' "$scratch/systemctl.log" \
+    || { echo "FAIL: signal must target only the main process"; exit 1; }
+echo "logrotate: ok"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `chmod +x packaging/tests/logrotate.sh && packaging/tests/logrotate.sh`
+Expected: `logrotate` errors on the missing fragment file (or `skipping` if `logrotate` is absent; install it on the workstation with the distro package manager before relying on this test).
+
+- [ ] **Step 3: Write the fragment**
+
+`packaging/logrotate/rustopnsmcp-audit`:
+
+```
+# logrotate fragment for the optional rustopnsmcp JSON audit file.
+#
+# Install as /etc/logrotate.d/rustopnsmcp-audit (root:root, 0644). The stock
+# unit logs to journald only; this file matters once an operator adds
+#   --audit-log-file /var/lib/rustopnsmcp/audit.jsonl
+# to their override. It is harmless otherwise (missingok).
+#
+# Rename-mode rotation: the server holds one O_APPEND descriptor and reopens
+# the path on SIGHUP, so rename + signal loses nothing. copytruncate has a
+# race window in which audit events are lost; do not use it. The postrotate
+# is what delivers the signal; without it the renamed file keeps growing and
+# the new audit.jsonl stays empty. The same SIGHUP also reloads the inventory
+# and token store, which is benign: a failed reload keeps the previous one.
+
+/var/lib/rustopnsmcp/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 rustopnsmcp rustopnsmcp
+    su rustopnsmcp rustopnsmcp
+    sharedscripts
+    postrotate
+        systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service
+    endscript
+}
+```
+
+- [ ] **Step 4: Run to verify it passes, then sabotage**
+
+Run: `packaging/tests/logrotate.sh`
+Expected: `logrotate: ok`. Sabotage: delete the `postrotate` block and re-run; expect `FAIL: postrotate did not signal the server`. Restore.
+
+Also run `logrotate --debug` on the unmodified fragment as root-less syntax check: `logrotate --debug packaging/logrotate/rustopnsmcp-audit 2>&1 | grep -i error` must print nothing (it may warn about ownership when not root).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packaging/logrotate/rustopnsmcp-audit packaging/tests/logrotate.sh
+git commit -m "packaging: logrotate fragment that signals the server after rotation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 25: `scripts/package-lxc.sh`, BUILD-INFO and SBOM (P2.5)
+
+**Files:**
+- Create: `scripts/package-lxc.sh` (mode 0755)
+- Create: `packaging/package-README.md.in`
+- Create: `packaging/journald/mecmcp.conf`
+- Create: `packaging/tests/skip-build-provenance.sh` (mode 0755)
+
+**Interfaces:**
+- Consumes: Task 22's unit/override example, Task 23's `docs/OPERATIONS.md`, Task 24's logrotate fragment, and (not yet present) `packaging/lxc/install.sh` from Task 26. **Order within the PR:** create a minimal `packaging/lxc/install.sh` containing only the shebang and `exit 1` in this task's first commit so the script can run; Task 26 replaces it. (The script must not special-case a missing installer.)
+- Produces: `dist/rustopnsmcp-v<version>-<target>.tar.gz` and `.sha256`; archive root `rustopnsmcp-v<version>/` with `bin/rustopnsmcp`, `packaging/lxc/install.sh`, `packaging/systemd/{rustopnsmcp.service,rustopnsmcp.sysusers,rustopnsmcp.tmpfiles,rustopnsmcp.override.conf.example}`, `packaging/journald/mecmcp.conf`, `packaging/logrotate/rustopnsmcp-audit`, `config/devices.json.example`, `docs/operations.md`, `BUILD-INFO`, `SBOM.cdx.json`, `README.md`, `LICENSE`, `SECURITY.md`.
+
+- [ ] **Step 1: Write the journald policy and the README template**
+
+`packaging/journald/mecmcp.conf` (the shared name from RELEASE-ARTIFACTS §2; Forward Secure Sealing is deliberately absent, it cannot initialise in an unprivileged LXC, PACKAGING §2):
+
+```ini
+[Journal]
+Storage=persistent
+SystemMaxUse=512M
+```
+
+`packaging/package-README.md.in` (substituted by the script; the version strings cannot drift because they are generated):
+
+```markdown
+# rustopnsmcp @VERSION@
+
+OPNsense MCP server, packaged for a Debian 13 LXC. Unofficial community project; not affiliated with Deciso B.V. or the OPNsense project.
+
+- Archive: `@ARCHIVE@`
+- Git commit: `@GIT_COMMIT@`
+- mecmcp: `@MECMCP_REF@`
+- glibc floor: `@GLIBC_FLOOR@` (Debian 13 ships 2.41; Debian 12 and older cannot run this)
+
+## Prerequisites
+
+Debian 13, unprivileged LXC with `nesting=1`, 1 vCPU, 256 MB RAM, 1 GB disk, HTTPS reach to the OPNsense API.
+
+## Verify the download
+
+    sha256sum -c @ARCHIVE@.sha256
+
+## Install
+
+    tar -xzf @ARCHIVE@
+    cd rustopnsmcp-v@VERSION@
+    sudo packaging/lxc/install.sh
+
+The installer never enables or starts the service. It prints the next steps.
+
+## Next steps
+
+The operations guide is `docs/operations.md`. The security model and contact are in `SECURITY.md`. The site override example is `packaging/systemd/rustopnsmcp.override.conf.example`.
+
+## License
+
+MIT, see `LICENSE`.
+```
+
+- [ ] **Step 2: Write the failing provenance test**
+
+`packaging/tests/skip-build-provenance.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Packaging a prebuilt binary must say so: rustc=unknown (...), never a
+# workstation toolchain that did not compile it, and binary_sha256 must match
+# the bytes in the archive (mecmcp conformance R3).
+set -euo pipefail
+root=$(git rev-parse --show-toplevel); cd "$root"
+binary=${CARGO_TARGET_DIR:-target}/release/rustopnsmcp
+[[ -x "$binary" ]] || { echo "build $binary first (cargo build --release --locked -p rustopnsmcp)"; exit 1; }
+
+out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+OPNSMCP_PACKAGE_SKIP_BUILD=1 OPNSMCP_PACKAGE_OUTPUT_DIR="$out" scripts/package-lxc.sh >/dev/null
+archive=$(find "$out" -name 'rustopnsmcp-v*.tar.gz' | head -n 1)
+[[ -n "$archive" ]] || { echo "FAIL: no archive produced"; exit 1; }
+
+mkdir "$out/x"; tar -xzf "$archive" -C "$out/x"
+info=$(find "$out/x" -name BUILD-INFO)
+rustc_line=$(sed -n 's/^rustc=//p' "$info")
+case "$rustc_line" in
+    "unknown ("*) ;;
+    *) echo "FAIL: skip-build BUILD-INFO names a toolchain: $rustc_line"; exit 1 ;;
+esac
+recorded=$(sed -n 's/^binary_sha256=//p' "$info")
+actual=$(sha256sum "$(dirname "$info")/bin/rustopnsmcp" | cut -d' ' -f1)
+[[ "$recorded" == "$actual" ]] || { echo "FAIL: binary_sha256 does not match the archived binary"; exit 1; }
+echo "skip-build-provenance: ok"
+```
+
+Run: `chmod +x packaging/tests/skip-build-provenance.sh && cargo build --release --locked -p rustopnsmcp && packaging/tests/skip-build-provenance.sh`
+Expected: FAIL (`scripts/package-lxc.sh: No such file or directory`).
+
+- [ ] **Step 3: Write `scripts/package-lxc.sh`**
+
+```bash
+#!/usr/bin/env bash
+# Build dist/rustopnsmcp-v<version>-<target>.tar.gz and its .sha256
+# (mecmcp docs/RELEASE-ARTIFACTS.md).
+#
+# OPNSMCP_PACKAGE_SKIP_BUILD=1   package an existing release binary without
+#                                compiling it; BUILD-INFO then records
+#                                rustc=unknown (...), never a toolchain that
+#                                did not produce the binary (conformance R3).
+# OPNSMCP_PACKAGE_OUTPUT_DIR     output directory (default: dist).
+# OPNSMCP_RELEASE_STATUS         public | lab-only (default: lab-only).
+set -euo pipefail
+
+fail() { echo "package-lxc: $*" >&2; exit 1; }
+repo_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
+cd "$repo_root"
+
+version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+[[ -n "$version" ]] || fail "cannot read the version from Cargo.toml"
+case "$(uname -m)" in
+    x86_64) target=x86_64-unknown-linux-gnu ;;
+    aarch64) target=aarch64-unknown-linux-gnu ;;
+    *) fail "unsupported architecture $(uname -m)" ;;
+esac
+release_status=${OPNSMCP_RELEASE_STATUS:-lab-only}
+case "$release_status" in public | lab-only) ;; *) fail "OPNSMCP_RELEASE_STATUS must be public or lab-only" ;; esac
+
+# Derived, never hardcoded: a package built from one ref must not be installed
+# by a script expecting another.
+mapfile -t mecmcp_refs < <(grep -oP 'tag = "\K[^"]+' Cargo.toml | sort -u)
+[[ ${#mecmcp_refs[@]} -eq 1 ]] || fail "expected exactly one mecmcp tag, found: ${mecmcp_refs[*]:-none}"
+mecmcp_ref=${mecmcp_refs[0]}
+
+skip_build=${OPNSMCP_PACKAGE_SKIP_BUILD:-0}
+if [[ "$skip_build" != 1 ]]; then
+    cargo build --release --locked -p rustopnsmcp --bin rustopnsmcp
+fi
+binary=${CARGO_TARGET_DIR:-target}/release/rustopnsmcp
+[[ -x "$binary" ]] || fail "missing executable $binary"
+
+glibc_floor=$(objdump -T "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -Vu | tail -n 1)
+[[ -n "$glibc_floor" ]] || fail "cannot measure the glibc floor of $binary"
+git_commit=$(git rev-parse HEAD)
+source_date_epoch=$(git log -1 --format=%ct)
+if [[ "$skip_build" == 1 ]]; then
+    rustc_line="unknown (binary supplied prebuilt via OPNSMCP_PACKAGE_SKIP_BUILD; not compiled by this script)"
+else
+    rustc_line=$(rustc -vV | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+fi
+
+pkg=rustopnsmcp-v${version}
+archive_name=${pkg}-${target}.tar.gz
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+pkg_root=$work/$pkg
+mkdir -p "$pkg_root"/{bin,docs,config,packaging/lxc,packaging/systemd,packaging/journald,packaging/logrotate}
+
+install -m 0755 "$binary" "$pkg_root/bin/rustopnsmcp"
+install -m 0755 packaging/lxc/install.sh "$pkg_root/packaging/lxc/install.sh"
+for unit_file in rustopnsmcp.service rustopnsmcp.sysusers rustopnsmcp.tmpfiles rustopnsmcp.override.conf.example; do
+    install -m 0644 "packaging/systemd/$unit_file" "$pkg_root/packaging/systemd/$unit_file"
+done
+install -m 0644 packaging/journald/mecmcp.conf "$pkg_root/packaging/journald/mecmcp.conf"
+install -m 0644 packaging/logrotate/rustopnsmcp-audit "$pkg_root/packaging/logrotate/rustopnsmcp-audit"
+install -m 0644 packaging/examples/devices.example.json "$pkg_root/config/devices.json.example"
+install -m 0644 docs/OPERATIONS.md "$pkg_root/docs/operations.md"
+install -m 0644 -t "$pkg_root" LICENSE SECURITY.md
+sed -e "s|@VERSION@|$version|g" -e "s|@ARCHIVE@|$archive_name|g" \
+    -e "s|@GIT_COMMIT@|$git_commit|g" -e "s|@MECMCP_REF@|$mecmcp_ref|g" \
+    -e "s|@GLIBC_FLOOR@|$glibc_floor|g" packaging/package-README.md.in >"$pkg_root/README.md"
+
+# SBOM from a directory that holds only Cargo.lock, scanned under the name
+# "rustopnsmcp": no absolute path, no nested checkout, and a metadata
+# component named after the binary (RELEASE-ARTIFACTS §4).
+command -v trivy >/dev/null || fail "trivy is required to generate SBOM.cdx.json (CI installs a pinned, checksum-verified copy)"
+mkdir -p "$work/sbom-src/rustopnsmcp"
+cp Cargo.lock "$work/sbom-src/rustopnsmcp/"
+(cd "$work/sbom-src" && trivy filesystem --quiet --scanners vuln --format cyclonedx \
+    --output "$pkg_root/SBOM.cdx.json" rustopnsmcp)
+
+expected_mecmcp=$(grep -c '^mecmcp-' <<<"$(grep -oE '^mecmcp-[a-z]+ += ' Cargo.toml)")
+jq -e --arg ver "${mecmcp_ref#v}" --argjson want "$expected_mecmcp" '
+    .bomFormat == "CycloneDX"
+    and .metadata.component.name == "rustopnsmcp"
+    and (.components | length) > 0
+    and ([.components[] | select(.name? | strings | startswith("mecmcp-"))] | length) == $want
+    and ([.components[] | select(.name? | strings | startswith("mecmcp-")) | .version] | unique) == [$ver]' \
+    "$pkg_root/SBOM.cdx.json" >/dev/null \
+    || fail "SBOM does not list exactly the $expected_mecmcp mecmcp crates at ${mecmcp_ref#v}"
+if grep -Eq '"/(home|workspace|workspaces|tmp)/' "$pkg_root/SBOM.cdx.json"; then
+    fail "SBOM contains an absolute path"
+fi
+
+binary_sha256=$(sha256sum "$pkg_root/bin/rustopnsmcp" | cut -d' ' -f1)
+cat >"$pkg_root/BUILD-INFO" <<EOF
+release_status=$release_status
+version=$version
+git_commit=$git_commit
+source_date_epoch=$source_date_epoch
+target=$target
+mecmcp_ref=$mecmcp_ref
+glibc_floor=$glibc_floor
+rustc=$rustc_line
+binary_sha256=$binary_sha256
+EOF
+
+output_dir=${OPNSMCP_PACKAGE_OUTPUT_DIR:-dist}
+mkdir -p "$output_dir"; dist_dir=$(cd "$output_dir" && pwd -P)
+archive=$dist_dir/$archive_name
+# Reproducible: sorted names, no host uid/gid, commit-time mtimes, no atime/ctime.
+(cd "$work" && find "$pkg" -print0 | LC_ALL=C sort -z \
+    | tar --create --gzip --file="$archive" --format=posix --sort=name \
+        --owner=0 --group=0 --numeric-owner --mtime="@$source_date_epoch" \
+        --pax-option=delete=atime,delete=ctime --no-recursion --null --files-from=-)
+# From inside the output directory so the filename field is bare.
+(cd "$dist_dir" && sha256sum "$archive_name" >"$archive_name.sha256" && sha256sum -c "$archive_name.sha256")
+echo "package-lxc: wrote $archive"
+```
+
+Trivy downloads its vulnerability database (about 130 MB) on a cold runner; that is the cost of the standard's `--scanners vuln` invocation, and a registry outage there fails the build loudly rather than producing an SBOM without a scan. A workstation with a cached database can add `--skip-db-update` when running the script by hand; the script does not, so CI never depends on a stale cache.
+
+Note `expected_mecmcp` counts the `mecmcp-*` lines in the workspace `Cargo.toml`; the SBOM must list the same number, which is how a crate that is declared but dropped from the graph (or the reverse) shows up.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `printf '#!/bin/sh\nexit 1\n' > packaging/lxc/install.sh && chmod 0755 packaging/lxc/install.sh` (the placeholder from the Interfaces note; Task 26 replaces it), then `cargo build --release --locked -p rustopnsmcp && packaging/tests/skip-build-provenance.sh && scripts/package-lxc.sh`
+Expected: `skip-build-provenance: ok`, then a real build line `package-lxc: wrote dist/rustopnsmcp-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` and `sha256sum -c` printing `…tar.gz: OK`.
+
+Run: `tar -tzf dist/rustopnsmcp-v0.1.0-*.tar.gz | sort | head -30` and confirm the root is `rustopnsmcp-v0.1.0/` with the layout in Interfaces. Run `scripts/package-lxc.sh` twice and compare `sha256sum dist/*.tar.gz`: expected identical except the SBOM's timestamps/serial, which trivy generates (RELEASE-ARTIFACTS §9 states this limit); record whether the two differ and in which file (`diff <(tar -xzOf a SBOM.cdx.json) <(tar -xzOf b …)`).
+
+Sabotage: edit one `mecmcp-*` line in `Cargo.toml` to a different tag in a scratch copy and confirm `package-lxc: expected exactly one mecmcp tag`.
+
+- [ ] **Step 5: Commit**
+
+Do not commit `dist/` (check `.gitignore` has `/dist`; add it if not).
+```bash
+git add scripts/package-lxc.sh packaging/package-README.md.in packaging/journald/mecmcp.conf packaging/tests/skip-build-provenance.sh packaging/lxc/install.sh .gitignore
+git commit -m "packaging: reproducible LXC tarball with BUILD-INFO and SBOM
+
+Names and layout follow mecmcp RELEASE-ARTIFACTS (v-prefixed version, full
+target triple, binary under bin/). BUILD-INFO carries both the standard keys
+and the conformance keys; a prebuilt binary is recorded as unknown, never as
+the local toolchain. install.sh is a one-line placeholder until the next
+commit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 26: `packaging/lxc/install.sh` and its tests (P2.4; journald test from P2.3)
+
+**Files:**
+- Replace: `packaging/lxc/install.sh` (mode 0755)
+- Create: `packaging/tests/installer-idempotence.sh` (mode 0755)
+- Create: `packaging/tests/journald-dropin-ordering.sh` (mode 0755)
+
+**Interfaces:**
+- Consumes: the archive layout from Task 25. The installer runs as `<archive-root>/packaging/lxc/install.sh` and derives the root from `$0`.
+- Produces: environment hooks used only by tests: `OPNSMCP_INSTALL_CHECK_ONLY=1` (validate the package, print `package ok`, exit before any mutation) and `OPNSMCP_INSTALL_TEST_ROOT=<dir>` (stage every destination under `<dir>` and skip the root check, the Debian check, apt, `systemd-sysusers`, `systemd-tmpfiles`, `chown` and `systemctl`). **What test mode does not prove:** ownership, apt and systemd behaviour. Those are proven once, for real, at Task 33 step 3.
+
+- [ ] **Step 1: Write the failing idempotence test**
+
+`packaging/tests/installer-idempotence.sh` builds a tarball from the working tree (skip-build, so it is fast), extracts it, and runs the installer into a scratch root.
+
+```bash
+#!/usr/bin/env bash
+# The installer, run twice into a staged root: creates what Installer
+# requirements 3-6 name, never overwrites state, refuses a damaged package,
+# and installs a config that can boot. Ownership/apt/systemd are not exercised
+# here (test mode); the dry-run install on a real guest covers those.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel); cd "$root"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+binary=${CARGO_TARGET_DIR:-target}/release/rustopnsmcp
+[[ -x "$binary" ]] || fail "build $binary first"
+
+scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+OPNSMCP_PACKAGE_SKIP_BUILD=1 OPNSMCP_PACKAGE_OUTPUT_DIR="$scratch/dist" scripts/package-lxc.sh >/dev/null
+tar -xzf "$scratch"/dist/rustopnsmcp-v*.tar.gz -C "$scratch"
+pkg=$(find "$scratch" -maxdepth 1 -type d -name 'rustopnsmcp-v*' | head -n 1)
+target=$scratch/target
+install_into() { OPNSMCP_INSTALL_TEST_ROOT="$target" "$pkg/packaging/lxc/install.sh"; }
+mode_of() { stat -c '%a' "$target$1"; }
+
+# 1. Fresh install.
+install_into >"$scratch/first.log"
+[[ -x "$target/usr/local/bin/rustopnsmcp" ]] || fail "binary not installed"
+[[ "$(mode_of /var/lib/rustopnsmcp/tokens.json)" == 600 ]] || fail "tokens.json must be 0600"
+[[ "$(cat "$target/var/lib/rustopnsmcp/tokens.json")" == '{"version":1,"tokens":[]}' ]] || fail "tokens.json content"
+[[ "$(mode_of /etc/rustopnsmcp/audit-hmac.key)" == 600 ]] || fail "audit-hmac.key must be 0600"
+[[ "$(stat -c %s "$target/etc/rustopnsmcp/audit-hmac.key")" -ge 32 ]] || fail "audit-hmac.key shorter than 32 bytes"
+[[ "$(mode_of /etc/rustopnsmcp/devices.json)" == 600 ]] || fail "devices.json must be 0600"
+[[ "$(mode_of /etc/rustopnsmcp/credentials.env)" == 600 ]] || fail "credentials.env must be 0600"
+[[ -f "$target/etc/rustopnsmcp/devices.example.json" ]] || fail "example inventory missing"
+[[ -d "$target/etc/systemd/system/rustopnsmcp.service.d" ]] || fail "drop-in directory not created (conformance R4)"
+[[ ! -e "$target/etc/systemd/system/rustopnsmcp.service.d/override.conf" ]] || fail "installer must not write the site override"
+[[ -f "$target/etc/logrotate.d/rustopnsmcp-audit" ]] || fail "logrotate fragment missing"
+# A config that can boot: the shipped devices.json parses and the service starts on it.
+jq -e '.version == 1 and (.devices | type == "object")' "$target/etc/rustopnsmcp/devices.json" >/dev/null \
+    || fail "devices.json is not a valid inventory"
+grep -q 'systemctl start rustopnsmcp' "$scratch/first.log" || fail "next steps not printed"
+# Test mode skips systemctl, so assert on the script itself.
+if grep -nE '^[[:space:]]*systemctl[[:space:]]+(enable|start|restart)' "$pkg/packaging/lxc/install.sh"; then
+    fail "installer must never enable or start the service"
+fi
+
+# 2. State is never overwritten on a re-run.
+printf 'SENTINEL-TOKENS\n' >"$target/var/lib/rustopnsmcp/tokens.json"
+printf 'SENTINEL-STATE\n'  >"$target/var/lib/rustopnsmcp/changeset-state.json"
+printf 'SENTINEL-KEY\n'    >"$target/etc/rustopnsmcp/audit-hmac.key"
+printf '{"version":1,"devices":{"x":{}}}\n' >"$target/etc/rustopnsmcp/devices.json"
+printf 'SENTINEL-CREDS\n'  >"$target/etc/rustopnsmcp/credentials.env"
+install_into >"$scratch/second.log"
+for pair in "var/lib/rustopnsmcp/tokens.json:SENTINEL-TOKENS" "var/lib/rustopnsmcp/changeset-state.json:SENTINEL-STATE" \
+            "etc/rustopnsmcp/audit-hmac.key:SENTINEL-KEY" "etc/rustopnsmcp/credentials.env:SENTINEL-CREDS"; do
+    [[ "$(cat "$target/${pair%%:*}")" == "${pair##*:}" ]] || fail "re-run overwrote ${pair%%:*}"
+done
+grep -q '"x"' "$target/etc/rustopnsmcp/devices.json" || fail "re-run overwrote devices.json"
+
+# 3. A symlink where a state file belongs is refused, not followed.
+rm "$target/var/lib/rustopnsmcp/tokens.json"; ln -s /etc/passwd "$target/var/lib/rustopnsmcp/tokens.json"
+if install_into >/dev/null 2>"$scratch/symlink.err"; then fail "installer followed a tokens.json symlink"; fi
+grep -q 'not a regular file' "$scratch/symlink.err" || fail "symlink refusal should say so"
+rm "$target/var/lib/rustopnsmcp/tokens.json"
+
+# 4. A damaged package is refused before anything is written.
+for damage in tamper-binary drop-build-info drop-sbom; do
+    copy=$scratch/damaged-$damage; cp -a "$pkg" "$copy"
+    case $damage in
+        tamper-binary) printf 'x' >>"$copy/bin/rustopnsmcp" ;;
+        drop-build-info) rm "$copy/BUILD-INFO" ;;
+        drop-sbom) rm "$copy/SBOM.cdx.json" ;;
+    esac
+    fresh=$scratch/fresh-$damage
+    if OPNSMCP_INSTALL_TEST_ROOT="$fresh" "$copy/packaging/lxc/install.sh" >/dev/null 2>&1; then
+        fail "installer accepted a package with $damage"
+    fi
+    [[ ! -e "$fresh/etc/rustopnsmcp" ]] || fail "$damage: the host was modified before the refusal"
+done
+echo "installer-idempotence: ok"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `chmod +x packaging/tests/installer-idempotence.sh && cargo build --release --locked -p rustopnsmcp && packaging/tests/installer-idempotence.sh`
+Expected: FAIL at the first install (the Task 25 placeholder exits 1).
+
+- [ ] **Step 3: Write the installer**
+
+`packaging/lxc/install.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Installer for rustopnsmcp on Debian 13 (unprivileged LXC, nesting=1).
+# Run from an extracted archive: sudo packaging/lxc/install.sh
+#
+# It validates the package before touching the host, never overwrites state,
+# never enables or starts the service (config and credentials must exist
+# first), and installs a config that can boot.
+set -euo pipefail
+
+svc=rustopnsmcp
+die() { printf '%s installer: %s\n' "$svc" "$*" >&2; exit 1; }
+
+# Test hook (packaging/tests): validate only. Test root: stage under a directory.
+check_only=${OPNSMCP_INSTALL_CHECK_ONLY:-0}
+test_root=${OPNSMCP_INSTALL_TEST_ROOT:-}
+dest() { printf '%s%s' "$test_root" "$1"; }
+
+package_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+[[ -d "$package_dir" && ! -L "$package_dir" ]] || die 'package root is not a real directory'
+cd "$package_dir"
+
+# --- 1. Validate the package (no host mutation) ------------------------------
+for required in bin/rustopnsmcp BUILD-INFO SBOM.cdx.json README.md LICENSE SECURITY.md \
+    packaging/systemd/rustopnsmcp.service packaging/systemd/rustopnsmcp.sysusers \
+    packaging/systemd/rustopnsmcp.tmpfiles packaging/systemd/rustopnsmcp.override.conf.example \
+    packaging/journald/mecmcp.conf packaging/logrotate/rustopnsmcp-audit config/devices.json.example; do
+    [[ -s "$required" ]] || die "package is missing $required"
+done
+[[ -x bin/rustopnsmcp ]] || die 'bin/rustopnsmcp is not executable'
+build_info() { sed -n "s/^$1=//p" BUILD-INFO | head -n 1; }
+for key in release_status version git_commit source_date_epoch target mecmcp_ref glibc_floor rustc binary_sha256; do
+    [[ -n "$(build_info "$key")" ]] || die "BUILD-INFO lacks $key"
+done
+case "$(build_info rustc)" in "rustc "* | "unknown ("*) ;; *) die 'BUILD-INFO rustc is invalid' ;; esac
+recorded_sha=$(build_info binary_sha256)
+[[ "$recorded_sha" =~ ^[0-9a-f]{64}$ ]] || die 'BUILD-INFO binary_sha256 is invalid'
+[[ "$(sha256sum bin/rustopnsmcp | cut -d' ' -f1)" == "$recorded_sha" ]] \
+    || die 'BUILD-INFO binary_sha256 does not match bin/rustopnsmcp'
+grep -q '"bomFormat": *"CycloneDX"' SBOM.cdx.json || die 'SBOM.cdx.json is not CycloneDX'
+# The glibc floor is a property of the binary; refuse a host that is too old
+# rather than install something that dies at first start.
+floor=$(build_info glibc_floor)
+host_glibc=$(getconf GNU_LIBC_VERSION | awk '{print $2}')
+[[ "$(printf '%s\n%s\n' "$floor" "$host_glibc" | sort -V | head -n 1)" == "$floor" ]] \
+    || die "this package needs glibc >= $floor; this host has $host_glibc"
+if [[ "$check_only" == 1 ]]; then echo 'package ok'; exit 0; fi
+
+# --- 2. Host checks ----------------------------------------------------------
+if [[ -z "$test_root" ]]; then
+    [[ "$(id -u)" -eq 0 ]] || die 'must run as root'
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    [[ "${ID:-}" == debian && "${VERSION_ID:-}" == 13 ]] \
+        || die "requires Debian 13 (detected ${ID:-unknown} ${VERSION_ID:-unknown})"
+fi
+
+echo "==> Installing $svc $(build_info version)"
+if [[ -z "$test_root" ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+    systemd-sysusers packaging/systemd/rustopnsmcp.sysusers      # requirement 1
+    systemd-tmpfiles --create packaging/systemd/rustopnsmcp.tmpfiles  # requirement 2
+else
+    mkdir -p "$(dest /etc/rustopnsmcp)" "$(dest /var/lib/rustopnsmcp)"
+    chmod 0750 "$(dest /etc/rustopnsmcp)"; chmod 0700 "$(dest /var/lib/rustopnsmcp)"
+fi
+own() { [[ -n "$test_root" ]] || chown "$svc:$svc" "$@"; }
+
+install -d "$(dest /usr/local/bin)"
+install -m 0755 bin/rustopnsmcp "$(dest /usr/local/bin/rustopnsmcp)"
+
+# Provision a file only if absent. A symlink or a non-regular file where a
+# state or secret file belongs is a refusal, not something to follow.
+provision() { # <dest> <mode> <source file>
+    local path=$1 mode=$2 source=$3
+    if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }; then
+        die "$path is not a regular file; refusing"
+    fi
+    if [[ -e "$path" ]]; then echo "    $path exists; not overwriting"; return 0; fi
+    install -m "$mode" "$source" "$path"
+    own "$path"
+}
+scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+
+printf '%s\n' '{"version":1,"tokens":[]}' >"$scratch/tokens.json"       # requirements 3-5
+provision "$(dest /var/lib/rustopnsmcp/tokens.json)" 0600 "$scratch/tokens.json"
+
+( umask 077; head -c 32 /dev/urandom >"$scratch/audit-hmac.key" )        # requirement 6
+provision "$(dest /etc/rustopnsmcp/audit-hmac.key)" 0600 "$scratch/audit-hmac.key"
+
+# A minimal inventory the service can start on (PACKAGING §3: do not install a
+# config that cannot boot). The example, with placeholder names, is beside it.
+printf '%s\n' '{"version":1,"devices":{}}' >"$scratch/devices.json"
+provision "$(dest /etc/rustopnsmcp/devices.json)" 0600 "$scratch/devices.json"
+install -m 0644 config/devices.json.example "$(dest /etc/rustopnsmcp/devices.example.json)"
+printf '%s\n' '# OPNSENSE_FW_1_API_KEY=' '# OPNSENSE_FW_1_API_SECRET=' >"$scratch/credentials.env"
+provision "$(dest /etc/rustopnsmcp/credentials.env)" 0600 "$scratch/credentials.env"
+
+# The unit is package-owned: site changes belong in override.conf. If the
+# installed unit differs from the one shipped, keep a copy rather than lose it.
+unit_path=$(dest /etc/systemd/system/rustopnsmcp.service)
+install -d "$(dest /etc/systemd/system)" "$(dest /etc/systemd/system/rustopnsmcp.service.d)"  # conformance R4
+if [[ -f "$unit_path" ]] && ! cmp -s "$unit_path" packaging/systemd/rustopnsmcp.service; then
+    backup="$unit_path.bak-$(date +%Y%m%d%H%M%S)"
+    cp -p "$unit_path" "$backup"
+    echo "    NOTE: the installed unit differed from the packaged one; kept as $backup"
+    echo "          Put site changes (bind address, TLS, allowed hosts) in"
+    echo "          /etc/systemd/system/rustopnsmcp.service.d/override.conf"
+fi
+install -m 0644 packaging/systemd/rustopnsmcp.service "$unit_path"
+
+# Fleet journald policy, by its numbered name, only if no such file exists. A
+# numbered file sorts before an unnumbered one and would otherwise be overridden.
+journald_dir=$(dest /etc/systemd/journald.conf.d)
+install -d "$journald_dir"
+if [[ ! -e "$journald_dir/20-audit-retention.conf" ]]; then
+    install -m 0644 packaging/journald/mecmcp.conf "$journald_dir/20-audit-retention.conf"
+fi
+install -d "$(dest /etc/logrotate.d)"
+install -m 0644 packaging/logrotate/rustopnsmcp-audit "$(dest /etc/logrotate.d/rustopnsmcp-audit)"
+
+if [[ -z "$test_root" ]]; then
+    systemctl daemon-reload
+    systemctl reload-or-restart systemd-journald.service
+fi
+
+cat <<'EOF'
+
+==> Installation complete. Nothing has been started. Next steps:
+  1. Edit /etc/rustopnsmcp/devices.json (see devices.example.json beside it);
+     keep it mode 0600, owned by rustopnsmcp:rustopnsmcp.
+  2. Put the OPNsense API key and secret in /etc/rustopnsmcp/credentials.env
+     (mode 0600), named as the inventory's api_key_env / api_secret_env say.
+  3. Mint a token:
+       sudo -u rustopnsmcp rustopnsmcp token add --tokens-file /var/lib/rustopnsmcp/tokens.json \
+           --name operator --devices '*' --tools '*'
+  4. For a non-loopback bind or TLS, create the drop-in (docs/operations.md):
+       cp packaging/systemd/rustopnsmcp.override.conf.example \
+          /etc/systemd/system/rustopnsmcp.service.d/override.conf   # then edit it
+  5. systemctl start rustopnsmcp && curl -fsS http://127.0.0.1:30037/readyz
+  6. systemctl enable rustopnsmcp
+Before an upgrade, snapshot this container.
+EOF
+```
+
+- [ ] **Step 4: Write the journald ordering test**
+
+`packaging/tests/journald-dropin-ordering.sh` (the sibling's rule: an unnumbered drop-in sorts after numbered ones and silently overrides them):
+
+```bash
+#!/usr/bin/env bash
+# The installer must add exactly one numbered journald drop-in, never an
+# unnumbered one, and never touch an existing one.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel); cd "$root"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+OPNSMCP_PACKAGE_SKIP_BUILD=1 OPNSMCP_PACKAGE_OUTPUT_DIR="$scratch/dist" scripts/package-lxc.sh >/dev/null
+tar -xzf "$scratch"/dist/rustopnsmcp-v*.tar.gz -C "$scratch"
+pkg=$(find "$scratch" -maxdepth 1 -type d -name 'rustopnsmcp-v*' | head -n 1)
+
+dir=$scratch/fresh/etc/systemd/journald.conf.d
+OPNSMCP_INSTALL_TEST_ROOT="$scratch/fresh" "$pkg/packaging/lxc/install.sh" >/dev/null
+mapfile -t files < <(find "$dir" -type f -printf '%f\n' | sort)
+[[ "${files[*]}" == "20-audit-retention.conf" ]] || fail "fresh install must add exactly 20-audit-retention.conf, got: ${files[*]}"
+grep -q '^Storage=persistent' "$dir/20-audit-retention.conf" || fail "Storage=persistent missing"
+if grep -qi '^Seal=yes' "$dir/20-audit-retention.conf"; then fail "Seal=yes cannot initialise in an unprivileged LXC"; fi
+
+# An existing fleet file is left exactly as it is, and nothing unnumbered appears.
+mkdir -p "$scratch/site/etc/systemd/journald.conf.d"
+printf '[Journal]\nSystemMaxUse=128M\n' >"$scratch/site/etc/systemd/journald.conf.d/20-audit-retention.conf"
+OPNSMCP_INSTALL_TEST_ROOT="$scratch/site" "$pkg/packaging/lxc/install.sh" >/dev/null
+grep -qx 'SystemMaxUse=128M' "$scratch/site/etc/systemd/journald.conf.d/20-audit-retention.conf" \
+    || fail "existing 20-audit-retention.conf was overwritten"
+unnumbered=$(find "$scratch/site/etc/systemd/journald.conf.d" -type f ! -name '[0-9][0-9]-*' | head -n 1)
+[[ -z "$unnumbered" ]] || fail "installer created an unnumbered drop-in: $unnumbered"
+echo "journald-dropin-ordering: ok"
+```
+
+- [ ] **Step 5: Run to verify, then sabotage each guard**
+
+Run: `shellcheck packaging/lxc/install.sh packaging/tests/*.sh scripts/package-lxc.sh` (expected: no findings; fix, do not disable) and `bash -n packaging/lxc/install.sh`.
+Run: `packaging/tests/installer-idempotence.sh && packaging/tests/journald-dropin-ordering.sh`
+Expected: `installer-idempotence: ok`, `journald-dropin-ordering: ok`.
+
+Sabotage, one fix at a time (a batched revert proves half the work): (a) change `provision`'s `if [[ -e "$path" ]]; then …return 0; fi` to fall through and install anyway; the re-run section must fail with `re-run overwrote`. (b) delete the `[[ -L "$path" ]]` clause; the symlink section must fail. (c) delete the `binary_sha256` comparison; the `tamper-binary` case must fail. (d) delete the `if [[ ! -e …20-audit-retention.conf ]]` guard; the journald test must fail. Restore after each and record the four results in the PR.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packaging/lxc/install.sh packaging/tests/installer-idempotence.sh packaging/tests/journald-dropin-ordering.sh
+git commit -m "packaging: LXC installer meeting FILESYSTEM-LAYOUT requirements 1-8
+
+Validates BUILD-INFO, the binary hash and the glibc floor before touching the
+host; creates tokens.json, audit-hmac.key, a bootable devices.json and
+credentials.env only if absent; refuses symlinked state files; keeps a copy
+of a differing installed unit; creates the drop-in directory but never the
+override; never enables or starts the service.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 27: `packaging/tests/package-smoke.sh` (P2.5)
+
+**Files:**
+- Create: `packaging/tests/package-smoke.sh` (mode 0755)
+
+RELEASE-ARTIFACTS §8 lists ten assertions; this script implements all ten and takes the archive path as its only argument. CI runs it on the tarball it just built (Task 28) and the release workflow runs it before upload (Task 30).
+
+- [ ] **Step 1: Write the script**
+
+```bash
+#!/usr/bin/env bash
+# RELEASE-ARTIFACTS §8: assert the archive's shape without installing it.
+set -euo pipefail
+archive=${1:?usage: package-smoke.sh <rustopnsmcp-v*.tar.gz>}
+fail() { echo "FAIL: $*" >&2; exit 1; }
+[[ -f "$archive" ]] || fail "archive not found: $archive"
+scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+
+# 1. Checksum verifies from a different directory than the one it was made in.
+[[ -f "$archive.sha256" ]] || fail "missing $archive.sha256"
+[[ "$(awk '{print $2}' "$archive.sha256")" == "$(basename "$archive")" ]] || fail "checksum filename is not bare"
+(cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive").sha256" >/dev/null) || fail "checksum mismatch"
+
+# 2. POSIX tar, gzip.
+gzip -t "$archive" || fail "not gzip"
+tar -tzvf "$archive" >"$scratch/listing" || fail "not a tar archive"
+
+# 3. No unsafe member paths; 4. exactly one root directory named for the file.
+while read -r name; do
+    case "$name" in /* | ../* | */../* | *..) fail "unsafe member path: $name" ;; esac
+done < <(tar -tzf "$archive")
+if grep -q '^l' "$scratch/listing"; then fail "archive contains a symlink"; fi
+mapfile -t roots < <(tar -tzf "$archive" | cut -d/ -f1 | sort -u)
+[[ ${#roots[@]} -eq 1 ]] || fail "expected one root directory, found: ${roots[*]}"
+root_dir=${roots[0]}
+expected_root=$(basename "$archive" | sed -E 's/^(rustopnsmcp-v[0-9][^-]*(-[0-9A-Za-z.]+)?)-[a-z0-9_]+-unknown-linux-gnu\.tar\.gz$/\1/')
+[[ "$root_dir" == "$expected_root" ]] || fail "root $root_dir does not match archive name (expected $expected_root)"
+
+tar -xzf "$archive" -C "$scratch"
+pkg=$scratch/$root_dir
+cd "$pkg"
+
+# 5. Required files.
+for required in bin/rustopnsmcp packaging/lxc/install.sh packaging/systemd/rustopnsmcp.service \
+    packaging/systemd/rustopnsmcp.sysusers packaging/systemd/rustopnsmcp.tmpfiles \
+    packaging/systemd/rustopnsmcp.override.conf.example packaging/journald/mecmcp.conf \
+    packaging/logrotate/rustopnsmcp-audit config/devices.json.example docs/operations.md \
+    BUILD-INFO SBOM.cdx.json README.md LICENSE SECURITY.md; do
+    [[ -s "$required" ]] || fail "missing $required"
+done
+[[ -x bin/rustopnsmcp && -x packaging/lxc/install.sh ]] || fail "binary and installer must be executable"
+
+# 6. BUILD-INFO keys and formats.
+info() { sed -n "s/^$1=//p" BUILD-INFO | head -n 1; }
+for key in release_status version git_commit source_date_epoch target mecmcp_ref glibc_floor rustc binary_sha256; do
+    [[ -n "$(info "$key")" ]] || fail "BUILD-INFO lacks $key"
+done
+[[ "$(info release_status)" =~ ^(public|lab-only)$ ]] || fail "release_status"
+[[ "$(info git_commit)" =~ ^[0-9a-f]{40}$ ]] || fail "git_commit is not a 40-hex sha"
+[[ "$(info source_date_epoch)" =~ ^[0-9]+$ ]] || fail "source_date_epoch"
+[[ "$(info glibc_floor)" =~ ^[0-9]+\.[0-9]+ ]] || fail "glibc_floor"
+[[ "$(info binary_sha256)" == "$(sha256sum bin/rustopnsmcp | cut -d' ' -f1)" ]] || fail "binary_sha256 mismatch"
+[[ "$(info version)" == "${root_dir#rustopnsmcp-v}" ]] || fail "BUILD-INFO version differs from the archive name"
+
+# 7. mecmcp_ref matches the pin the repo declares (when run from a checkout).
+if git rev-parse --show-toplevel >/dev/null 2>&1 && [[ -f "$(git rev-parse --show-toplevel)/Cargo.toml" ]]; then
+    declared=$(grep -oP 'tag = "\K[^"]+' "$(git rev-parse --show-toplevel)/Cargo.toml" | sort -u)
+    [[ "$(info mecmcp_ref)" == "$declared" ]] || fail "mecmcp_ref $(info mecmcp_ref) != Cargo.toml tag $declared"
+fi
+
+# 8. SBOM: CycloneDX, named for the binary, every mecmcp crate at mecmcp_ref.
+ver=$(info mecmcp_ref); ver=${ver#v}
+jq -e --arg ver "$ver" '.bomFormat == "CycloneDX" and .metadata.component.name == "rustopnsmcp"
+    and (.components | length) > 0
+    and ([.components[] | select(.name? | strings | startswith("mecmcp-")) | .version] | length) > 0
+    and ([.components[] | select(.name? | strings | startswith("mecmcp-")) | .version] | unique) == [$ver]' \
+    SBOM.cdx.json >/dev/null || fail "SBOM component set is wrong"
+
+# 9. No absolute builder paths in the SBOM.
+if grep -Eq '"/(home|workspace|workspaces|tmp)/' SBOM.cdx.json; then fail "SBOM contains an absolute path"; fi
+
+# 10. Installer parses and passes its own validation of this very package.
+bash -n packaging/lxc/install.sh || fail "install.sh has a syntax error"
+OPNSMCP_INSTALL_CHECK_ONLY=1 packaging/lxc/install.sh | grep -qx 'package ok' || fail "installer rejected its own package"
+./bin/rustopnsmcp --version | grep -q "^rustopnsmcp " || fail "bin/rustopnsmcp --version"
+echo "package-smoke: ok ($root_dir)"
+```
+
+- [ ] **Step 2: Run, then sabotage**
+
+Run: `chmod +x packaging/tests/package-smoke.sh && scripts/package-lxc.sh && packaging/tests/package-smoke.sh dist/rustopnsmcp-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`
+Expected: `package-smoke: ok (rustopnsmcp-v0.1.0)`.
+
+Sabotage each of three: re-pack with the SBOM's `metadata.component.name` edited; with `BUILD-INFO` `git_commit` truncated; with an extra member `../evil`. (Use `tar` to rebuild the archive from an edited extraction.) Each must fail with the matching message.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packaging/tests/package-smoke.sh
+git commit -m "packaging: package-smoke.sh asserts RELEASE-ARTIFACTS section 8
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 28: `packaging/conformance.toml` and the `Package conformance` CI job (P2.8)
+
+**Files:**
+- Create: `packaging/conformance.toml`
+- Modify: `.github/workflows/ci.yml` (new job `conformance`)
+
+**Interfaces:**
+- Consumes: the tarball (Task 25), `package-smoke.sh` (Task 27), the image (Task 29 adds the `must_survive_override` flags to the `ENTRYPOINT`; until then R6 and R7 fail, so land Task 29 before merging this job, or merge both in one PR; the commits stay separate).
+- Produces: a CI job whose green run is the P2 gate evidence.
+
+- [ ] **Step 1: Write the manifest**
+
+`packaging/conformance.toml`. Every key is mandatory (unknown keys are errors, so a typo cannot disable a rule):
+
+```toml
+# mecmcp package conformance manifest (mecmcp packaging/conformance/README.md).
+binary     = "bin/rustopnsmcp"
+installer  = "packaging/lxc/install.sh"
+service    = "rustopnsmcp"
+config_dir = "/etc/rustopnsmcp"
+tokens     = "/var/lib/rustopnsmcp/tokens.json"
+
+# scripts/package-lxc.sh has a skip-build path (OPNSMCP_PACKAGE_SKIP_BUILD) and
+# writes an honest BUILD-INFO either way, so R3 is fatal, not a warning. See
+# the conformance README, "Provenance ordering".
+build_info     = true
+skip_build_env = "OPNSMCP_PACKAGE_SKIP_BUILD"
+
+units = ["packaging/systemd/rustopnsmcp.service"]
+
+# Docker replaces CMD wholesale but only appends to ENTRYPOINT, so everything
+# that must survive an operator's `--host 0.0.0.0` lives in ENTRYPOINT.
+# --audit-hmac-key-file closes mecmcp#376: the binary creates its own key
+# (Task 20) because the image is distroless and has no shell for a wrapper, so
+# the flag must stay in ENTRYPOINT and R6 proves it reaches argv.
+must_survive_override = ["--device-mapping", "--tokens-file", "--state-file", "--audit-hmac-key-file"]
+audit_hmac_flag       = "--audit-hmac-key-file"
+```
+
+The stock unit has no `@TOKEN@` placeholders any more, so there is no `[placeholders]` table.
+
+- [ ] **Step 2: Run the mecmcp scripts locally before writing the job**
+
+```
+git clone --depth 1 --branch v0.30.1 https://github.com/mechubsec/mecmcp "$HOME/.cache/mecmcp-v0.30.1"
+scripts/package-lxc.sh
+mkdir -p staging && tar -xzf dist/rustopnsmcp-v0.1.0-*.tar.gz -C staging --strip-components=1
+cp packaging/conformance.toml staging/conformance.toml
+bash "$HOME/.cache/mecmcp-v0.30.1/packaging/conformance/verify-package.sh" --staging staging --manifest staging/conformance.toml
+```
+Expected: exit 0; no `FAIL[…]`; one `WARN[R3]` saying clause 3 did not run because `--prebuilt` was not passed (correct: the script compiled this binary itself, so there is nothing for clause 3 to catch; pass `--prebuilt` only from a path that stages a binary it did not compile); a note that R7 passed via `audit_hmac_flag` and is proven by R6. (R6 needs the image, covered by the job.) Observed on a scratch copy of this plan's code: exit 0 with exactly those lines. The clone is read-only reference data; do not modify it.
+
+Run it again against a broken package for each of R1, R2, R5 to see the rule fire: `chmod -x staging/packaging/lxc/install.sh` (R1), `rm staging/bin/rustopnsmcp` (R2), `sed -i 's/^Restart=.*/Restart=sometimes/' staging/packaging/systemd/rustopnsmcp.service` (R5). Restore staging between runs.
+
+- [ ] **Step 3: Add the CI job**
+
+Append to `jobs:` in `.github/workflows/ci.yml` (SHAs are the ones already used in this file and its siblings):
+
+```yaml
+  conformance:
+    name: Package conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+          TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+        run: |
+          curl -sSfL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          tar -xzf trivy.tar.gz trivy
+          sudo mv trivy /usr/local/bin/trivy
+
+      - name: Shell static analysis
+        run: shellcheck packaging/lxc/install.sh scripts/*.sh packaging/tests/*.sh
+
+      - name: Build the release package
+        run: scripts/package-lxc.sh
+
+      - name: Package tests
+        run: |
+          set -euo pipefail
+          packaging/tests/package-smoke.sh dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz
+          packaging/tests/unit-contract.sh
+          packaging/tests/logrotate.sh
+          packaging/tests/skip-build-provenance.sh
+          packaging/tests/installer-idempotence.sh
+          packaging/tests/journald-dropin-ordering.sh
+
+      - name: Stage the package
+        run: |
+          set -euo pipefail
+          mkdir staging
+          tar -xzf dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz -C staging --strip-components=1
+          cp packaging/conformance.toml staging/conformance.toml
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: rustopnsmcp:conformance
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Conformance
+        uses: mechubsec/mecmcp/packaging/conformance@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+        with:
+          staging: staging
+          manifest: staging/conformance.toml
+          image: rustopnsmcp:conformance
+```
+
+`shellcheck` is preinstalled on `ubuntu-24.04` runners. The build here is the runner's stable toolchain; `rust-toolchain.toml` pins 1.98.1 and rustup honours it when `cargo` runs in the repo, so the toolchain actually used is the pinned one.
+
+- [ ] **Step 4: Verify the job's failure modes before trusting it**
+
+On the PR branch, push three throwaway commits (do not merge them) and confirm the job goes red each time: (1) remove `--audit-hmac-key-file` from the Dockerfile `ENTRYPOINT` (R6 / R7); (2) `chmod -x packaging/lxc/install.sh` (R1); (3) delete `packaging/tests/package-smoke.sh`'s execute bit (the job step fails). Then drop the throwaway commits (`git reset --hard` on the branch, force-push is not needed: they were never pushed to `main`). Record the three run URLs in the PR. A conformance job that has never been seen to fail proves nothing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packaging/conformance.toml .github/workflows/ci.yml
+git commit -m "ci: run mecmcp package conformance on the real tarball and image
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 29: Dockerfile, `.dockerignore`, compose example and CI image checks (P2.9)
+
+**Files:**
+- Modify: `Dockerfile`
+- Modify: `.dockerignore` (verify; add the two explicit excludes below)
+- Create: `packaging/container/compose.example.yaml`
+- Modify: `.github/workflows/ci.yml` (`container-guard` job)
+
+**Interfaces:**
+- Consumes: Task 20 (the binary creates a missing key), Task 28's `must_survive_override` list.
+- Produces: an image whose `ENTRYPOINT` carries `--device-mapping`, `--tokens-file`, `--state-file`, `--inventory-readonly`, `--audit-format json`, `--audit-redact devices=hmac`, `--audit-hmac-key-file`.
+
+- [ ] **Step 1: Write the failing first-run check (extend `container-guard`)**
+
+In `.github/workflows/ci.yml`, in the `container-guard` job: change the path loop to the full list, and add two steps after it.
+
+```yaml
+          for p in /etc/rustopnsmcp/devices.json /var/lib/rustopnsmcp/tokens.json \
+                   /var/lib/rustopnsmcp/changeset-state.json /var/lib/rustopnsmcp/audit-hmac.key; do
+            echo "$argv" | grep -q -- "$p" || { echo "FAIL: $p missing from argv with --host override"; exit 1; }
+          done
+          for flag in --inventory-readonly --audit-format --audit-redact; do
+            echo "$argv" | grep -qx -- "$flag" || { echo "FAIL: $flag missing from argv with --host override"; exit 1; }
+          done
+          if echo "$argv" | grep -q -- '--audit-journald'; then
+            echo "FAIL: --audit-journald has no socket in a container"; exit 1
+          fi
+          echo "PASS: config and audit flags survive --host override"
+
+      - name: First run in a container creates the audit key and keeps state private
+        run: |
+          set -euo pipefail
+          state=$(mktemp -d); conf=$(mktemp -d)
+          printf '{"version":1,"devices":{}}\n' > "$conf/devices.json"
+          sudo chown -R 65532:65532 "$state" "$conf"
+          sudo chmod 0700 "$state"; sudo chmod 0750 "$conf"; sudo chmod 0600 "$conf/devices.json"
+          docker run --rm -i -v "$conf:/etc/rustopnsmcp:ro" -v "$state:/var/lib/rustopnsmcp" \
+            rustopnsmcp:ci --transport stdio </dev/null
+          test "$(sudo stat -c '%a %u' "$state/audit-hmac.key")" = "600 65532"
+          test "$(sudo stat -c %s "$state/audit-hmac.key")" = 32
+
+      - name: Image reports its version and runs as the non-root user
+        run: |
+          set -euo pipefail
+          docker run --rm rustopnsmcp:ci --version | grep -q '^rustopnsmcp '
+          test "$(docker inspect rustopnsmcp:ci --format '{{.Config.User}}')" = "65532:65532"
+
+      - name: Docker build context is small
+        run: |
+          set -euo pipefail
+          size=$(docker build --no-cache --progress=plain -f Dockerfile . 2>&1 \
+            | grep -oE 'transferring context: [0-9.]+[kMG]?B' | tail -n 1 | grep -oE '[0-9.]+[kMG]?B')
+          echo "Docker build context: ${size:-unknown}"
+          case "${size:-0B}" in *GB) echo "FAIL: context over 1 GB"; exit 1 ;; esac
+          case "${size:-0B}" in *MB) test "$(printf '%.0f' "${size%MB}")" -le 100 || { echo "FAIL: context over 100 MB"; exit 1; } ;; esac
+```
+
+(The `.dockerignore` here is an allow-list, `*` then explicit re-includes, so `.claude/`, `.worktrees/` and nested `target/` are already excluded; the context-size step is the standard's regression guard.)
+
+- [ ] **Step 2: Run to verify the first-run step fails on the current image**
+
+Run: `docker build -t rustopnsmcp:ci . && sudo true` then the new step's commands by hand (or push the branch and read the job).
+Expected: FAIL. The current `ENTRYPOINT` has no `--state-file` or audit flags and `/var/lib/rustopnsmcp/audit-hmac.key` never appears.
+
+- [ ] **Step 3: Edit the Dockerfile**
+
+In the builder stage, after the real `cargo build --release --locked`, add the two directories the runtime will own:
+
+```dockerfile
+# Directories the nonroot runtime must own. Distroless has no shell to create
+# them, and a named volume mounted over a missing path would be root-owned and
+# unwritable by uid 65532.
+RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp
+```
+
+In the runtime stage, keep the `FROM …` digest line, `USER`, the `HEALTHCHECK` comment and the four `LABEL` lines exactly as they are, and make two edits.
+
+First, directly after the existing `COPY --from=builder /build/target/release/rustopnsmcp /usr/local/bin/rustopnsmcp` line add:
+
+```dockerfile
+COPY --from=builder --chown=65532:65532 /image/etc/rustopnsmcp /etc/rustopnsmcp
+COPY --from=builder --chown=65532:65532 /image/var/lib/rustopnsmcp /var/lib/rustopnsmcp
+
+VOLUME ["/etc/rustopnsmcp", "/var/lib/rustopnsmcp"]
+```
+
+Second, replace everything from the `# ENTRYPOINT carries what must always hold` comment to the end of the file (the comment, the `ENTRYPOINT` array and the `CMD` array) with:
+
+```dockerfile
+# ENTRYPOINT carries what must always hold: config paths, the state file, and
+# the audit baseline. Docker replaces CMD when the caller supplies arguments,
+# so none of these may live there. --audit-journald is absent on purpose:
+# there is no journald socket in a container, and --audit-format json writes
+# to stdout for the runtime to collect. The key lives in the state volume (the
+# only writable mount) and the binary creates it on first start.
+ENTRYPOINT ["/usr/local/bin/rustopnsmcp", \
+    "--device-mapping", "/etc/rustopnsmcp/devices.json", \
+    "--tokens-file", "/var/lib/rustopnsmcp/tokens.json", \
+    "--state-file", "/var/lib/rustopnsmcp/changeset-state.json", \
+    "--inventory-readonly", \
+    "--audit-format", "json", \
+    "--audit-redact", "devices=hmac", \
+    "--audit-hmac-key-file", "/var/lib/rustopnsmcp/audit-hmac.key"]
+# CMD carries only what an operator is expected to replace.
+CMD ["--transport", "streamable-http", \
+    "--host", "127.0.0.1", \
+    "--port", "30037"]
+```
+
+The `HEALTHCHECK` comment stays (distroless has no `kill` or shell, so the standard's `kill -0 1` example cannot run here; the standard's own checklist allows "omitted").
+
+Add to `.dockerignore` under the re-exclusion block, as explicit documentation of the standard's two named directories (harmless with an allow-list, and it keeps the intent greppable): `**/.claude/` and `**/.worktrees/`.
+
+- [ ] **Step 4: Write the compose example**
+
+`packaging/container/compose.example.yaml`:
+
+```yaml
+# Example Compose deployment for rustopnsmcp (mecmcp docs/DOCKER-STANDARD.md).
+# Copy it, set the image tag (pin by digest in production), and adjust paths.
+#
+# Prepare the host directories FIRST. The container runs as uid 65532 and a
+# bind mount carries the host uid straight through:
+#   mkdir -p config state
+#   printf '{"version":1,"devices":{}}\n' > config/devices.json     # then edit it
+#   printf '{"version":1,"tokens":[]}\n'  > state/tokens.json
+#   sudo chown -R 65532:65532 config state
+#   sudo chmod 0750 config; sudo chmod 0700 state
+#   sudo chmod 0600 config/devices.json state/tokens.json
+# The DIRECTORIES must be writable by 65532 as well: state files are written
+# atomically through a temp file in the same directory.
+services:
+  rustopnsmcp:
+    image: ghcr.io/mechubsec/rustopnsmcp:latest
+    # image: ghcr.io/mechubsec/rustopnsmcp@sha256:...   # a digest is what you reviewed
+    container_name: rustopnsmcp
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:30037:30037"
+    volumes:
+      - ./config:/etc/rustopnsmcp:ro
+      - ./state:/var/lib/rustopnsmcp
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # The OPNsense API key and secret reach the container as environment
+    # variables named by devices.json (api_key_env / api_secret_env). Keep the
+    # env file out of the repository and mode 0600.
+    env_file:
+      - ./credentials.env
+    # ENTRYPOINT already carries the config paths, --state-file, --inventory-readonly
+    # and the audit baseline. Only the bind address and port are replaceable.
+    # Binding 0.0.0.0 inside the container is required to publish the port;
+    # the host side above stays on loopback. A non-loopback bind needs both
+    # --allowed-host and --allowed-origin or the server refuses to start; the
+    # values must match what clients dial. For a LAN-facing listener use TLS
+    # (see docs/HOW-TO-SETUP-DOCKER.md).
+    command:
+      - --transport
+      - streamable-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30037"
+      - --allow-insecure-bind
+      - --allowed-host
+      - localhost:30037
+      - --allowed-origin
+      - http://localhost:30037
+    restart: unless-stopped
+```
+
+- [ ] **Step 5: Verify**
+
+Run: `docker build -t rustopnsmcp:ci .`, then the three new `container-guard` steps' commands locally (or on the PR), then `docker compose -f packaging/container/compose.example.yaml config >/dev/null` (syntax), then `docker run --rm rustopnsmcp:ci --help | grep -c allow-insecure-bind` to confirm the flag the example passes exists.
+Expected: `PASS`, the key is `600 65532` and 32 bytes, `--version` prints `rustopnsmcp 0.1.0`.
+
+Run the conformance scripts against the image: `bash "$HOME/.cache/mecmcp-v0.30.1/packaging/conformance/verify-image.sh" --image rustopnsmcp:ci --manifest packaging/conformance.toml --override --host --override 0.0.0.0`. Expected exit 0.
+
+Sabotage: move `--state-file` out of `ENTRYPOINT` into `CMD`; both `container-guard` and `verify-image.sh` (R6) must fail. Restore.
+
+On a workstation without passwordless `sudo`, prove the first-run behaviour with named volumes instead of bind mounts: a named volume mounted over a path that exists in the image takes the image's ownership, which is exactly what the `COPY --chown=65532:65532` lines are for. Create each volume by mounting it into the image once (`docker run --rm -v conf:/etc/rustopnsmcp rustopnsmcp:ci --version`), seed `devices.json` (mode 0600) and `tokens.json` as uid 65532 with a throwaway helper container (`docker run --rm -u 65532:65532 -v conf:/c -v state:/s alpine sh -c '…'`), then run the compose example's `command` against them. Expected: `curl http://127.0.0.1:<port>/readyz` returns `{"status":"ok"}` and the log has no WARN or ERROR line. A first HTTP run without `tokens.json` in the state volume exits with `token file /var/lib/rustopnsmcp/tokens.json: No such file or directory`; the compose preface and `HOW-TO-SETUP-DOCKER.md` must say to create it first (stdio does not need it, which is why the CI step can use stdio).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add Dockerfile .dockerignore packaging/container/compose.example.yaml .github/workflows/ci.yml
+git commit -m "docker: bring the image to the Docker standard
+
+ENTRYPOINT now carries the state file, --inventory-readonly and the keyed,
+redacted audit baseline (mecmcp#376); the runtime owns /var/lib/rustopnsmcp
+so a named volume is writable by uid 65532; CI proves the first run creates
+the key. Adds the compose example. The kill -0 HEALTHCHECK is not used:
+distroless has no kill binary.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 30: Release workflows, `security.yml`, dependabot, `trivy.yaml` (P2.9)
+
+**Files:**
+- Create: `.github/workflows/release-image.yml`, `.github/workflows/release-sign-tarball.yml`, `.github/workflows/release-sbom.yml`, `.github/workflows/security.yml`
+- Create: `.github/dependabot.yml`, `trivy.yaml`
+
+**Interfaces:**
+- Consumes: `scripts/package-lxc.sh` and `packaging/tests/package-smoke.sh` (Tasks 25, 27); mecmcp reusable workflows at `8557155ed1ecd24e7ae25948d70485f0fc8c8451` (v0.30.1).
+- Produces: on a version tag, a signed GHCR image; on `release: published`, a tarball, its checksum and cosign bundle, and an SBOM attached to the release. **None of these runs from a PR or a branch push**, so no signing or publishing happens before the board's v1.0.0 tag.
+
+- [ ] **Step 1: `release-image.yml`**
+
+```yaml
+name: Release image
+
+# Builds, SBOMs, pushes and keyless-signs the image on every version tag, by
+# calling mecmcp's reusable workflow (docs/RELEASE-WORKFLOWS.md). GHCR only.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for the image, e.g. v1.0.0 (-> tags 1.0.0, 1.0, latest)'
+        required: true
+      ref:
+        description: 'Git ref/commit to build (default: the ref this workflow runs from)'
+        required: false
+        default: ''
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign signing exchanges this job's OIDC token for a
+      # short-lived certificate. A reusable workflow's permissions can only be
+      # narrowed by its caller, so this job must grant them itself.
+      id-token: write
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      image: ghcr.io/${{ github.repository }}
+      description: 'OPNsense MCP server'
+      version: ${{ github.event.inputs.version }}
+      ref: ${{ github.event.inputs.ref }}
+```
+
+- [ ] **Step 2: `release-sbom.yml`**
+
+```yaml
+name: Release SBOM
+
+# Attaches a CycloneDX SBOM of the Rust dependency graph to the GitHub release
+# and cosign-attests it on the image digest. Triggered by `release: published`
+# (the release does not exist at tag-push time); the reusable workflow polls
+# for the image digest because the tag-triggered image build is an independent
+# event with no ordering guarantee. The SBOM covers the Rust dependency graph,
+# not the distroless runtime base; do not call it a full image SBOM.
+on:
+  release:
+    types: [published]
+
+jobs:
+  sbom:
+    permissions:
+      contents: write   # gh release upload
+      packages: write   # cosign attest pushes the attestation to GHCR
+      id-token: write   # keyless cosign signing
+    uses: mechubsec/mecmcp/.github/workflows/reusable-attest-release-sbom.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      image: ghcr.io/${{ github.repository }}
+      cargo-manifest-path: rustopnsmcp/Cargo.toml
+      sbom-file: rustopnsmcp/rustopnsmcp.cdx.json
+```
+
+- [ ] **Step 3: `release-sign-tarball.yml`**
+
+The tag-verification job is the sibling's, unchanged in behaviour: only an annotated, GitHub-verified, published tag is built. The build job runs the package tests on the artifact it is about to publish.
+
+```yaml
+name: Sign release tarball
+
+# Builds the LXC tarball for a published release, attaches it with its
+# checksum, and signs it keyless via mecmcp's reusable workflow. Triggered by
+# `release: published` (only a maintainer publishes a release, so this never
+# fires from a PR or an unreviewed tag). workflow_dispatch backfills a release
+# whose own run did not attach the tarball; it refuses a tag that already has
+# a signature bundle, so signed assets are never replaced.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing GitHub-verified signed tag with a published release, e.g. v1.0.0'
+        required: true
+        type: string
+
+jobs:
+  resolve-tag:
+    name: Verify signed published tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+    steps:
+      - name: Verify tag is annotated, GitHub-verified, and published
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must be vMAJOR.MINOR.PATCH, got '$TAG'."; exit 1
+          fi
+          object_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type') \
+            || { echo "::error::$TAG is not a tag in ${GITHUB_REPOSITORY}."; exit 1; }
+          if [[ "$object_type" != "tag" ]]; then
+            echo "::error::$TAG is a lightweight tag; release tags must be annotated and signed (git tag -s)."; exit 1
+          fi
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.verification.verified')
+          if [[ "$verified" != "true" ]]; then
+            reason=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.verification.reason')
+            echo "::error::$TAG is not a GitHub-verified signature (reason: $reason)."; exit 1
+          fi
+          release_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}") \
+            || { echo "::error::$TAG has no GitHub release."; exit 1; }
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "false" ]]; then
+            echo "::error::$TAG has a draft release; only a published release is built and signed."; exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            bundles=$(jq -r '[.assets[].name | select(endswith(".tar.gz.cosign.bundle"))] | length' <<<"$release_json")
+            if [[ "$bundles" != "0" ]]; then
+              echo "::error::$TAG already has a signed tarball; backfill does not replace signed assets."; exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build-tarball:
+    name: Build release tarball
+    needs: resolve-tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.98.1
+
+      - name: Toolchain matches rust-toolchain.toml
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          have=$(rustc -V | cut -d' ' -f2)
+          test "$want" = "$have" || { echo "::error::rust-toolchain.toml says $want, runner has $have"; exit 1; }
+
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+          TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+        run: |
+          curl -sSfL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          tar -xzf trivy.tar.gz trivy
+          sudo mv trivy /usr/local/bin/trivy
+
+      - name: Build release archive
+        env:
+          OPNSMCP_RELEASE_STATUS: public
+        run: scripts/package-lxc.sh
+
+      - name: Smoke the archive
+        run: packaging/tests/package-smoke.sh dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz
+
+      - name: Archive name matches the tag
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: test -f "dist/rustopnsmcp-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-tarball
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          retention-days: 1
+          if-no-files-found: error
+
+  upload-tarball:
+    name: Attach tarball to release
+    needs: [resolve-tag, build-tarball]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # gh release upload
+    timeout-minutes: 10
+    steps:
+      - name: Download tarball artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-tarball
+          path: dist
+
+      - name: Upload tarball to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        # --clobber: a re-run after a partial failure must be able to re-upload.
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 --repo "${{ github.repository }}" --clobber
+
+  sign:
+    needs: [resolve-tag, upload-tarball]
+    permissions:
+      contents: write
+      id-token: write # keyless cosign; a reusable workflow cannot widen these
+    uses: mechubsec/mecmcp/.github/workflows/reusable-sign-release-tarball.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      tag: ${{ needs.resolve-tag.outputs.tag }}
+      asset-pattern: 'rustopnsmcp-v*.tar.gz'
+```
+
+The `asset-pattern` excludes `.tar.gz.sha256`, so only the tarball is signed. Conformance is not re-run here: the `Package conformance` job (Task 28) runs it on the same commit before the tag exists, and the composite action needs a built image for R7 once `audit_hmac_flag` is declared.
+
+- [ ] **Step 4: `security.yml` (Trivy only, Decision D5) and `trivy.yaml`**
+
+`trivy.yaml`:
+
+```yaml
+scan:
+  skip-dirs:
+    - target
+    - dist
+    - .git
+    - .worktrees
+    - .claude
+```
+
+`.github/workflows/security.yml`:
+
+```yaml
+name: security
+
+# Trivy filesystem and image scans. Secret scanning, cargo-audit and
+# cargo-deny already run as ci.yml jobs under their required-check names, so
+# they are not repeated here. Trivy is installed from the upstream release
+# binary and checksum-pinned, not via a Docker-based action, so a registry
+# outage cannot turn this gate red for an unrelated reason.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trivy:
+    name: Trivy (filesystem and image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+          TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+        run: |
+          curl -sSfL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          tar -xzf trivy.tar.gz trivy
+          sudo mv trivy /usr/local/bin/trivy
+
+      - name: trivy fs (dependency and config scan)
+        run: trivy fs --config trivy.yaml --exit-code 1 --severity HIGH,CRITICAL .
+
+      - name: Build image for scanning
+        run: docker build -t rustopnsmcp:ci .
+
+      - name: trivy image (container scan)
+        run: trivy image --config trivy.yaml --exit-code 1 --severity HIGH,CRITICAL rustopnsmcp:ci
+```
+
+- [ ] **Step 5: `.github/dependabot.yml`**
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 5
+    # The mecmcp crates are pinned by git tag and moved by hand (scripts/
+    # check-mecmcp-pin.sh enforces one ref). Dependabot advances the git ref
+    # past the tag, which cargo then refuses, failing the whole cargo run and
+    # taking unrelated crate updates down with it.
+    ignore:
+      - dependency-name: "mecmcp-*"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github_actions-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-minor-patch:
+        update-types: ["minor", "patch"]
+```
+
+- [ ] **Step 6: Verify without publishing anything**
+
+Run each, expecting a clean result:
+```
+python3 -c 'import sys,yaml; [yaml.safe_load(open(p)) for p in sys.argv[1:]]' .github/workflows/*.yml .github/dependabot.yml trivy.yaml
+actionlint .github/workflows/*.yml          # if installed; otherwise state that it was not run
+trivy fs --config trivy.yaml --exit-code 1 --severity HIGH,CRITICAL .
+grep -n 'uses:' .github/workflows/*.yml | grep -vE '@[0-9a-f]{40}' || echo "all actions pinned to SHAs"
+git merge-base --is-ancestor v0.30.1 origin/main   # run in a mecmcp checkout
+```
+Expected: the last-but-one prints the pin message (every `uses:` carries a 40-hex SHA; the `./`-style local paths do not appear), the trivy scan exits 0 on the current lockfile, and in a mecmcp checkout `git rev-parse v0.30.1^{commit}` equals `8557155ed1ecd24e7ae25948d70485f0fc8c8451`.
+
+Nothing in P2 pushes a tag. The release workflows are first exercised at P7; their risk until then is that they have never run. Reduce it now with a dry run of the tarball half: `scripts/package-lxc.sh && packaging/tests/package-smoke.sh dist/*.tar.gz` (already done by Task 28's CI job on every PR) and, once, a `workflow_dispatch` of `release-sign-tarball.yml` against a throwaway signed tag on a fork if the board wants that proof before P7. State in the P2 gate comment which of these was done.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add .github/workflows/release-image.yml .github/workflows/release-sign-tarball.yml .github/workflows/release-sbom.yml .github/workflows/security.yml .github/dependabot.yml trivy.yaml
+git commit -m "ci: release image, signed tarball and SBOM workflows, trivy, dependabot
+
+Thin callers of mecmcp's reusable workflows, pinned to the v0.30.1 commit.
+Releases trigger only from version tags and published releases. Dependabot
+ignores mecmcp-* because the pin moves by hand.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 31: Operator documentation and the doc gate (P2.10, second half)
+
+Docs PRs need the gate too: six guides once shipped with every command unrun behind green CI. This task ships `scripts/check-docs.sh` first, so the documents are written against a check that can fail, and Task 33 executes `HOW-TO-SETUP-LXC.md` literally on a real guest.
+
+**Files:**
+- Create: `scripts/check-docs.sh` (mode 0755)
+- Create: `docs/HOW-TO-SETUP-LXC.md`, `docs/HOW-TO-SETUP-DOCKER.md`, `docs/AUDIT.md`, `docs/METRICS.md`, `docs/THREAT-MODEL.md`
+- Create: `CHANGELOG.md`, `CONTRIBUTING.md`, `AGENTS.md`
+- Modify: `README.md` (append a "Documentation" section only; the banner and Status section belong to P3.8)
+- Modify: `.github/workflows/ci.yml` (run `scripts/check-docs.sh` in the `build-test` job after the build)
+
+- [ ] **Step 1: Write the gate**
+
+`scripts/check-docs.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Documentation gate: public-repo hygiene, resolvable links, only real flags,
+# and the site override example embedded in the LXC guide being the shipped file.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel); cd "$root"
+fail() { echo "FAIL: $*" >&2; failed=1; }
+failed=0
+mapfile -t docs < <(git ls-files -- '*.md' ':!:docs/design/*' ':!:docs/superpowers/*'; find docs -maxdepth 1 -name '*.md' 2>/dev/null)
+mapfile -t docs < <(printf '%s\n' "${docs[@]}" | sort -u)
+
+# 1. Hygiene. IPv4 only in documentation or private ranges; no site-looking names.
+allowed='^(192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|0\.0\.0\.0$|169\.254\.)'
+while IFS=: read -r file line address; do
+    [[ "$address" =~ $allowed ]] || fail "$file:$line real-looking IPv4 address: $address"
+done < <(grep -noE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' "${docs[@]}" | sed -E 's/^([^:]+):([0-9]+):(.*)$/\1:\2:\3/')
+if grep -nE '[A-Za-z0-9-]+\.(lan|local|internal|corp|home\.arpa)\b' "${docs[@]}"; then
+    fail "site-looking hostname (use *.example.org)"
+fi
+if grep -nE '(/home/[a-z]|~/\.env|\.credentials)' "${docs[@]}"; then
+    fail "credential-looking path or value"
+fi
+
+# 2. Relative links resolve.
+for doc in "${docs[@]}"; do
+    dir=$(dirname "$doc")
+    while IFS= read -r target; do
+        target=${target%%#*}
+        [[ -z "$target" || "$target" =~ ^(https?:|mailto:) ]] && continue
+        [[ -e "$dir/$target" ]] || fail "$doc links to missing $target"
+    done < <(grep -oE '\]\([^)]+\)' "$doc" | sed -E 's/^\]\((.*)\)$/\1/')
+done
+
+# 3. Every --flag in the docs is a real rustopnsmcp flag or a listed foreign one.
+binary=${CARGO_TARGET_DIR:-target}/debug/rustopnsmcp
+[[ -x "$binary" ]] || cargo build -q -p rustopnsmcp
+real=$("$binary" --help | grep -oE -- '--[a-z0-9][a-z0-9-]*' | sort -u)
+foreign='--now --rm --signal --kill-whom --create --no-pager --force --platform --debug --follow --since --lines --entrypoint --pull --format --user --name --state --cacert --fail --silent --show-error --location --output --data --header --verbose --version --help --restart --scope --unit'
+mapfile -t doc_flags < <(grep -ohE -- '--[a-z0-9][a-z0-9-]*' "${docs[@]}" | sort -u)
+for flag in "${doc_flags[@]}"; do
+    grep -qxF -- "$flag" <<<"$real" && continue
+    grep -qwF -- "$flag" <<<"$foreign" && continue
+    fail "docs mention $flag, which rustopnsmcp --help does not list (add it to 'foreign' only if another tool owns it)"
+done
+
+# 4. The override example in the LXC guide is the shipped file.
+guide=docs/HOW-TO-SETUP-LXC.md
+example=packaging/systemd/rustopnsmcp.override.conf.example
+embedded=$(sed -n '/<!-- override-example:start -->/,/<!-- override-example:end -->/p' "$guide" \
+    | sed -E -e '/<!--/d' -e '/^[`]{3}/d' | grep -v '^#' | sed 's/[[:space:]]*$//')
+shipped=$(grep -v '^#' "$example" | sed 's/[[:space:]]*$//')
+[[ -n "$embedded" ]] || fail "$guide has no override-example block"
+[[ "$embedded" == "$shipped" ]] || fail "$guide's override block differs from $example"
+
+# 5. Every doc in docs/ is reachable from README.md.
+for doc in docs/*.md; do
+    grep -qF "$doc" README.md || fail "README.md does not link $doc"
+done
+
+[[ "$failed" -eq 0 ]] && echo "check-docs: ok"
+exit "$failed"
+```
+
+- [ ] **Step 2: Run to verify it fails on the current tree, then add it to CI**
+
+Run: `chmod +x scripts/check-docs.sh && scripts/check-docs.sh`
+Expected: FAIL (`has no override-example block`, README links), proving the gate bites. Add to the `build-test` job in `ci.yml`, after "Build workspace": a step `- name: Documentation gate` with `run: scripts/check-docs.sh`.
+
+- [ ] **Step 3: Write each document against real output, not memory**
+
+For each file, the required contents and how to obtain them:
+
+1. `docs/HOW-TO-SETUP-LXC.md`: Debian 13 unprivileged `nesting=1` and why (systemd 257 reports `degraded` with three failed mounts without it); download, `sha256sum -c`, extract, `sudo packaging/lxc/install.sh` (the archive's installer, from the extracted root); edit `devices.json` and `credentials.env`; mint the first token; start; verify with `curl -fsS http://127.0.0.1:30037/readyz`; the site override walk-through with the shipped example embedded between `<!-- override-example:start -->` / `<!-- override-example:end -->` inside a fenced `ini` block, and the explanation that the empty `ExecStart=` is required; TLS files created `0600 rustopnsmcp:rustopnsmcp` under `/etc/rustopnsmcp/`; a lab-mode override (same file plus `--lab-mode`); journald persistence and remote forwarding (`systemd-journal-upload` or rsyslog, configured at provisioning because it replaces Forward Secure Sealing in an unprivileged LXC); upgrade with a guest snapshot first; a troubleshooting section naming the real error strings: `non-loopback bind '<host>' requires at least one --allowed-host`, `… --allowed-origin`, a 421 `Host … is not allowed`, a 403 `Origin … is not allowed`, and `Permission denied` on `tokens.json` (copy each string from running the binary, not from this plan).
+2. `docs/HOW-TO-SETUP-DOCKER.md`: the DOCKER-STANDARD structure verbatim in order (prerequisites, prepare host directories with `chown -R 65532:65532` placed immediately before the `docker run` that needs it, run, TLS, compose, health, platform notes, building locally), the note that `--audit-format json` (not `--audit-journald`) is correct in a container and the key is created in the state volume on first start, how to run `token add` through the image, and `--allowed-host` plus `--allowed-origin` for a non-loopback bind. Every `docker run` is run once against `rustopnsmcp:ci` before the PR.
+3. `docs/AUDIT.md`: the per-call record. Generate it: `target/debug/rustopnsmcp --transport stdio --audit-format json < /dev/null 2>&1 | head`, then drive one call with the `audit_coverage` harness and paste a real redacted record. Document each field, the `devices=hmac` pseudonymisation, key custody, the `direct_commit_denied` reason, and the evidence pipeline flags (`--ssdf-audit-*`, `--audit-forward-*`) as they appear in `--help`.
+4. `docs/METRICS.md`: start the server with `--enable-metrics`, `curl -s http://127.0.0.1:30037/metrics`, and list the metric names, types and labels actually returned; say that `/metrics` is loopback-only regardless of bind and carries no bearer auth.
+5. `docs/THREAT-MODEL.md`: assets (device API key/secret, bearer tokens, audit key, change-set state), trust boundaries (MCP caller, server, OPNsense), and a table of threats with the control and where it is enforced: scope escape (token scopes and the `device` target preflight), credential exposure (`OutboundSecret`, redaction, 0600 files), a partial apply (state `partial`, recorded `Failed`), a GUI edit loaded by `reconfigure`, a stale digest or fingerprint, audit tampering (journald forwarding), supply chain (one pin, cosign, SBOM). A "limits" paragraph: `IPAddressAllow` is inert in an unprivileged LXC, there is no candidate configuration on OPNsense, and no sandbox is a substitute for a network ACL on the management plane.
+6. `CHANGELOG.md`: Keep a Changelog, one `## [Unreleased]` section. Fill it from `git log --oneline` since the repository's first commit, grouped Added/Changed/Security; invent nothing that is not in the log.
+7. `CONTRIBUTING.md`: the four CI commands, the public-repo hygiene rule, the one-pin rule (`scripts/check-mecmcp-pin.sh`), and the commit trailer.
+8. `AGENTS.md`: build and test commands (`CARGO_TARGET_DIR` advice for small `/tmp`), the layout of the two crates, the parity and docs gates, and the rule that no real addresses, hostnames or credential paths are committed.
+9. `README.md`: append a `## Documentation` list linking every file in `docs/` plus `packaging/FILESYSTEM.md`, `CHANGELOG.md` and `CONTRIBUTING.md`. Do not edit the banner or Status.
+
+- [ ] **Step 4: Run the gate and the commands**
+
+Run: `scripts/check-docs.sh`
+Expected: `check-docs: ok`. Then copy every command from the two HOW-TO files into a scratch shell and run the ones that can run on a workstation (`docker`, `curl` against a local server); list the ones deferred to Task 33's dry run in the PR description.
+
+Sabotage: put `192.0.2.1` then `203.0.114.5` in a scratch copy of a doc; the second must fail. Edit one line of the embedded override block; the embed check must fail.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/check-docs.sh docs/HOW-TO-SETUP-LXC.md docs/HOW-TO-SETUP-DOCKER.md docs/AUDIT.md docs/METRICS.md docs/THREAT-MODEL.md CHANGELOG.md CONTRIBUTING.md AGENTS.md README.md .github/workflows/ci.yml
+git commit -m "docs: operator guides, audit/metrics/threat-model references and a doc gate
+
+check-docs.sh fails on a non-documentation IPv4 address, a site-looking
+hostname, a dead link, a flag the binary does not have, and an override
+example that differs from the shipped file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 32: Retire the `until=P2` allowlist entries and run the P2 parity gate (P2.11)
+
+**Files:**
+- Modify: `scripts/parity-allowlist.txt`
+
+**Interfaces:**
+- Consumes: every file and unit change from Tasks 22–31.
+- Produces: `scripts/parity-check.sh --phase P2` exiting 0 against a rustjunosmcp checkout.
+
+- [ ] **Step 1: Run the gate to see exactly what is unexplained**
+
+The script builds both binaries into `mktemp` directories; point `TMPDIR` at disk so a small `/tmp` tmpfs cannot fill and kill the run.
+```
+mkdir -p "$HOME/.cache/parity-tmp"
+TMPDIR=$HOME/.cache/parity-tmp scripts/parity-check.sh --junos-src /path/to/RustJunosMCP --phase P2
+```
+(fish: `env TMPDIR=$HOME/.cache/parity-tmp scripts/parity-check.sh --junos-src … --phase P2`.) `--junos-src` is a checkout of `mechubsec/rustjunosmcp` at `main`; use a clean one.
+
+Expected on the first run: `FAIL[file] only-opns:` lines for the new opns-only files, `FAIL[unit-path] only-opns:` for `--state-file /var/lib/SVC/changeset-state.json` and `--audit-hmac-key-file /etc/SVC/audit-hmac.key`, and `WARN[allowlist] no longer differs; remove the entry:` for every `until=P2` line.
+
+- [ ] **Step 2: Delete the seventeen `until=P2` lines**
+
+Remove these entries from `scripts/parity-allowlist.txt` (they are exactly the ones with `P2` in the fourth field; confirm with `grep -c '|P2|' scripts/parity-allowlist.txt` before and `0` after):
+the thirteen `file|only-junos|…|P2|…` lines (`release-image.yml`, `release-sbom.yml`, `release-sign-tarball.yml`, `security.yml`, `packaging/FILESYSTEM.md`, `packaging/container/compose.example.yaml`, `packaging/logrotate/SVC-audit`, `packaging/lxc/install.sh`, `packaging/tests/package-smoke.sh`, `packaging/tests/journald-dropin-ordering.sh`, `scripts/package-lxc.sh`, `packaging/conformance.toml`, `packaging/tests/skip-build-provenance.sh`) and the four `unit-path|only-opns|…|P2|…` lines (`--state-file …/changesets.json`, `--tls-cert`, `--tls-key`, `--audit-log-file`).
+
+- [ ] **Step 3: Add the permanent entries, each with a reason**
+
+Append under the matching section headers:
+
+```
+file|only-opns|packaging/systemd/SVC.override.conf.example|never|the site override is a documented drop-in (spec §3.2); rustjunosmcp edits its unit in place
+file|only-opns|packaging/journald/mecmcp.conf|never|RELEASE-ARTIFACTS §2 names this file; rustjunosmcp's installer writes its journald policy inline
+file|only-opns|packaging/package-README.md.in|never|RELEASE-ARTIFACTS §7: the package README is generated from a template
+file|only-opns|packaging/tests/unit-contract.sh|never|pins the stock unit's flags and the override example's completeness
+file|only-opns|packaging/tests/logrotate.sh|never|proves rotation signals the server
+file|only-opns|packaging/tests/installer-idempotence.sh|never|proves the installer never overwrites state
+file|only-opns|scripts/check-docs.sh|never|the documentation gate (Task 31)
+unit-path|only-opns|--state-file /var/lib/SVC/changeset-state.json|never|spec §3.2 and FILESYSTEM-LAYOUT put change-set state in /var/lib; rustjunosmcp's stock unit passes no --state-file
+unit-path|only-opns|--audit-hmac-key-file /etc/SVC/audit-hmac.key|never|FILESYSTEM-LAYOUT puts the key in /etc/<svc>; counterpart of the only-junos entry for /var/lib/SVC/audit-hmac.key
+```
+
+- [ ] **Step 4: Run to green, then sabotage**
+
+Run the Step 1 command again.
+Expected: `parity-check P2: no unexplained differences`, with no `WARN[allowlist]` lines (a WARN means an entry that no longer differs; delete it).
+
+Also run `--phase P1` and `--phase P3` and confirm neither regresses (`P3` should add no new failure; if the P3 worktree has landed other files first, merge its allowlist changes, do not overwrite them).
+
+Sabotage: delete `packaging/logrotate/rustopnsmcp-audit` in a scratch checkout and re-run; expect `FAIL[file] only-junos: packaging/logrotate/SVC-audit`. Restore.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/parity-allowlist.txt
+git commit -m "scripts: retire the P2 parity allowlist entries and explain the permanent ones
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 33: Gate evidence — conformance, dry-run install, and the mecmcp note (P2.12)
+
+**This task creates nothing on the Proxmox cluster until the user answers Open question 5 and says go.** Steps 1, 2, 4, 5 and 6 need no guest.
+
+- [ ] **Step 1: Repo gates, all green on the PR head**
+
+```
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --locked
+scripts/check-mecmcp-pin.sh
+scripts/check-docs.sh
+TMPDIR=$HOME/.cache/parity-tmp scripts/parity-check.sh --junos-src /path/to/RustJunosMCP --phase P2
+packaging/tests/unit-contract.sh && packaging/tests/logrotate.sh && packaging/tests/skip-build-provenance.sh \
+  && packaging/tests/installer-idempotence.sh && packaging/tests/journald-dropin-ordering.sh
+```
+Expected: every command exits 0.
+
+- [ ] **Step 2: Conformance green in CI**
+
+The `Package conformance` job (Task 28) is green on the PR head: R1–R5 pass, R6 passes with the `--host 0.0.0.0` override, R7 passes through `audit_hmac_flag`, and the only `WARN` is R3 clause 3 (not run, because the tarball is compiled by the script, not supplied prebuilt). Link the run in the gate comment. The `container-guard` job (Task 29) is green, including the first-run key check.
+
+- [ ] **Step 3: Dry-run install on a disposable Debian 13 LXC (needs the user's go-ahead)**
+
+Ask: "May I create a disposable unprivileged Debian 13 LXC (`nesting=1`, tagged `disposable`) on <node> as VMID <vmid> to dry-run the installer, and destroy it afterwards?" Do nothing until the answer is yes. Then, on the guest's own node (`pct` and `qm` only work on the node that owns the guest):
+
+1. **Before creating anything:** list the cluster's guests and tags and confirm the chosen VMID is unused and that no `protected`-tagged guest is in play (query the tag; a remembered list is not evidence). Take the guest's address from the operator's address registry, never from a ping sweep, or use DHCP, and record the allocation there in the same change.
+2. Create the container from the Debian 13 template: unprivileged, `--features nesting=1`, `--tags disposable`, 1 vCPU, 512 MB RAM, 4 GB disk. Start it. Check `systemctl is-system-running` inside prints `running` (not `degraded`); if it prints `degraded`, `nesting=1` did not apply and the dry run is invalid.
+3. Take a snapshot named `pre-install`.
+4. Copy in the tarball and its `.sha256` from the PR's `Package conformance` artifact or a local `scripts/package-lxc.sh` run; do not rebuild on the guest.
+5. **Follow `docs/HOW-TO-SETUP-LXC.md` literally, command by command.** Every deviation you needed is a documentation bug: fix the doc in this PR.
+6. Record the evidence, each as pasted command output:
+   - `sha256sum -c` OK; installer exit status 0 and its next-steps text.
+   - `stat -c '%a %U:%G' /etc/rustopnsmcp /etc/rustopnsmcp/devices.json /etc/rustopnsmcp/audit-hmac.key /etc/rustopnsmcp/credentials.env /var/lib/rustopnsmcp /var/lib/rustopnsmcp/tokens.json` matches the Permissions table (`750 root:rustopnsmcp`, `600 rustopnsmcp:rustopnsmcp`, `700 rustopnsmcp:rustopnsmcp`).
+   - `systemctl start rustopnsmcp`; `systemctl is-active rustopnsmcp` is `active`; `curl -fsS http://127.0.0.1:30037/readyz` returns `{"status":"ok"}`.
+   - `sudo -u rustopnsmcp rustopnsmcp token add …` writes to `/var/lib/rustopnsmcp/tokens.json`; the server still starts afterwards (a restart, not a reload).
+   - `systemctl kill --kill-whom=main --signal=HUP rustopnsmcp` logs the reload lines; the service stays `active`.
+   - `journalctl -u rustopnsmcp -n 30` shows JSON audit records with the device names HMAC-pseudonymised, and `journalctl --disk-usage` shows persistent storage.
+   - Re-run the installer a second time: exit 0, "exists; not overwriting" for the state and secret files, and the `tokens.json` bytes unchanged (`sha256sum` before and after).
+   - Edit the installed unit, re-run the installer: the differing unit is kept as `rustopnsmcp.service.bak-<timestamp>` and the note about `override.conf` is printed.
+   - Drop the example override in place with a TLS pair, restart, and `curl --cacert <ca> https://rustopnsmcp.example.org:30037/readyz` (add the name to the guest's resolver or `--resolve`).
+   - `systemd-analyze security rustopnsmcp --no-pager` (record the exposure score; do not gate on it).
+   - Confirm in `journalctl -k` that no `SIGSYS`/seccomp kill appears after a token mint and a change-set write (the `chown` failure class that killed a sibling server).
+7. **P3.3 carry-over, recorded now so it is not lost:** with a real OPNsense later, a wrong key must give HTTP 401 and flip `/readyz` to 503, and a key that lacks one privilege must give 403 and leave `/readyz` at 200 (Decision D2 is an assumption until then).
+8. Destroy the guest only after printing its name, node, tag (`disposable`, not `protected`) and config, and stating that the evidence above is saved. Delete the registry allocation.
+
+- [ ] **Step 4: The mecmcp status row**
+
+Read mecmcp `docs/FILESYSTEM-LAYOUT.md` at `origin/main` and confirm the `rustopnsmcp` row still says what Step 3 just proved. It already exists (P0 Task 3); if the wording needs to change (for example it should now say "verified at its P2 packaging gate"), open a one-line mecmcp PR on a fresh branch off `origin/main`. If it needs no change, write "no mecmcp change needed" in the gate comment. Do not open a PR that only re-states the row.
+
+- [ ] **Step 5: Write the gate comment**
+
+The comment on the epic lists: the PR link and merge commit; the green conformance and container-guard run links; the parity-check P2 output; the dry-run evidence from Step 3 (or "not run: awaiting go-ahead", in which case the gate is not passed); the answers to the Open questions; and the sabotage results recorded in Tasks 20–29.
+
+- [ ] **Step 6: Commit any doc fixes the dry run forced**
+
+```bash
+git add docs/ packaging/
+git commit -m "docs: corrections found by the dry-run install
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### P2 gate
+
+The gate (spec §4) is: **mecmcp packaging conformance passes, and a dry-run install on Debian 13 succeeds.** Concretely: Task 33 steps 1 and 2 are green, step 3's evidence is pasted in the gate comment with the service reaching `/readyz` on the guest, and the allowlist has no `until=P2` entry left. P2 is not done on a green CI alone: CI cannot show ownership, apt, systemd or journald behaviour on a real guest.
+
+---
+
+### P2 review focus
+
+These are the input classes most likely to hurt a user in this phase. Each has a pinning test that was seen to fail.
+
+1. **The installer overwriting state or secrets** on an upgrade (`tokens.json`, `changeset-state.json`, `audit-hmac.key`, `devices.json`, `credentials.env`), or following a symlink where one belongs. Pinned in Task 26 by `installer-idempotence.sh` sections 2 and 3, each sabotaged separately.
+2. **A site override that silently drops the audit baseline**, because a drop-in can only replace `ExecStart`. Pinned in Task 22 by `unit-contract.sh` (the override must restate every stock flag).
+3. **An image that runs unkeyed audit or loses its change sets**, the state the Dockerfile was in. Pinned in Task 29 by `container-guard` (argv with `--host` override; first run creates a 32-byte `600 65532` key) and by conformance R6/R7.
+4. **A `/readyz` that stays green while the key is refused**, or flips on a 403. Pinned in Task 21 by `readyz_follows_the_device_refusing_and_accepting_the_key` and `a_403_alone_never_fails_readiness`.
+5. **A tarball whose BUILD-INFO lies about its provenance** (a workstation toolchain named for a prebuilt binary, a hash of different bytes, a `mecmcp_ref` that is not the pin). Pinned in Task 25 by `skip-build-provenance.sh` and in Task 27 by `package-smoke.sh` checks 6 to 8.
+
+### P2 spec coverage
+
+| Checklist item | Delivered in |
+|---|---|
+| P2.1 | this section |
+| P2.2 Unit rework | Task 22 (tmpfiles: no change needed, pinned) |
+| P2.3 Site `override.conf`, HOW-TO, journald ordering test | Task 22 (example, contract test), Task 26 (journald test), Task 31 (HOW-TO) |
+| P2.4 `install.sh` | Task 26 |
+| P2.5 `package-lxc.sh`, BUILD-INFO, naming, `package-smoke.sh` | Tasks 25, 27 |
+| P2.6 logrotate with SIGHUP `postrotate` | Task 24 |
+| P2.7 `/readyz` auth readiness | Task 21 |
+| P2.8 `conformance.toml`, CI job, reachable pin | Tasks 19, 28 |
+| P2.9 release-image, sign-tarball, SBOM, security, dependabot, compose, Dockerfile check | Tasks 20, 29, 30 |
+| P2.10 docs set | Tasks 23, 31 |
+| P2.11 allowlist and `parity-check --phase P2` | Task 32 |
+| P2.12 conformance green, dry-run install, mecmcp note | Task 33 |
+| Spec §3.2 unit and files; §3.3 `/readyz`; §4 P2 | Tasks 22, 26, 21, 28–33 |
+
 ## P3 — Live verification
 
 **Owner:** engineer (endpoint corrections, change-set runs). The second engineer records and sanitizes fixtures.
