@@ -121,3 +121,37 @@ python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1])).get("kept") 
 # An unresolved save drops a stale value from --vars instead of persisting it.
 "${client[@]}" "$work/unresolved.json" --vars "$work/stale.json" --save-vars "$work/stale-out.json" "${server[@]}" >/dev/null || true
 python3 -I -c 'import json,sys; assert "gone" not in json.load(open(sys.argv[1]))' "$work/stale-out.json"
+# One variable grammar: "$change-set-id" is refused (never sent) whether or not a key of that name exists.
+cat > "$work/hyphen.json" <<'JSON'
+[{"name":"hyphen variable","tool":"list_opnsense_interfaces","arguments":{"device":"stub","search_phrase":"$change-set-id"},"expect":"error"}]
+JSON
+printf '{"change-set-id":"X"}' > "$work/hyphen-vars.json"
+: > "$work/requests.log"
+for extra in "" "--vars $work/hyphen-vars.json"; do
+  # shellcheck disable=SC2086
+  hyphen=$("${client[@]}" "$work/hyphen.json" $extra "${server[@]}" 2>&1) || true
+  # shellcheck disable=SC2016  # the $ is literal
+  printf '%s' "$hyphen" | grep -q '^FAIL.*invalid --vars key\|^FAIL hyphen variable.*unknown variable \$change-set-id'
+done
+if grep -q interfaces "$work/requests.log"; then echo 'hyphenated variable was sent'; exit 1; fi
+# An invalid save key is refused before any call is sent.
+cat > "$work/badkey.json" <<'JSON'
+[{"name":"first","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok"},
+ {"name":"bad key","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok","save":{"a-b":"/product_version"}}]
+JSON
+: > "$work/requests.log"
+badkey=$("${client[@]}" "$work/badkey.json" "${server[@]}") || true
+printf '%s' "$badkey" | grep -q '^FAIL invalid save key.*a-b'
+[ ! -s "$work/requests.log" ] || { echo 'a call was sent despite an invalid save key'; exit 1; }
+# A skipped call drops the save keys it declares, so a stale --vars value cannot reach a later call.
+cat > "$work/skipsave.json" <<'JSON'
+[{"name":"skipped","tool":"list_opnsense_interfaces","arguments":{"search_phrase":"$nowhere"},"expect":"ok",
+  "save":{"stale":"/product_version"}},
+ {"name":"reuses stale","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/note":"$stale"}}]
+JSON
+printf '{"stale":"STALEVALUE"}' > "$work/stale2.json"
+skip=$("${client[@]}" --keep-going "$work/skipsave.json" --vars "$work/stale2.json" --save-vars "$work/skip-out.json" "${server[@]}") || true
+# shellcheck disable=SC2016  # the $ is literal
+printf '%s' "$skip" | grep -q '^FAIL reuses stale.*unknown variable \$stale'
+python3 -I -c 'import json,sys; assert "stale" not in json.load(open(sys.argv[1]))' "$work/skip-out.json"

@@ -16,6 +16,9 @@ import argparse, html, http.client, json, os, re, subprocess, sys, urllib.parse
 TAG = re.compile(
     r'(?s)\s*<untrusted-device-content id="([0-9a-f]+)"[^>]*>\n[^\n]*\n(.*)\n</untrusted-device-content id="\1">\s*$'
 )
+# ONE variable grammar: save keys, --vars keys, "$name" arguments and "$name" pointer patterns.
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+REF = re.compile(r"\$[\w.\-]+")  # anything shaped like a reference; a non-NAME one is refused, never sent
 IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
 
@@ -118,16 +121,21 @@ def resolve(payload, pointer):
     return True, node
 
 
+def invalid_names(names):
+    """The names that do not fit the variable grammar."""
+    return [name for name in names if not NAME.fullmatch(name)]
+
+
 def unknown_variables(value, saved):
-    """Names of every "$name" string in `value` that has no saved value."""
+    """Names of every "$name" string in `value` that has no saved value (or is not a valid name)."""
     if isinstance(value, str):
-        return [value[1:]] if re.fullmatch(r"\$\w+", value) and value[1:] not in saved else []
+        return [value[1:]] if REF.fullmatch(value) and value[1:] not in saved else []
     children = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
     return [name for child in children for name in unknown_variables(child, saved)]
 
 
 def substitute(value, saved):
-    if isinstance(value, str) and value.startswith("$") and value[1:] in saved:
+    if isinstance(value, str) and REF.fullmatch(value) and value[1:] in saved:
         return saved[value[1:]]
     if isinstance(value, dict):
         return {k: substitute(v, saved) for k, v in value.items()}
@@ -138,11 +146,17 @@ def substitute(value, saved):
 
 def run_calls(client, calls, saved, keep_going):
     """Run the calls in order, mutating `saved`; return the number of FAILed calls."""
+    bad = [name for call in calls for name in invalid_names(call.get("save", {}))]
+    if bad:  # refuse the whole file before any call is sent
+        print("FAIL invalid save key(s) %s: must match [A-Za-z_][A-Za-z0-9_]*; nothing sent" % json.dumps(bad))
+        return 1
     failures = 0
     for index, call in enumerate(calls, start=1):
         unknown = unknown_variables(call.get("arguments", {}), saved)
         if unknown:  # never send a literal "$name" to the server
             failures += 1
+            for variable in call.get("save", {}):  # a skipped call must not leave a stale value behind
+                saved.pop(variable, None)
             print("FAIL %-34s not sent" % call["name"], *("<- unknown variable $%s in arguments" % n for n in unknown))
             if not keep_going:
                 print("ABORT: stopping after %s; %d later call(s) not run" % (call["name"], len(calls) - index))
@@ -163,7 +177,7 @@ def run_calls(client, calls, saved, keep_going):
         for pointer, pattern in call.get("pointers", {}).items():
             _, node = resolve(payload, pointer)
             shown_pattern = pattern  # never echo a saved value: it may come from the device
-            if pattern.startswith("$"):  # "$name": must equal a saved variable exactly
+            if REF.fullmatch(pattern):  # "$name": must equal a saved variable exactly
                 if pattern[1:] not in saved:
                     problems.append("unknown variable " + pattern)
                     continue
@@ -176,9 +190,11 @@ def run_calls(client, calls, saved, keep_going):
             found, node = resolve(payload, pointer)
             if not found:
                 problems.append("save %s: pointer %s unresolved" % (variable, pointer))
-                saved.pop(variable, None)  # a stale value from --vars must not survive into --save-vars
                 continue
             saved[variable] = node
+        if problems:  # a failed call leaves none of its declared variables behind (stale --vars included)
+            for variable in call.get("save", {}):
+                saved.pop(variable, None)
         failures += bool(problems)
         shown = {name: saved.get(name) for name in call.get("show", [])}  # only for non-secret ids and fingerprints
         detail = json.dumps(shape(payload)) if payload is not None else unparsed_note(text)
@@ -203,11 +219,14 @@ def main():
     parser.add_argument("--save-vars")
     parser.add_argument("server", nargs="*")
     args = parser.parse_args()
+    saved = json.load(open(args.vars)) if args.vars else {}
+    bad = invalid_names(saved)
+    if bad:
+        sys.exit("FAIL invalid --vars key(s) %s: must match [A-Za-z_][A-Za-z0-9_]*; nothing sent" % json.dumps(bad))
     client = Stdio(args.server, args.stderr) if args.stdio else Http(args.url, os.environ[args.token_env])
     client.rpc({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
         "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp_call", "version": "0"}}})
     client.rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, want_reply=False)
-    saved = json.load(open(args.vars)) if args.vars else {}
     failures = 0
     try:
         failures = run_calls(client, json.load(open(args.calls)), saved, args.keep_going)
