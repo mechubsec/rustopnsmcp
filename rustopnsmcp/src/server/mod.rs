@@ -1572,9 +1572,16 @@ mod tests {
                 .unwrap_or_default()
         };
         let status = description_of("get_opnsense_system_status");
-        for promise in ["uptime, CPU", "product version", " load.", " load,"] {
+        for promise in ["uptime, CPU", "product version"] {
             assert!(!status.contains(promise), "status promises {promise}");
         }
+        // `load` as a whole word, in any case: "load average" and "load and CPU" must fail too.
+        assert!(
+            !status
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word.eq_ignore_ascii_case("load")),
+            "status promises load: {status}"
+        );
         assert!(status.contains("health summary"), "{status}");
         let facts = description_of("gather_device_facts");
         assert!(!facts.contains("CPU"), "facts still promise CPU");
