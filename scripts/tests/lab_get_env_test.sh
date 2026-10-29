@@ -28,3 +28,13 @@ cat "$work/seen"
 [ "$(cat "$work/seen")" = "stdin ok" ]
 [ "$(printf '%s\n' "$out" | tail -1)" = '{"a": "int"}' ]
 echo "lab-get env isolation: PASS"
+# A malformed env file must fail closed: non-zero, nothing on stdout, and no credential fragment on stderr.
+printf 'OPNSENSE_URL=https://192.0.2.1\nOPNSENSE_API_KEY=CANARY-BAD )(\n' > "$work/bad_env"
+set +e
+PATH="$work/bin:$PATH" LAB_ENV_FILE="$work/bad_env" LAB_CA_FILE=/dev/null bash "$script" shape /api/x >"$work/bad_out" 2>"$work/bad_err"
+status=$?
+set -e
+[ "$status" -ne 0 ]
+[ ! -s "$work/bad_out" ]
+if grep -q CANARY "$work/bad_out" "$work/bad_err"; then echo "canary leaked" >&2; exit 1; fi
+echo "lab-get malformed env: PASS"

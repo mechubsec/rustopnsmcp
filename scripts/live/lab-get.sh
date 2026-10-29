@@ -11,12 +11,14 @@ case "$path" in /api/*) ;; *) echo "path must start with /api/" >&2; exit 2 ;; e
 # The credentials are sourced only inside the left side of the pipe below, and printf is a builtin, so no
 # child process (curl included) ever inherits them. Even if the env file itself uses `export`, that stays
 # inside the subshell. The URL is not secret, so it is read in its own subshell first.
-# shellcheck source=/dev/null
-url=$(. "$LAB_ENV_FILE"; printf '%s' "$OPNSENSE_URL")
+# The sourcing subshells' stderr is discarded: a syntax error would print a fragment of a credential line.
+fail_env() { echo "lab-get: cannot read the env file" >&2; exit 1; }
+# shellcheck disable=SC1090,SC1091
+url=$( ( . "$LAB_ENV_FILE" && printf '%s' "$OPNSENSE_URL" ) 2>/dev/null ) || fail_env
 host=$(printf '%s' "$url" | sed -E 's#^https?://##; s#[:/].*$##')
 body=$(mktemp); trap 'rm -f "$body"' EXIT; umask 077
-# shellcheck source=/dev/null
-code=$( { . "$LAB_ENV_FILE"; printf 'user = "%s:%s"\n' "$OPNSENSE_API_KEY" "$OPNSENSE_API_SECRET"; } \
+# shellcheck disable=SC1090,SC1091
+code=$( { . "$LAB_ENV_FILE" && printf 'user = "%s:%s"\n' "$OPNSENSE_API_KEY" "$OPNSENSE_API_SECRET"; } 2>/dev/null \
   | curl -s -X GET -o "$body" -w '%{http_code}' -K - --cacert "$LAB_CA_FILE" \
       --resolve "opnsense-lab:443:$host" "https://opnsense-lab$path")
 if [ "$mode" = raw ]; then install -m 600 "$body" "${out:?out-file}"; echo "HTTP $code -> raw saved"; exit 0; fi
