@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 rustopnsmcp-core.workspace = true
 mecmcp-audit.workspace = true
+mecmcp-secret.workspace = true
 mecmcp-auth.workspace = true
 mecmcp-changeset.workspace = true
 mecmcp-redact.workspace = true

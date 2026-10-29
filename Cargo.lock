@@ -2282,6 +2282,7 @@ dependencies = [
  "mecmcp-changeset",
  "mecmcp-redact",
  "mecmcp-runtime",
+ "mecmcp-secret",
  "mecmcp-server",
  "mecmcp-transport",
  "rcgen",

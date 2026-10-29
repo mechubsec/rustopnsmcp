@@ -41,15 +41,18 @@ pub fn refuse_unwired_flags(was_supplied: &dyn Fn(&str) -> bool) -> Result<(), S
 
 /// Create `path` holding 32 random bytes when nothing exists there.
 ///
-/// An existing file, including a symlink, is left alone: the hardened reader
-/// in `mecmcp-audit` refuses a bad one, and rotating a good one would break
-/// verification of every record already written under it. Linux only, as are
-/// all mechub MCP servers, so there is no fallback entropy source.
+/// An existing file is never rewritten, since rotating a good key would break
+/// verification of every record already written under it. It is checked with
+/// `mecmcp_secret::read_hardened_file` (no symlink, regular file, owner-only
+/// mode, owned by the effective uid) and refused if it fails, because the
+/// audit reader accepts any non-empty file. Linux only, as are all mechub MCP
+/// servers, so there is no fallback entropy source.
 ///
 /// # Errors
 ///
-/// Returns a message naming the file when it cannot be created or the
-/// entropy source cannot be read. A half-written key is removed.
+/// Returns a message naming the file when it cannot be created, an existing
+/// file is unsafe, or the entropy source cannot be read. A half-written key
+/// is removed.
 pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
     use std::io::{Read as _, Write as _};
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -61,7 +64,17 @@ pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
         .open(path)
     {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return mecmcp_secret::read_hardened_file(path, mecmcp_secret::FileLimits::default())
+                .map(drop)
+                .map_err(|error| {
+                    format!(
+                        "--audit-hmac-key-file {}: existing key is unsafe: {error}. Make it a \
+                         regular file with `chmod 600` owned by the service user (`chown`)",
+                        path.display()
+                    )
+                });
+        }
         Err(error) => {
             return Err(format!(
                 "--audit-hmac-key-file {}: cannot create the key: {error}. The LXC installer \
@@ -277,6 +290,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit-hmac.key");
         std::fs::write(&path, b"installer-made-key-0123456789abcdef").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         ensure_audit_hmac_key(&path).unwrap();
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -285,13 +299,24 @@ mod tests {
     }
 
     #[test]
-    fn a_symlink_is_left_for_the_hardened_reader_to_refuse() {
+    fn a_symlinked_key_is_refused_and_not_created_through() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("elsewhere");
         let link = dir.path().join("audit-hmac.key");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        ensure_audit_hmac_key(&link).unwrap();
+        let message = ensure_audit_hmac_key(&link).unwrap_err();
+        assert!(message.contains("chmod 600"), "{message}");
         assert!(!target.exists(), "must not create through a symlink");
+    }
+
+    #[test]
+    fn a_world_readable_existing_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        std::fs::write(&path, [7u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let message = ensure_audit_hmac_key(&path).unwrap_err();
+        assert!(message.contains("chmod 600"), "{message}");
     }
 
     #[test]
