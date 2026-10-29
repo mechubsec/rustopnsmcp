@@ -49,8 +49,27 @@ has been released yet, so everything is under Unreleased.
 - Startup refusals converge on the shared validator's exit helper.
 - `BUILD-INFO` keeps `git_commit` a bare SHA and records a dirty tree in
   `git_dirty`.
-- The README carries an under-construction notice and an affiliation
-  disclaimer.
+- The README carries an affiliation disclaimer and states what has been
+  verified live and the limits.
+- `list_opnsense_dhcp_leases` reads the enabled backend (Dnsmasq or Kea; ISC is
+  gone on 26.7) and names it in `backend`. With both enabled, `backend` is
+  `"dnsmasq+kea"`, each backend's page sits under its own key, and each gets half
+  the `max_bytes` budget.
+- `gather_device_facts` takes uptime and load from the system time and the
+  product name from firmware status, and no longer returns `cpu_type` (26.7 has
+  no source for it).
+- `get_opnsense_system_status` is described as what 26.7 returns: an overall
+  status code, a message and subsystem notices. Version and uptime come from
+  `gather_device_facts`.
+
+### Fixed
+
+- The configuration fingerprint and the update/delete pre-image check ignore pf
+  counters, so live traffic no longer reads as drift.
+- An alias lookup that 26.7 answers with the default template is treated as not
+  found, so a delete is verified instead of reported `applied_unverified`.
+- The filter apply accepts configd's `OK` output instead of rolling the change
+  back.
 
 ### Security
 
@@ -62,3 +81,7 @@ has been released yet, so everything is under Unreleased.
   attributes, rather than accepted and ignored.
 - `add_device` credential handling and concurrent-write safety hardened.
 - Release images and tarballs are signed keyless with cosign.
+- Rolling back an alias delete re-creates the alias. Before, the default-template
+  answer read as "still there", so the rollback skipped it and reported success
+  while the alias stayed deleted. A pre-image of a missing alias is now refused
+  as not found.

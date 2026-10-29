@@ -44,7 +44,7 @@ Limits, stated plainly:
 - `confirm_timeout_mins` is refused until filter-rule commit-confirm lands.
 - Automatic and legacy filter rules can be listed but not changed.
 - NAT port forwards are not listed yet (deferred to P4/P5.2).
-- Not yet released or packaged.
+- Not yet released.
 
 ### Tools
 
