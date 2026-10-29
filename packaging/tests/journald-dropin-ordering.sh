@@ -21,9 +21,12 @@ if grep -qi '^Seal=yes' "$dir/20-audit-retention.conf"; then fail "Seal=yes cann
 # An existing fleet file is left exactly as it is, and nothing unnumbered appears.
 mkdir -p "$scratch/site/etc/systemd/journald.conf.d"
 printf '[Journal]\nSystemMaxUse=128M\n' >"$scratch/site/etc/systemd/journald.conf.d/20-audit-retention.conf"
+cp "$scratch/site/etc/systemd/journald.conf.d/20-audit-retention.conf" "$scratch/original.conf"
 OPNSMCP_INSTALL_TEST_ROOT="$scratch/site" "$pkg/packaging/lxc/install.sh" >/dev/null
 grep -qx 'SystemMaxUse=128M' "$scratch/site/etc/systemd/journald.conf.d/20-audit-retention.conf" \
     || fail "existing 20-audit-retention.conf was overwritten"
+cmp -s "$scratch/original.conf" "$scratch/site/etc/systemd/journald.conf.d/20-audit-retention.conf" \
+    || fail "existing 20-audit-retention.conf was modified"
 unnumbered=$(find "$scratch/site/etc/systemd/journald.conf.d" -type f ! -name '[0-9][0-9]-*' | head -n 1)
 [[ -z "$unnumbered" ]] || fail "installer created an unnumbered drop-in: $unnumbered"
 echo "journald-dropin-ordering: ok"
