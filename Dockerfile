@@ -39,6 +39,11 @@ COPY rustopnsmcp-core/ rustopnsmcp-core/
 RUN touch rustopnsmcp/src/main.rs rustopnsmcp-core/src/lib.rs && \
     cargo build --release --locked
 
+# Directories the nonroot runtime must own. Distroless has no shell to create
+# them, and a named volume mounted over a missing path would be root-owned and
+# unwritable by uid 65532.
+RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp
+
 # Runtime stage: distroless Debian 13 with nonroot user. Pinned to the
 # multi-arch image index digest (same digest rustunifimcp pins for `nonroot`).
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
@@ -50,20 +55,31 @@ USER 65532:65532
 # process via the container runtime.
 
 COPY --from=builder /build/target/release/rustopnsmcp /usr/local/bin/rustopnsmcp
+COPY --from=builder --chown=65532:65532 /image/etc/rustopnsmcp /etc/rustopnsmcp
+COPY --from=builder --chown=65532:65532 /image/var/lib/rustopnsmcp /var/lib/rustopnsmcp
+
+VOLUME ["/etc/rustopnsmcp", "/var/lib/rustopnsmcp"]
 
 LABEL org.opencontainers.image.title="rustopnsmcp"
 LABEL org.opencontainers.image.description="OPNsense MCP server"
 LABEL org.opencontainers.image.source="https://github.com/mechubsec/rustopnsmcp"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# ENTRYPOINT carries what must always hold: config paths and anything
-# security-relevant. CMD carries only what an operator is expected to
-# replace: bind address, port, and mode flags. Docker replaces CMD when the
-# caller supplies arguments, so security-relevant defaults must stay in
-# ENTRYPOINT.
+# ENTRYPOINT carries what must always hold: config paths, the state file, and
+# the audit baseline. Docker replaces CMD when the caller supplies arguments,
+# so none of these may live there. --audit-journald is absent on purpose:
+# there is no journald socket in a container, and --audit-format json writes
+# to stdout for the runtime to collect. The key lives in the state volume (the
+# only writable mount) and the binary creates it on first start.
 ENTRYPOINT ["/usr/local/bin/rustopnsmcp", \
     "--device-mapping", "/etc/rustopnsmcp/devices.json", \
-    "--tokens-file", "/var/lib/rustopnsmcp/tokens.json"]
+    "--tokens-file", "/var/lib/rustopnsmcp/tokens.json", \
+    "--state-file", "/var/lib/rustopnsmcp/changeset-state.json", \
+    "--inventory-readonly", \
+    "--audit-format", "json", \
+    "--audit-redact", "devices=hmac", \
+    "--audit-hmac-key-file", "/var/lib/rustopnsmcp/audit-hmac.key"]
+# CMD carries only what an operator is expected to replace.
 CMD ["--transport", "streamable-http", \
     "--host", "127.0.0.1", \
     "--port", "30037"]

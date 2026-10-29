@@ -119,10 +119,52 @@ jobs:
           argv=$(docker inspect "$container_id" --format '{{join .Args "\n"}}')
           docker rm "$container_id" > /dev/null
 
-          for p in /etc/rustopnsmcp/devices.json /var/lib/rustopnsmcp/tokens.json; do
+          for p in /etc/rustopnsmcp/devices.json /var/lib/rustopnsmcp/tokens.json \
+                   /var/lib/rustopnsmcp/changeset-state.json /var/lib/rustopnsmcp/audit-hmac.key; do
             echo "$argv" | grep -q -- "$p" || { echo "FAIL: $p missing from argv with --host override"; exit 1; }
           done
-          echo "PASS: config paths survive --host override"
+          for flag in --inventory-readonly --audit-format --audit-redact; do
+            echo "$argv" | grep -qx -- "$flag" || { echo "FAIL: $flag missing from argv with --host override"; exit 1; }
+          done
+          if echo "$argv" | grep -q -- '--audit-journald'; then
+            echo "FAIL: --audit-journald has no socket in a container"; exit 1
+          fi
+          echo "PASS: config and audit flags survive --host override"
+
+      - name: First run in a container creates the audit key and keeps state private
+        run: |
+          set -euo pipefail
+          state=$(mktemp -d); conf=$(mktemp -d)
+          printf '{"version":1,"devices":{}}\n' > "$conf/devices.json"
+          sudo chown -R 65532:65532 "$state" "$conf"
+          sudo chmod 0700 "$state"; sudo chmod 0750 "$conf"; sudo chmod 0600 "$conf/devices.json"
+          # Stdio with stdin closed exits non-zero by design. Capture the code
+          # instead of letting set -e abort, then reject a crash (>= 126:
+          # exec failure or a signal) so the key assertions cannot mask one.
+          exit_code=0
+          docker run --rm -i -v "$conf:/etc/rustopnsmcp:ro" -v "$state:/var/lib/rustopnsmcp" \
+            rustopnsmcp:ci --transport stdio </dev/null || exit_code=$?
+          echo "server exit code with stdin closed: $exit_code"
+          if [ "$exit_code" -eq 0 ] || [ "$exit_code" -ge 126 ]; then
+            echo "FAIL: expected a clean non-zero exit, got $exit_code"; exit 1
+          fi
+          test "$(sudo stat -c '%a %u' "$state/audit-hmac.key")" = "600 65532"
+          test "$(sudo stat -c %s "$state/audit-hmac.key")" = 32
+
+      - name: Image reports its version and runs as the non-root user
+        run: |
+          set -euo pipefail
+          docker run --rm rustopnsmcp:ci --version | grep -q '^rustopnsmcp '
+          test "$(docker inspect rustopnsmcp:ci --format '{{.Config.User}}')" = "65532:65532"
+
+      - name: Docker build context is small
+        run: |
+          set -euo pipefail
+          size=$(docker build --no-cache --progress=plain -f Dockerfile . 2>&1 \
+            | grep -oE 'transferring context: [0-9.]+[kMG]?B' | tail -n 1 | grep -oE '[0-9.]+[kMG]?B')
+          echo "Docker build context: ${size:-unknown}"
+          case "${size:-0B}" in *GB) echo "FAIL: context over 1 GB"; exit 1 ;; esac
+          case "${size:-0B}" in *MB) test "$(printf '%.0f' "${size%MB}")" -le 100 || { echo "FAIL: context over 100 MB"; exit 1; } ;; esac
 
   conformance:
     name: Package conformance
@@ -176,7 +218,7 @@ jobs:
           packaging/tests/installer-idempotence.sh
           packaging/tests/journald-dropin-ordering.sh
 
-      # BUILD-INFO travels inside the tarball. Task 33's dry-run fetches the runner-built tarball with `gh run download`.
+      # BUILD-INFO travels inside the tarball. The release dry-run downloads this runner-built artifact (`gh run download`) to check what a release would publish.
       - name: Upload the package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
