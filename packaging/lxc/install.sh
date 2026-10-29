@@ -190,13 +190,19 @@ cat <<EOF
        runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \\
            --tokens-file /var/lib/rustopnsmcp/tokens.json \\
            --name operator --devices '*' --tools '*'
-     To create, approve and apply change sets, name the write tools AND the reads
-     the workflow needs (create needs the fingerprint). A tool list is exact: no
-     wildcard mixing, so '*' cannot be combined with names:
+     Change sets need TWO principals (two-person control is the default): a
+     proposer, and an approver minted '--actor-type human'. A tool list is
+     exact: no wildcard mixing, so '*' cannot be combined with names:
        runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \\
            --tokens-file /var/lib/rustopnsmcp/tokens.json \\
-           --name changer --devices '*' \\
-           --tools 'get_opnsense_config_fingerprint,get_opnsense_change_set_status,list_opnsense_change_sets,create_opnsense_change_set,approve_opnsense_change_set,apply_opnsense_change_set,confirm_opnsense_change_set,cancel_opnsense_change_set'
+           --name proposer --devices '*' \\
+           --tools 'get_opnsense_config_fingerprint,get_opnsense_change_set_status,list_opnsense_change_sets,create_opnsense_change_set,apply_opnsense_change_set,confirm_opnsense_change_set,cancel_opnsense_change_set'
+       runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \\
+           --tokens-file /var/lib/rustopnsmcp/tokens.json \\
+           --name approver --actor-type human --devices '*' \\
+           --tools 'approve_opnsense_change_set,get_opnsense_change_set_status'
+     A single operator who wants no second principal runs the server with
+     --lab-mode instead (approval is waived at creation).
   4. For a non-loopback bind or TLS, create the drop-in ($package_dir/docs/operations.md):
        cp "$package_dir/packaging/systemd/rustopnsmcp.override.conf.example" \
           /etc/systemd/system/rustopnsmcp.service.d/override.conf   # then edit it

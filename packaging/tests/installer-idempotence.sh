@@ -53,6 +53,11 @@ for read_tool in get_opnsense_config_fingerprint get_opnsense_change_set_status 
     grep -q "$read_tool" "$scratch/first.log" || fail "write-token hint lacks read $read_tool"
     grep -q "\"$read_tool\"" rustopnsmcp-core/src/tools/mod.rs || fail "$read_tool is not a tool name in the source"
 done
+# Two-person control: the approver is a separate human-typed token, and the
+# proposer token must not carry approve.
+grep -q -- '--name approver --actor-type human' "$scratch/first.log" || fail "token hint lacks an --actor-type human approver token"
+grep -q -- '--lab-mode' "$scratch/first.log" || fail "token hint must mention --lab-mode for single operators"
+grep -E -- "--tools '[^']*create_opnsense_change_set" "$scratch/first.log" | grep -q approve_opnsense_change_set && fail "proposer token must not carry approve"
 for write_tool in create approve apply confirm cancel; do
     name=${write_tool}_opnsense_change_set
     grep -q "$name" "$scratch/first.log" || fail "write-token hint lacks $name"
