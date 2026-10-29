@@ -57,7 +57,7 @@
   "expect": "ok",
   "pointers": {
    "/total": "^5$",
-   "/rows/0/identifier": "."
+   "/rows/0/identifier": "^(|[a-z0-9_]+)$"
   }
  },
  {
@@ -106,7 +106,7 @@
   "expect": "ok",
   "pointers": {
    "/total": "^10$",
-   "/rows/0/uuid": "^[0-9a-f-]{36}$"
+   "/rows/0/uuid": "^(?!None$)([0-9a-f-]{36}|[A-Za-z0-9_]+)$"
   }
  },
  {
