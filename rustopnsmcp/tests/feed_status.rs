@@ -215,7 +215,12 @@ async fn reports_subscriptions_with_etag_only_where_it_is_exact() {
     let skipped = status["skipped"].as_array().unwrap();
     assert_eq!(skipped.len(), 1, "{status}");
     assert_eq!(skipped[0]["alias"], "bad/../name");
-    assert!(skipped[0]["reason"].as_str().unwrap().contains("[A-Za-z0-9_]"));
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("[A-Za-z0-9_]")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! `get_opnsense_feed_status` against a recording mock device: every request's
 //! path and body is kept, so the tests can prove what the tool asked for.
 //! Alias rows have the live row shape from `aliases.json`; URL-table values and
