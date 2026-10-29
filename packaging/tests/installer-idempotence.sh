@@ -53,6 +53,7 @@ printf 'SENTINEL-STATE\n'  >"$target/var/lib/rustopnsmcp/changeset-state.json"
 printf 'SENTINEL-KEY\n'    >"$target/etc/rustopnsmcp/audit-hmac.key"
 printf '{"version":1,"devices":{"x":{}}}\n' >"$target/etc/rustopnsmcp/devices.json"
 printf 'SENTINEL-CREDS\n'  >"$target/etc/rustopnsmcp/credentials.env"
+chmod 600 "$target"/var/lib/rustopnsmcp/* "$target"/etc/rustopnsmcp/{audit-hmac.key,devices.json,credentials.env}
 install_into >"$scratch/second.log"
 for pair in "var/lib/rustopnsmcp/tokens.json:SENTINEL-TOKENS" "var/lib/rustopnsmcp/changeset-state.json:SENTINEL-STATE" \
             "etc/rustopnsmcp/audit-hmac.key:SENTINEL-KEY" "etc/rustopnsmcp/credentials.env:SENTINEL-CREDS"; do
@@ -63,8 +64,45 @@ grep -q '"x"' "$target/etc/rustopnsmcp/devices.json" || fail "re-run overwrote d
 # 3. A symlink where a state file belongs is refused, not followed.
 rm "$target/var/lib/rustopnsmcp/tokens.json"; ln -s /etc/passwd "$target/var/lib/rustopnsmcp/tokens.json"
 if install_into >/dev/null 2>"$scratch/symlink.err"; then fail "installer followed a tokens.json symlink"; fi
-grep -q 'not a regular file' "$scratch/symlink.err" || fail "symlink refusal should say so"
+grep -q 'is a symlink' "$scratch/symlink.err" || fail "symlink refusal should say so"
 rm "$target/var/lib/rustopnsmcp/tokens.json"
+mkdir "$target/var/lib/rustopnsmcp/tokens.json"
+if install_into >/dev/null 2>"$scratch/nonreg.err"; then fail "installer accepted a directory as tokens.json"; fi
+grep -q 'not a regular file' "$scratch/nonreg.err" || fail "non-regular refusal should say so"
+rmdir "$target/var/lib/rustopnsmcp/tokens.json"
+printf '{"version":1,"tokens":[]}\n' >"$target/var/lib/rustopnsmcp/tokens.json"; chmod 600 "$target/var/lib/rustopnsmcp/tokens.json"
+
+# 3b. Preflight: a bad destination anywhere refuses before ANY mutation, even
+# the last-provisioned path (credentials.env) or changeset-state.json.
+for victim in etc/rustopnsmcp/credentials.env var/lib/rustopnsmcp/changeset-state.json; do
+    pre=$scratch/pre-$(basename "$victim")
+    mkdir -p "$pre/etc/rustopnsmcp" "$pre/var/lib/rustopnsmcp"
+    chmod 750 "$pre/etc/rustopnsmcp"; chmod 700 "$pre/var/lib/rustopnsmcp"
+    ln -s /etc/passwd "$pre/$victim"
+    before=$(find "$pre" | sort)
+    if OPNSMCP_INSTALL_TEST_ROOT="$pre" "$pkg/packaging/lxc/install.sh" >/dev/null 2>"$scratch/pre.err"; then
+        fail "preflight accepted a symlink at $victim"
+    fi
+    [[ "$(find "$pre" | sort)" == "$before" ]] || fail "refusal at $victim left files behind"
+done
+# An existing file with the wrong mode or owner is refused with the exact fix,
+# and left exactly as it was.
+chmod 644 "$target/var/lib/rustopnsmcp/tokens.json"
+if install_into >/dev/null 2>"$scratch/mode.err"; then fail "installer accepted a 0644 tokens.json"; fi
+grep -q 'chmod 600' "$scratch/mode.err" || fail "wrong-mode refusal should name the fix"
+[[ "$(mode_of /var/lib/rustopnsmcp/tokens.json)" == 644 ]] || fail "installer changed the operator's file"
+chmod 600 "$target/var/lib/rustopnsmcp/tokens.json"
+if OPNSMCP_INSTALL_TEST_EXPECT_OWNER=nobody:nogroup install_into >/dev/null 2>"$scratch/owner.err"; then
+    fail "installer accepted a wrong-owner state file"
+fi
+grep -q 'chown nobody:nogroup' "$scratch/owner.err" || fail "wrong-owner refusal should name the fix"
+# Ownership is set by install at creation. Test mode cannot chown, so assert
+# the script: no chown command at all, and the owner flags are on install.
+if grep -nE '^[[:space:]]*chown[[:space:]]' "$pkg/packaging/lxc/install.sh"; then
+    fail "installer must not chown a path after creating it"
+fi
+grep -qF "owner_args=(-o \"\$svc\" -g \"\$svc\")" "$pkg/packaging/lxc/install.sh" || fail "owner flags missing"
+grep -qF "install \"\${owner_args[@]}\" -m \"\$mode\"" "$pkg/packaging/lxc/install.sh" || fail "provision must create with owner flags"
 
 # 4. A modified installed unit is kept as .bak-*, and the new unit is stock (R11).
 unit=$target/etc/systemd/system/rustopnsmcp.service

@@ -55,6 +55,34 @@ if [[ -z "$test_root" ]]; then
         || die "requires Debian 13 (detected ${ID:-unknown} ${VERSION_ID:-unknown})"
 fi
 
+# --- 3. Preflight: refuse a bad destination before the first mutation ---------
+# Owners are only checkable as root; in test mode the invoking user stands in,
+# and OPNSMCP_INSTALL_TEST_EXPECT_OWNER lets a test exercise the refusal.
+me="$(id -un):$(id -gn)"
+expect_file_owner="$svc:$svc"; expect_etc_owner="root:$svc"
+if [[ -n "$test_root" ]]; then
+    expect_file_owner=${OPNSMCP_INSTALL_TEST_EXPECT_OWNER:-$me}
+    expect_etc_owner=${OPNSMCP_INSTALL_TEST_EXPECT_OWNER:-$me}
+fi
+# A wrong existing file is refused, never silently changed: it is the operator's.
+check_existing() { # <path> <kind: file|dir> <mode> <owner:group>
+    local path=$1 kind=$2 mode=$3 owner=$4 actual
+    [[ -e "$path" || -L "$path" ]] || return 0
+    if [[ -L "$path" ]]; then die "$path is a symlink; refusing"; fi
+    if [[ "$kind" == file && ! -f "$path" ]]; then die "$path is not a regular file; refusing"; fi
+    if [[ "$kind" == dir && ! -d "$path" ]]; then die "$path is not a directory; refusing"; fi
+    actual=$(stat -c '%U:%G %a' -- "$path")
+    [[ "$actual" == "$owner $mode" ]] \
+        || die "$path is $actual, expected $owner $mode; fix with: chown ${owner} $path && chmod $mode $path"
+}
+check_existing "$(dest /etc/rustopnsmcp)" dir 750 "$expect_etc_owner"
+check_existing "$(dest /var/lib/rustopnsmcp)" dir 700 "$expect_file_owner"
+check_existing "$(dest /var/lib/rustopnsmcp/tokens.json)" file 600 "$expect_file_owner"
+check_existing "$(dest /var/lib/rustopnsmcp/changeset-state.json)" file 600 "$expect_file_owner"
+check_existing "$(dest /etc/rustopnsmcp/audit-hmac.key)" file 600 "$expect_file_owner"
+check_existing "$(dest /etc/rustopnsmcp/devices.json)" file 600 "$expect_file_owner"
+check_existing "$(dest /etc/rustopnsmcp/credentials.env)" file 600 "$expect_file_owner"
+
 echo "==> Installing $svc $(build_info version)"
 install -d "$(dest /usr/lib/sysusers.d)" "$(dest /usr/lib/tmpfiles.d)"
 install -m 0644 packaging/systemd/rustopnsmcp.sysusers "$(dest /usr/lib/sysusers.d/rustopnsmcp.conf)"
@@ -68,22 +96,24 @@ else
     mkdir -p "$(dest /etc/rustopnsmcp)" "$(dest /var/lib/rustopnsmcp)"
     chmod 0750 "$(dest /etc/rustopnsmcp)"; chmod 0700 "$(dest /var/lib/rustopnsmcp)"
 fi
-own() { [[ -n "$test_root" ]] || chown "$svc:$svc" "$@"; }
+# Ownership is set by install at creation, never by a later chown: the state
+# directory is service-writable, so a path-based chown could be raced into
+# following a symlink. Only unprivileged test mode cannot set an owner.
+owner_args=(-o "$svc" -g "$svc")
+[[ -z "$test_root" ]] || owner_args=()
 
 install -d "$(dest /usr/local/bin)"
 install -m 0755 bin/rustopnsmcp "$(dest /usr/local/bin/rustopnsmcp)"
 
-# Provision a file only if absent. A symlink (even a dangling one) or a
-# non-regular file where a state or secret file belongs is a refusal, not
-# something to follow. The mode is set at creation, before the content lands.
+# Provision a file only if absent. The preflight already refused a bad
+# existing file; this re-checks the type in case it changed since.
 provision() { # <dest> <mode> <source file>
     local path=$1 mode=$2 source=$3
     if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }; then
         die "$path is not a regular file; refusing"
     fi
     if [[ -e "$path" ]]; then echo "    $path exists; not overwriting"; return 0; fi
-    install -m "$mode" "$source" "$path"
-    own "$path"
+    install "${owner_args[@]}" -m "$mode" "$source" "$path"
 }
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
 
@@ -131,7 +161,7 @@ if [[ -z "$test_root" ]]; then
     systemctl reload-or-restart systemd-journald.service
 fi
 
-cat <<'EOF'
+cat <<EOF
 
 ==> Installation complete. Nothing has been started. Next steps:
   1. Edit /etc/rustopnsmcp/devices.json (see devices.example.json beside it);
@@ -141,8 +171,8 @@ cat <<'EOF'
   3. Mint a token:
        sudo -u rustopnsmcp rustopnsmcp token add --tokens-file /var/lib/rustopnsmcp/tokens.json \
            --name operator --devices '*' --tools '*'
-  4. For a non-loopback bind or TLS, create the drop-in (docs/operations.md):
-       cp packaging/systemd/rustopnsmcp.override.conf.example \
+  4. For a non-loopback bind or TLS, create the drop-in ($package_dir/docs/operations.md):
+       cp "$package_dir/packaging/systemd/rustopnsmcp.override.conf.example" \
           /etc/systemd/system/rustopnsmcp.service.d/override.conf   # then edit it
   5. systemctl start rustopnsmcp && curl -fsS http://127.0.0.1:30037/readyz
   6. systemctl enable rustopnsmcp
