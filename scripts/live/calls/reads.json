@@ -187,11 +187,5 @@
   "show": [
    "fp"
   ]
- },
- {
-  "name": "reload_devices",
-  "tool": "reload_devices",
-  "arguments": {},
-  "expect": "ok"
  }
 ]

@@ -86,10 +86,11 @@
   "tool": "approve_opnsense_change_set",
   "arguments": {
    "device": "opnsense-lab",
-   "change_set_id": "nope",
-   "expected_digest": "sha256:00"
+   "change_set_id": "0000000000000000000000000000000000000000000000000000000000000000",
+   "expected_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   },
-  "expect": "error"
+  "expect": "error",
+  "error_contains": "unknown change set"
  },
  {
   "name": "list change sets",
@@ -111,5 +112,12 @@
   },
   "expect": "error",
   "error_contains": "readonly"
+ },
+ {
+  "name": "reload_devices refused read-only",
+  "tool": "reload_devices",
+  "arguments": {},
+  "expect": "error",
+  "error_contains": "inventory is read-only"
  }
 ]
