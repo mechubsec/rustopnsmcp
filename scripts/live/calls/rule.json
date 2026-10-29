@@ -1,0 +1,21 @@
+[
+ {"name":"fingerprint at baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"create rule","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"rule","body":{"action":"pass","interface":"lan","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"any","destination_net":"192.0.2.0/24","destination_port":"8443","description":"p3_live_rule","enabled":"0"}}]},
+  "expect":"ok","keys":["change_set_id","plan_digest"],"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply create","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"rule is listed","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_rule"},"expect":"ok","pointers":{"/total":"^1$","/coverage":"^complete$","/rows/0/description":"^p3_live_rule$"},"save":{"rule":"/rows/0/uuid"}},
+ {"name":"fingerprint after create","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp2":"/fingerprint"}},
+ {"name":"update rule","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp2","actions":[
+   {"operation":"update","resource":"rule","uuid":"$rule","body":{"description":"p3_live_rule_edited","log":"1"}}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"confirm_timeout_mins refused for a rule","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp2","confirm_timeout_mins":5},"expect":"error"},
+ {"name":"apply update","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp2"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"edit is live","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_rule_edited"},"expect":"ok","pointers":{"/total":"^1$"}},
+ {"name":"fingerprint after update","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp3":"/fingerprint"}},
+ {"name":"inverse: delete rule","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp3","actions":[
+   {"operation":"delete","resource":"rule","uuid":"$rule"}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply delete","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp3"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"fingerprint at end, back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]

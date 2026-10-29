@@ -50,6 +50,12 @@ impl ResourceKind {
     }
 }
 
+/// Whether `live` is the configuration `recorded` captured, ignoring live counters.
+#[must_use]
+pub fn same_configuration(recorded: &Value, live: &Value) -> bool {
+    super::fingerprint::canonical(recorded) == super::fingerprint::canonical(live)
+}
+
 /// A snapshot of the resources a change set will touch, captured before
 /// staging writes anything.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -221,8 +227,22 @@ impl StagedMutation {
 
 #[cfg(test)]
 mod tests {
-    use super::{Preimage, ResourceKind, StagedMutation};
+    use super::{Preimage, ResourceKind, StagedMutation, same_configuration};
     use serde_json::json;
+
+    #[test]
+    fn a_live_counter_tick_is_not_drift_but_a_content_change_is() {
+        let recorded = json!({ "uuid": "u", "name": "a", "content": { "192.0.2.1": { "value": "192.0.2.1", "selected": 1 } }, "eval_nomatch": "3" });
+        let mut ticked = recorded.clone();
+        ticked["eval_nomatch"] = json!("9");
+        assert!(same_configuration(&recorded, &ticked));
+        let mut edited = recorded.clone();
+        edited["name"] = json!("b");
+        assert!(!same_configuration(&recorded, &edited));
+        let mut toggled = recorded.clone();
+        toggled["enabled"] = json!("0");
+        assert!(!same_configuration(&recorded, &toggled));
+    }
 
     /// A mutation addressing a UUID the pre-image never captured must not be
     /// treated as covered — that is the only thing standing between a partial

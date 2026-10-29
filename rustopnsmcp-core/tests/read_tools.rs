@@ -98,8 +98,13 @@ fn serve_fixtures(
                 let response = match routes.get(&path) {
                     Some(fixture) => {
                         let body = fixture.to_string();
+                        // A fixture of {"__status": N} makes the mock answer with that status.
+                        let status = fixture
+                            .get("__status")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(200);
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
                             body
                         )
@@ -348,7 +353,31 @@ fn no_filter() -> ListArgs {
 async fn system_status_reads_the_fixture() {
     let client = client_against(default_routes()).await;
     let status = read::system_status(&client).await.expect("system status");
-    assert_eq!(status["product_version"], "24.7");
+    assert_eq!(status["metadata"]["system"]["status"], 2);
+}
+
+/// The rewiring behind `gather_device_facts`: the three 26.7 shapes in, a fact
+/// sheet with uptime, load and product name out, and no `cpu_type`.
+#[tokio::test]
+async fn device_facts_come_from_system_time_and_firmware_status() {
+    use rustopnsmcp_core::endpoints as ep;
+    let mut routes = default_routes();
+    routes.insert(
+        ep::SYSTEM_TIME.to_owned(),
+        serde_json::json!({ "uptime": "3 days, 04:12", "loadavg": "0.12, 0.09, 0.05",
+            "datetime": "x", "boottime": "x", "config": "x" }),
+    );
+    routes.insert(
+        ep::FIRMWARE_STATUS.to_owned(),
+        serde_json::json!({ "status": "none", "product": { "product_name": "OPNsense",
+            "product_version": "26.7.5", "product_latest": "26.7.5", "product_series": "26.7" } }),
+    );
+    let client = client_against(routes).await;
+    let facts = read::device_facts(&client, "fw-1").await.expect("facts");
+    assert_eq!(facts["product_name"], "OPNsense");
+    assert_eq!(facts["uptime"], "3 days, 04:12");
+    assert_eq!(facts["load_average"], "0.12, 0.09, 0.05");
+    assert!(facts.get("cpu_type").is_none());
 }
 
 #[tokio::test]
@@ -357,7 +386,8 @@ async fn firmware_status_reads_the_fixture() {
     let status = read::firmware_status(&client)
         .await
         .expect("firmware status");
-    assert_eq!(status["status"], "ok");
+    assert_eq!(status["status"], "none");
+    assert_eq!(status["product"]["product_version"], "26.7.5");
 }
 
 #[tokio::test]
@@ -366,9 +396,11 @@ async fn list_interfaces_pages_the_overview_by_identifier() {
     let interfaces = read::list_interfaces(&client, &no_filter())
         .await
         .expect("list interfaces");
-    assert_eq!(interfaces["total"], 2);
-    assert_eq!(interfaces["rows"][0]["identifier"], "lan");
-    assert_eq!(interfaces["rows"][1]["identifier"], "wan");
+    assert_eq!(interfaces["total"], 5);
+    // Sorted by identifier; enc0 and pflog0 carry none, so they sort first.
+    assert_eq!(interfaces["rows"][0]["identifier"], "");
+    assert_eq!(interfaces["rows"][2]["identifier"], "lan");
+    assert_eq!(interfaces["rows"][4]["identifier"], "wan");
     assert_eq!(interfaces["next_offset"], serde_json::Value::Null);
 }
 
@@ -378,7 +410,7 @@ async fn list_gateways_pages_the_status_items() {
     let gateways = read::list_gateways(&client, &no_filter())
         .await
         .expect("list gateways");
-    assert_eq!(gateways["rows"][0]["name"], "WAN_DHCP");
+    assert_eq!(gateways["rows"][0]["name"], "WAN_DHCP6");
     assert_eq!(gateways["offset"], 0);
 }
 
@@ -398,11 +430,11 @@ async fn list_firewall_rules_parses_the_search_envelope() {
     let rules = read::list_firewall_rules(&client, &no_filter())
         .await
         .expect("list firewall rules");
-    assert_eq!(rules["total"], 2);
-    assert_eq!(rules["rows"].as_array().expect("rows array").len(), 2);
-    // The firmware fixture reports 24.7, which predates legacy-rule merging.
-    assert_eq!(rules["coverage"], "mvc_only");
-    assert_eq!(rules["product_version"], "24.7");
+    assert_eq!(rules["total"], 8);
+    assert_eq!(rules["rows"].as_array().expect("rows array").len(), 8);
+    // The firmware fixture reports 26.7.5, which merges legacy rules.
+    assert_eq!(rules["coverage"], "complete");
+    assert_eq!(rules["product_version"], "26.7.5");
 }
 
 #[tokio::test]
@@ -411,7 +443,7 @@ async fn list_aliases_parses_the_search_envelope() {
     let aliases = read::list_aliases(&client, &no_filter())
         .await
         .expect("list aliases");
-    assert_eq!(aliases["rows"][0]["name"], "rfc1918");
+    assert_eq!(aliases["rows"][0]["name"], "bogons");
 }
 
 #[tokio::test]
@@ -429,7 +461,185 @@ async fn list_dhcp_leases_parses_the_search_envelope() {
     let leases = read::list_dhcp_leases(&client, &no_filter())
         .await
         .expect("list dhcp leases");
-    assert_eq!(leases["rows"][0]["hostname"], "example-host");
+    assert_eq!(leases["rows"][0]["hostname"], "host-1");
+}
+
+/// Routes for a device; `None` leaves that backend's settings endpoint absent (404).
+/// ISC is served only when `isc` is true.
+fn dhcp_routes(
+    dnsmasq_enabled: Option<&str>,
+    kea_enabled: Option<&str>,
+    isc: bool,
+) -> HashMap<String, serde_json::Value> {
+    use rustopnsmcp_core::endpoints as ep;
+    let mut routes = default_routes();
+    routes.remove(ep::DHCP_LEASES_SEARCH);
+    if isc {
+        routes.insert(
+            ep::DHCP_LEASES_SEARCH.to_owned(),
+            rustopnsmcp_core::testing::fixture("dhcp_leases"),
+        );
+    }
+    if let Some(enabled) = dnsmasq_enabled {
+        routes.insert(
+            ep::DNSMASQ_SETTINGS_GET.to_owned(),
+            serde_json::json!({ "dnsmasq": { "enable": enabled } }),
+        );
+    }
+    if let Some(enabled) = kea_enabled {
+        routes.insert(
+            ep::KEA_DHCPV4_GET.to_owned(),
+            serde_json::json!({ "dhcpv4": { "general": { "enabled": enabled } } }),
+        );
+    }
+    routes.insert(
+        ep::DNSMASQ_LEASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [{ "address": "192.0.2.50" }], "rowCount": 1, "total": 1, "current": 1 }),
+    );
+    routes.insert(
+        ep::KEA_LEASES4_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "total": 0, "current": 1,
+                            "stats": { "active": 0, "inactive": 0, "total": 0 } }),
+    );
+    routes
+}
+
+async fn dhcp_backend_for(
+    dnsmasq: Option<&str>,
+    kea: Option<&str>,
+    isc: bool,
+) -> Result<serde_json::Value, rustopnsmcp_core::error::OpnsenseError> {
+    let client = client_against(dhcp_routes(dnsmasq, kea, isc)).await;
+    read::list_dhcp_leases(&client, &no_filter()).await
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_dnsmasq_when_it_is_the_enabled_backend() {
+    let leases = dhcp_backend_for(Some("1"), Some("0"), false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq");
+    assert_eq!(leases["rows"][0]["address"], "192.0.2.50");
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_dnsmasq_when_kea_is_not_installed() {
+    let leases = dhcp_backend_for(Some("1"), None, false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq");
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_kea_when_it_is_the_enabled_backend() {
+    let leases = dhcp_backend_for(Some("0"), Some("1"), false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "kea");
+    let leases = dhcp_backend_for(None, Some("1"), false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "kea");
+}
+
+#[tokio::test]
+async fn two_enabled_dhcp_backends_both_return_their_pages() {
+    let leases = dhcp_backend_for(Some("1"), Some("1"), true)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq+kea");
+    assert_eq!(leases["dnsmasq"]["rows"][0]["address"], "192.0.2.50");
+    assert_eq!(leases["kea"]["rows"].as_array().expect("kea rows").len(), 0);
+    assert_eq!(leases["dnsmasq"]["total"], 1);
+}
+
+#[tokio::test]
+async fn two_enabled_dhcp_backends_share_the_max_bytes_budget() {
+    use rustopnsmcp_core::endpoints as ep;
+    const BUDGET: usize = 1024;
+    // Each backend's 6 rows (about 700 bytes) fit the budget alone; together they do not.
+    let rows: Vec<_> = (0..6)
+        .map(|index| serde_json::json!({ "address": format!("192.0.2.{index}"), "pad": "x".repeat(90) }))
+        .collect();
+    let envelope = serde_json::json!({ "rows": rows, "rowCount": 6, "total": 6, "current": 1 });
+    let mut routes = dhcp_routes(Some("1"), Some("1"), false);
+    routes.insert(ep::DNSMASQ_LEASES_SEARCH.to_owned(), envelope.clone());
+    routes.insert(ep::KEA_LEASES4_SEARCH.to_owned(), envelope);
+    let client = client_against(routes).await;
+    let args = ListArgs {
+        max_bytes: Some(BUDGET),
+        ..no_filter()
+    };
+    let leases = read::list_dhcp_leases(&client, &args)
+        .await
+        .expect("leases");
+
+    let mut combined = 0;
+    for backend in ["dnsmasq", "kea"] {
+        let page = &leases[backend];
+        assert_eq!(page["truncated_to_fit_max_bytes"], true, "{backend}");
+        let bytes = serde_json::to_vec(&page["rows"])
+            .expect("rows serialize")
+            .len();
+        assert!(bytes <= BUDGET / 2, "{backend} rows are {bytes} bytes");
+        combined += bytes;
+    }
+    assert!(combined <= BUDGET, "combined rows are {combined} bytes");
+}
+
+#[tokio::test]
+async fn a_failing_settings_probe_is_an_error_not_a_fallthrough_to_isc() {
+    use rustopnsmcp_core::endpoints as ep;
+    for status in [401, 500] {
+        for path in [ep::DNSMASQ_SETTINGS_GET, ep::KEA_DHCPV4_GET] {
+            let mut routes = dhcp_routes(None, None, true);
+            routes.insert(path.to_owned(), serde_json::json!({ "__status": status }));
+            let client = client_against(routes).await;
+            let error = read::list_dhcp_leases(&client, &no_filter())
+                .await
+                .expect_err("probe failure must surface");
+            assert!(
+                error.to_string().contains(&status.to_string()),
+                "{path} {error}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn neither_backend_enabled_falls_back_to_isc_when_it_answers() {
+    for (dnsmasq, kea) in [
+        (None, None),
+        (Some("0"), None),
+        (None, Some("0")),
+        (Some("0"), Some("0")),
+    ] {
+        let leases = dhcp_backend_for(dnsmasq, kea, true).await.expect("leases");
+        assert_eq!(leases["backend"], "isc", "{dnsmasq:?} {kea:?}");
+        assert_eq!(leases["rows"][0]["hostname"], "host-1");
+    }
+}
+
+#[tokio::test]
+async fn neither_backend_enabled_and_no_isc_says_no_supported_backend_is_enabled() {
+    for (dnsmasq, kea) in [
+        (None, None),
+        (Some("0"), None),
+        (None, Some("0")),
+        (Some("0"), Some("0")),
+    ] {
+        let error = dhcp_backend_for(dnsmasq, kea, false)
+            .await
+            .expect_err("no backend");
+        let message = error.to_string();
+        assert!(
+            message.contains("no supported DHCP backend is enabled"),
+            "{message}"
+        );
+        for name in ["Dnsmasq", "Kea", "ISC"] {
+            assert!(message.contains(name), "{message}");
+        }
+    }
 }
 
 /// NAT has no combined endpoint on OPNsense, so this tool fetches both the
@@ -591,5 +801,42 @@ async fn a_listing_with_no_total_is_refused_rather_than_fingerprinted() {
     assert!(
         error.to_string().contains("did not report a total"),
         "{error}"
+    );
+}
+
+/// A live pf counter ticking between staging and apply is not drift, but a
+/// configuration change still is.
+#[tokio::test]
+async fn preimage_matches_ignores_live_counters_but_not_configuration() {
+    use rustopnsmcp_core::changeset::{ControllerOps, Preimage, ResourceKind, StagedMutation};
+    let recorded = serde_json::json!({ "uuid": "11111111-1111-4111-8111-111111111111", "name": "a", "enabled": "1", "eval_nomatch": "3" });
+    let preimage = Preimage::from_resources(vec![recorded]);
+    let mutations = [StagedMutation::Delete {
+        kind: ResourceKind::Alias,
+        uuid: "11111111-1111-4111-8111-111111111111".to_owned(),
+    }];
+    let live_with = |enabled: &str, eval_nomatch: &str| {
+        let mut routes = default_routes();
+        routes.insert(
+            rustopnsmcp_core::endpoints::aliases_get_item("11111111-1111-4111-8111-111111111111"),
+            serde_json::json!({ "alias": { "name": "a", "enabled": enabled, "eval_nomatch": eval_nomatch } }),
+        );
+        routes
+    };
+
+    let ticked = client_against(live_with("1", "9")).await;
+    assert!(
+        ticked
+            .preimage_matches(&preimage, &mutations)
+            .await
+            .expect("preimage_matches")
+    );
+
+    let edited = client_against(live_with("0", "3")).await;
+    assert!(
+        !edited
+            .preimage_matches(&preimage, &mutations)
+            .await
+            .expect("preimage_matches")
     );
 }

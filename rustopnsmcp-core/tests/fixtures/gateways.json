@@ -1,11 +1,25 @@
 {
   "items": [
     {
+      "address": "2001:db8::deea:adcd",
+      "delay": "~",
+      "loss": "~",
+      "monitor": "~",
+      "name": "WAN_DHCP6",
+      "status": "none",
+      "status_translated": "Online",
+      "stddev": "~"
+    },
+    {
+      "address": "192.0.2.139",
+      "delay": "~",
+      "loss": "~",
+      "monitor": "~",
       "name": "WAN_DHCP",
-      "address": "203.0.113.1",
-      "status": "online",
-      "delay": "2.1 ms",
-      "loss": "0.0%"
+      "status": "none",
+      "status_translated": "Online",
+      "stddev": "~"
     }
-  ]
+  ],
+  "status": "ok"
 }

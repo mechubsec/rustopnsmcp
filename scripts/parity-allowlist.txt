@@ -75,3 +75,34 @@ unit-path|only-junos|--device-lease-dir /var/lib/SVC/device-leases|P6|device lea
 unit-path|only-opns|--state-file /var/lib/SVC/changeset-state.json|never|spec §3.2 and FILESYSTEM-LAYOUT put change-set state in /var/lib; rustjunosmcp's stock unit passes no --state-file
 unit-path|only-opns|--audit-hmac-key-file /etc/SVC/audit-hmac.key|never|FILESYSTEM-LAYOUT puts the key in /etc/<svc>; counterpart of the only-junos entry for /var/lib/SVC/audit-hmac.key
 unit-path|only-junos|--audit-hmac-key-file /var/lib/SVC/audit-hmac.key|never|rustjunosmcp keeps the key in /var/lib; spec §3.2 and FILESYSTEM-LAYOUT put it in /etc/<svc>
+
+# --- P3 live-verification and fixture tooling ---
+file|only-opns|scripts/live/build-trixie.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/alias.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/partial.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/reads.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/refusals.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/rule.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/rule-legacy.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/smoke.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/two-person-approver.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/two-person-owner-apply.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/two-person-owner-create.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/calls/two-person-owner-finish.json|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/emit-credential.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/lab-get.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/make-devices-json.py|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/mcp_call.py|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/rig-ctl.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/rig-install.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/rig-lib.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/rig-override.conf.in|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/live/rig-token.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/sanitize_fixture.py|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/sanitize-fixture.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/tests/emit_credential_env_test.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/tests/lab_get_env_test.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/tests/mcp_call_smoke.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/tests/rig_ctl_evidence_test.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/tests/rig_install_test.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
+file|only-opns|scripts/tests/sanitize-fixture.test.sh|never|rustopnsmcp live-verification and fixture tooling (P3, mecmcp#425); not a parity surface
