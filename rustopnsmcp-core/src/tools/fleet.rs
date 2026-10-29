@@ -62,23 +62,22 @@ impl AddDeviceArgs {
     }
 }
 
-/// The fact sheet for one device, from its system and firmware status.
+/// The fact sheet for one device, from its system time and firmware status.
 ///
 /// A fact the device did not report is `null`, never a guess.
 #[must_use]
-pub fn facts_from(device: &str, system: &Value, firmware: &Value) -> Value {
+pub fn facts_from(device: &str, time: &Value, firmware: &Value) -> Value {
     let fact =
         |source: &Value, pointer: &str| source.pointer(pointer).cloned().unwrap_or(Value::Null);
     serde_json::json!({
         "device": device,
-        "product_name": fact(system, "/product_name"),
+        "product_name": fact(firmware, "/product/product_name"),
         "product_version": fact(firmware, "/product/product_version"),
         "product_latest": fact(firmware, "/product/product_latest"),
         "product_series": fact(firmware, "/product/product_series"),
         "upgrade_needs_reboot": fact(firmware, "/upgrade_needs_reboot"),
-        "uptime": fact(system, "/device_uptime"),
-        "cpu_type": fact(system, "/cpu_type"),
-        "load_average": fact(system, "/load_average"),
+        "uptime": fact(time, "/uptime"),
+        "load_average": fact(time, "/loadavg"),
     })
 }
 
@@ -86,27 +85,32 @@ pub fn facts_from(device: &str, system: &Value, firmware: &Value) -> Value {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::testing::fixture;
 
     #[test]
-    fn facts_combine_system_and_firmware_status() {
-        let facts = facts_from(
-            "fw-1",
-            &fixture("system_status"),
-            &fixture("firmware_status"),
-        );
+    fn facts_read_the_shapes_26_7_reports() {
+        let time = serde_json::json!({ "uptime": "3 days, 04:12", "loadavg": "0.12, 0.09, 0.05", "datetime": "x", "boottime": "x", "config": "x" });
+        let firmware = serde_json::json!({ "status": "none", "product": {
+            "product_name": "OPNsense", "product_version": "26.7.5", "product_latest": "26.7.5", "product_series": "26.7" } });
+        let facts = facts_from("fw-1", &time, &firmware);
         assert_eq!(facts["device"], "fw-1");
         assert_eq!(facts["product_name"], "OPNsense");
-        assert_eq!(facts["product_version"], "24.7");
-        assert_eq!(facts["product_latest"], "24.7");
+        assert_eq!(facts["product_version"], "26.7.5");
+        assert_eq!(facts["product_latest"], "26.7.5");
+        assert_eq!(facts["product_series"], "26.7");
         assert_eq!(facts["uptime"], "3 days, 04:12");
+        assert_eq!(facts["load_average"], "0.12, 0.09, 0.05");
+        assert!(
+            facts["upgrade_needs_reboot"].is_null(),
+            "26.7.5 does not report it"
+        );
+        assert!(facts.get("cpu_type").is_none());
     }
 
     #[test]
     fn a_missing_fact_is_null_not_invented() {
         let facts = facts_from("fw-1", &serde_json::json!({}), &serde_json::json!({}));
         assert!(facts["product_version"].is_null());
-        assert!(facts["cpu_type"].is_null());
+        assert!(facts["uptime"].is_null());
     }
 
     #[test]

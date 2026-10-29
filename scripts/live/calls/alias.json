@@ -1,0 +1,28 @@
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"create a set to cancel","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"alias","body":{"name":"p3_live_cancelled","type":"host","content":"192.0.2.99"}}]},
+  "expect":"ok","keys":["change_set_id","plan_digest"],"save":{"cs_cancelled":"/change_set_id"}},
+ {"name":"cancel before any apply","tool":"cancel_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs_cancelled"},"expect":"ok","pointers":{"/state":"^cancelled$"}},
+ {"name":"cancelled set is recorded","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs_cancelled"},"expect":"ok","pointers":{"/state":"^cancelled$"}},
+ {"name":"create alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"alias","body":{"name":"p3_live_hosts","type":"host","content":"192.0.2.10\n192.0.2.11","description":"P3 live verification"}}]},
+  "expect":"ok","keys":["change_set_id","plan_digest"],"pointers":{"/approval_waiver":"^lab-mode$"},"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"approve after the waiver","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"error"},
+ {"name":"confirm_timeout_mins refused","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp","confirm_timeout_mins":5},"expect":"error"},
+ {"name":"refusal left it unclaimed","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs"},"expect":"ok","pointers":{"/state":"^approved$"}},
+ {"name":"apply","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$","/never_attempted":"^0$"}},
+ {"name":"alias is live","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_hosts"},"expect":"ok","pointers":{"/total":"^1$","/rows/0/name":"^p3_live_hosts$"},"save":{"alias":"/rows/0/uuid"}},
+ {"name":"fingerprint after create","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp2":"/fingerprint"}},
+ {"name":"update alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp2","actions":[
+   {"operation":"update","resource":"alias","uuid":"$alias","body":{"content":"192.0.2.10\n192.0.2.12"}}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply update","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp2"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"fingerprint after update","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp3":"/fingerprint"}},
+ {"name":"inverse: delete alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp3","actions":[
+   {"operation":"delete","resource":"alias","uuid":"$alias"}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply delete","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp3"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"alias is gone","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_hosts"},"expect":"ok","pointers":{"/total":"^0$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]

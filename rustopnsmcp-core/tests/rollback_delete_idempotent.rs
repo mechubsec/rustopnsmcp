@@ -60,13 +60,19 @@ fn ensure_crypto_provider() {
 /// Serve fixture responses keyed by request path; anything unmapped answers
 /// 404, which is exactly what proves an unwanted `addItem` call would fail
 /// rather than silently succeed.
+///
+/// `swaps` maps a trigger path to `(path, body)`: once the trigger is
+/// requested, `path` answers `body` from then on — a device whose state the
+/// write just changed.
 fn serve_fixtures(
     listener: tokio::net::TcpListener,
     server_config: rustls::ServerConfig,
     routes: HashMap<String, serde_json::Value>,
+    swaps: HashMap<String, (String, serde_json::Value)>,
 ) {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
-    let routes = Arc::new(routes);
+    let routes = Arc::new(std::sync::Mutex::new(routes));
+    let swaps = Arc::new(swaps);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -74,6 +80,7 @@ fn serve_fixtures(
             };
             let acceptor = acceptor.clone();
             let routes = Arc::clone(&routes);
+            let swaps = Arc::clone(&swaps);
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(stream).await else {
                     return;
@@ -104,7 +111,15 @@ fn serve_fixtures(
                     let _ = tls.read_exact(&mut body).await;
                 }
 
-                let response = match routes.get(&path) {
+                let fixture = {
+                    let mut routes = routes.lock().expect("routes lock");
+                    let fixture = routes.get(&path).cloned();
+                    if let Some((target, body)) = swaps.get(&path) {
+                        routes.insert(target.clone(), body.clone());
+                    }
+                    fixture
+                };
+                let response = match fixture {
                     Some(fixture) => {
                         let body = fixture.to_string();
                         format!(
@@ -176,10 +191,17 @@ fn device_for(
 }
 
 async fn client_against(routes: HashMap<String, serde_json::Value>) -> OpnsenseClient {
+    client_against_with_swaps(routes, HashMap::new()).await
+}
+
+async fn client_against_with_swaps(
+    routes: HashMap<String, serde_json::Value>,
+    swaps: HashMap<String, (String, serde_json::Value)>,
+) -> OpnsenseClient {
     ensure_crypto_provider();
     let (cert_pem, server_config) = tls_material();
     let (listener, port) = bind_local().await;
-    serve_fixtures(listener, server_config, routes);
+    serve_fixtures(listener, server_config, routes, swaps);
 
     let ca_file = write_pem(&cert_pem);
     let key_file = write_secret("test-key");
@@ -350,4 +372,201 @@ async fn a_200_with_result_failed_on_set_rule_is_a_refusal() {
         "{error:?}"
     );
     assert!(error.to_string().contains("rule.interface"), "{error}");
+}
+
+/// What OPNsense 26.7.5 answers `getItem/{uuid}` with for an alias uuid it
+/// does not have (deleted, or never existed): HTTP 200 and the default alias
+/// template, not `[]`.
+///
+/// Built from the real sanitized capture `alias_get_item.json`: `name` set to
+/// `""`, every selected `content` entry (the record's own values) removed so
+/// nothing is selected, and `categories` set to `[]`. Everything else — the
+/// description, the other choice maps and their selections, the pf counters —
+/// is left as captured, so only the blanked record tells the template apart
+/// from a stored alias.
+fn alias_template() -> serde_json::Value {
+    let mut template = rustopnsmcp_core::testing::fixture("alias_get_item");
+    let alias = &mut template["alias"];
+    alias["name"] = serde_json::json!("");
+    alias["categories"] = serde_json::json!([]);
+    alias["content"]
+        .as_object_mut()
+        .expect("content is a choice map")
+        .retain(|_, choice| choice["selected"] != 1);
+    template
+}
+
+/// The template is not an alias: reading it as one makes every verified
+/// delete look like it left the alias in place.
+#[tokio::test]
+async fn fetch_resource_reads_the_alias_default_template_as_not_found() {
+    let uuid = "55555555-5555-4555-8555-555555555555";
+    let routes = HashMap::from([(
+        rustopnsmcp_core::endpoints::aliases_get_item(uuid),
+        alias_template(),
+    )]);
+    let client = client_against(routes).await;
+
+    let fetched = client
+        .fetch_resource(ResourceKind::Alias, uuid)
+        .await
+        .expect("a template is an answer, not an error");
+
+    assert!(fetched.is_none(), "{fetched:?}");
+}
+
+/// The other side of the rule: a stored alias, with its non-empty name, is
+/// still found.
+#[tokio::test]
+async fn fetch_resource_still_returns_a_real_alias() {
+    let uuid = "66666666-6666-4666-8666-666666666666";
+    let routes = HashMap::from([(
+        rustopnsmcp_core::endpoints::aliases_get_item(uuid),
+        rustopnsmcp_core::testing::fixture("alias_get_item"),
+    )]);
+    let client = client_against(routes).await;
+
+    let fetched = client
+        .fetch_resource(ResourceKind::Alias, uuid)
+        .await
+        .expect("fetch")
+        .expect("a real alias is found");
+
+    assert_eq!(fetched["name"], "lab_clients");
+    assert_eq!(fetched["uuid"], uuid);
+}
+
+/// The live defect: the delete landed, `getItem` then answered the template,
+/// and the apply was recorded as `AppliedUnverified` ("still exists").
+#[tokio::test]
+async fn a_delete_followed_by_the_default_template_is_applied() {
+    use rustopnsmcp_core::changeset::{Preimage, State, apply_sequentially};
+    use rustopnsmcp_core::endpoints as ep;
+
+    let uuid = "77777777-7777-4777-8777-777777777777";
+    let routes = HashMap::from([
+        (
+            ep::aliases_get_item(uuid),
+            rustopnsmcp_core::testing::fixture("alias_get_item"),
+        ),
+        (
+            ep::aliases_del_item(uuid),
+            serde_json::json!({"result": "deleted"}),
+        ),
+        (
+            ep::ALIASES_RECONFIGURE.to_owned(),
+            serde_json::json!({"status": "ok"}),
+        ),
+    ]);
+    let swaps = HashMap::from([(
+        ep::aliases_del_item(uuid),
+        (ep::aliases_get_item(uuid), alias_template()),
+    )]);
+    let client = client_against_with_swaps(routes, swaps).await;
+
+    let mutations = [StagedMutation::delete(ResourceKind::Alias, uuid)];
+    let preimage = Preimage::capture(&client, &mutations)
+        .await
+        .expect("the alias exists before the delete");
+    let outcome = apply_sequentially(&client, &preimage, &mutations).await;
+
+    assert_eq!(outcome.state, State::Applied, "{outcome:?}");
+    assert_eq!(outcome.verification_failure, None);
+}
+
+/// `create_opnsense_change_set` captures the pre-image of every update and
+/// delete target, and a not-found there is its refusal (the server answers
+/// "the device returned HTTP 404" with the detail "not found"). The template
+/// must take that path rather than be captured as if it were the alias.
+#[tokio::test]
+async fn capturing_a_preimage_of_a_missing_alias_is_refused_as_not_found() {
+    use rustopnsmcp_core::changeset::Preimage;
+    use rustopnsmcp_core::error::OpnsenseError;
+
+    let uuid = "88888888-8888-4888-8888-888888888888";
+    let routes = HashMap::from([(
+        rustopnsmcp_core::endpoints::aliases_get_item(uuid),
+        alias_template(),
+    )]);
+    let client = client_against(routes).await;
+
+    // Static labels: CodeQL rust/cleartext-logging flags uuid-derived assert messages.
+    for (label, mutation) in [
+        (
+            "update",
+            StagedMutation::update(
+                ResourceKind::Alias,
+                uuid,
+                serde_json::json!({"description": "x"}),
+            ),
+        ),
+        ("delete", StagedMutation::delete(ResourceKind::Alias, uuid)),
+    ] {
+        let error = Preimage::capture(&client, std::slice::from_ref(&mutation))
+            .await
+            .expect_err("a missing alias must not be captured");
+        assert!(
+            matches!(
+                &error,
+                OpnsenseError::Upstream { status: 404, detail } if detail == "not found"
+            ),
+            "{label}: a missing alias must be refused as 404 not found"
+        );
+    }
+}
+
+/// Upstream's filter apply returns configd's raw output, `"OK\n\n"`, not
+/// `"ok"` (26.7.5, live).
+#[tokio::test]
+async fn reconfigure_filter_accepts_configds_uppercase_ok() {
+    let routes = HashMap::from([(
+        rustopnsmcp_core::endpoints::FILTER_APPLY.to_owned(),
+        serde_json::json!({"status": "OK\n\n"}),
+    )]);
+    let client = client_against(routes).await;
+
+    client
+        .reconfigure_filter()
+        .await
+        .expect("configd's OK is success");
+}
+
+/// The live defect: a created rule whose apply answered `"OK\n\n"` was
+/// recorded `NotLoaded` and rolled back.
+#[tokio::test]
+async fn a_rule_create_whose_apply_answers_configd_ok_is_applied() {
+    use rustopnsmcp_core::changeset::{Preimage, State, apply_sequentially};
+    use rustopnsmcp_core::endpoints as ep;
+
+    let uuid = "99999999-9999-4999-8999-999999999999";
+    let routes = HashMap::from([
+        (
+            ep::FILTER_ADD_RULE.to_owned(),
+            serde_json::json!({"result": "saved", "uuid": uuid}),
+        ),
+        (
+            ep::filter_get_rule(uuid),
+            serde_json::json!({"rule": {
+                "description": "p3-live",
+                "action": {"pass": {"value": "Pass", "selected": 1}},
+                "interface": {"lan": {"value": "LAN", "selected": 1}},
+            }}),
+        ),
+        (
+            ep::FILTER_APPLY.to_owned(),
+            serde_json::json!({"status": "OK\n\n"}),
+        ),
+    ]);
+    let client = client_against(routes).await;
+
+    let mutations = [StagedMutation::create(
+        ResourceKind::Rule,
+        serde_json::json!({"description": "p3-live", "action": "pass", "interface": "lan"}),
+    )];
+    let preimage = Preimage::capture(&client, &mutations)
+        .await
+        .expect("capture");
+    let outcome = apply_sequentially(&client, &preimage, &mutations).await;
+
+    assert_eq!(outcome.state, State::Applied, "{outcome:?}");
 }

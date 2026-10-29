@@ -8,8 +8,25 @@ use serde_json::Value;
 
 /// Fields OPNsense recomputes on its own schedule. They say nothing about
 /// what an operator configured, and would make every plan read as stale.
-/// Checked against opnsense-lab in P3.
-pub const VOLATILE_FIELDS: &[&str] = &["current_items", "last_updated"];
+///
+/// Stripped at record level only. pf evaluation counters and table sizes: re-read on every request
+/// (`eval_nomatch` seen ticking on opnsense-lab within 20 s). Not
+/// configuration; the alias `counters` option that enables them is, and is
+/// deliberately absent.
+pub const VOLATILE_FIELDS: &[&str] = &[
+    "current_items",
+    "last_updated",
+    "eval_nomatch",
+    "eval_match",
+    "in_block_p",
+    "in_block_b",
+    "in_pass_p",
+    "in_pass_b",
+    "out_block_p",
+    "out_block_b",
+    "out_pass_p",
+    "out_pass_b",
+];
 
 /// The fingerprint of the governed configuration on `client`'s device: every
 /// alias and every filter rule.
@@ -90,22 +107,35 @@ fn uuid_of(row: &Value) -> &str {
     row.get("uuid").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// Keys sorted at every depth, volatile fields removed.
-fn canonical(value: &Value) -> Value {
+/// A record in canonical form: volatile fields removed at record level only
+/// (the top-level object of a search row or of an unwrapped `getItem` body),
+/// keys sorted at every depth. Below record level nothing is dropped: option
+/// maps there are keyed by user-chosen names that can collide with a counter
+/// name, and an unseen nested counter must fail closed (a refusal), never
+/// read as "same configuration".
+pub(super) fn canonical(record: &Value) -> Value {
+    match sorted(record) {
+        Value::Object(mut map) => {
+            map.retain(|key, _| !VOLATILE_FIELDS.contains(&key.as_str()));
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+/// Keys sorted at every depth; nothing removed.
+fn sorted(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            let mut sorted = serde_json::Map::new();
+            let mut ordered = serde_json::Map::new();
             for key in keys {
-                if VOLATILE_FIELDS.contains(&key.as_str()) {
-                    continue;
-                }
-                sorted.insert(key.clone(), canonical(&map[key]));
+                ordered.insert(key.clone(), sorted(&map[key]));
             }
-            Value::Object(sorted)
+            Value::Object(ordered)
         }
-        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
         other => other.clone(),
     }
 }
@@ -159,5 +189,72 @@ mod tests {
             fingerprint_collections(&[alias("1", "192.0.2.1")], &[json!({ "uuid": "r" })]).unwrap();
         assert_ne!(base, edited);
         assert_ne!(base, with_rule);
+    }
+
+    #[test]
+    fn pf_counters_do_not_change_the_fingerprint() {
+        for field in [
+            "eval_nomatch",
+            "eval_match",
+            "in_block_p",
+            "in_block_b",
+            "in_pass_p",
+            "in_pass_b",
+            "out_block_p",
+            "out_block_b",
+            "out_pass_p",
+            "out_pass_b",
+        ] {
+            let mut ticked = alias("1", "192.0.2.1");
+            ticked[field] = json!("17");
+            assert_eq!(
+                fingerprint_collections(&[alias("1", "192.0.2.1")], &[]).unwrap(),
+                fingerprint_collections(&[ticked], &[]).unwrap(),
+                "{field} is a live counter"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_fields_including_counters_option_change_the_fingerprint() {
+        let base = fingerprint_collections(&[alias("1", "192.0.2.1")], &[]).unwrap();
+        for (field, value) in [
+            ("counters", "1"),
+            ("enabled", "0"),
+            ("content", "192.0.2.9"),
+        ] {
+            let mut changed = alias("1", "192.0.2.1");
+            changed[field] = json!(value);
+            assert_ne!(
+                base,
+                fingerprint_collections(&[changed], &[]).unwrap(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_member_named_like_a_counter_is_configuration_not_a_counter() {
+        let body = |member: &str| {
+            json!({ "uuid": "1", "name": "grp", "eval_nomatch": "1",
+                "content": { member: { "value": member, "selected": 1 },
+                             "eval_match": { "value": "eval_match", "selected": 1 },
+                             "current_items": { "value": "current_items", "selected": 1 } } })
+        };
+        let base = body("alias_a");
+        assert_ne!(
+            fingerprint_collections(std::slice::from_ref(&base), &[]).unwrap(),
+            fingerprint_collections(&[body("alias_b")], &[]).unwrap()
+        );
+        let mut dropped = base.clone();
+        dropped["content"]
+            .as_object_mut()
+            .unwrap()
+            .remove("eval_match");
+        assert_ne!(
+            fingerprint_collections(std::slice::from_ref(&base), &[]).unwrap(),
+            fingerprint_collections(std::slice::from_ref(&dropped), &[]).unwrap()
+        );
+        assert!(!crate::changeset::same_configuration(&base, &dropped));
     }
 }

@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# The MCP client completes a stdio handshake, and unwraps and unescapes a real server response.
+# The device is a local loopback HTTPS stub with a throwaway CA: no real device is contacted.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+bin="${RUSTOPNSMCP_BIN:-${CARGO_TARGET_DIR:-target}/debug/rustopnsmcp}"
+work=$(mktemp -d); trap 'kill "${stub:-}" 2>/dev/null || true; rm -rf "$work"' EXIT
+cd "$work"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout ca.key -out ca.pem \
+  -days 1 -subj /CN=smoke-ca 2>/dev/null
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout leaf.key -out leaf.csr \
+  -subj /CN=localhost 2>/dev/null
+printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n' > ext
+openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out leaf.pem -days 1 \
+  -extfile ext 2>/dev/null
+cat > stub.py <<'PY'
+import http.server, json, ssl
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):  # the entity-escaped characters in "note" are what the client must unescape
+        failing = "firmware" not in self.path  # every other path is a device error carrying a canary
+        body = b"DEVICE-ERROR-CANARY" if failing else json.dumps({"product_version": "26.7", "note": "a<b & c>d", "rows": [{"uuid": "ROWUUID"}]}).encode()
+        self.send_response(500 if failing else 200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        with open("requests.log", "a") as log:  # lets the test prove which calls reached the device
+            log.write(self.path + "\n")
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain("leaf.pem", "leaf.key")
+server.socket = context.wrap_socket(server.socket, server_side=True)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PY
+python3 -I stub.py > port & stub=$!
+until [ -s port ]; do sleep 0.1; done
+printf 'stub-key' > key; printf 'stub-secret' > secret; chmod 600 key secret
+printf '{"version":1,"devices":{"stub":{"endpoint":"https://127.0.0.1:%s","api_key_file":"%s/key","api_secret_file":"%s/secret","ca_pem_path":"%s/ca.pem"}}}\n' \
+  "$(cat port)" "$work" "$work" "$work" > devices.json; chmod 600 devices.json
+cat > calls.json <<'JSON'
+[{"name":"status","tool":"opnsmcp_status","arguments":{},"expect":"ok","keys":["version"]},
+ {"name":"unknown device refused","tool":"get_opnsense_firmware_status","arguments":{"device":"nope"},"expect":"error"},
+ {"name":"wrapped device read","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "keys":["product_version"],"pointers":{"/note":"^a<b & c>d$"}},
+ {"name":"device error","tool":"list_opnsense_interfaces","arguments":{"device":"stub"},"expect":"error"}]
+JSON
+cat > mismatch.json <<'JSON'
+[{"name":"saved-value mismatch","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},
+  "expect":"ok","pointers":{"/note":"$canary"}}]
+JSON
+cat > guard.json <<'JSON'
+[{"name":"guard fails","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"error"},
+ {"name":"later call","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok"}]
+JSON
+cat > saves.json <<'JSON'
+[{"name":"save through array","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "save":{"uuid":"/rows/0/uuid"}},
+ {"name":"saved value used","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/rows/0/uuid":"$uuid"}}]
+JSON
+cat > unresolved.json <<'JSON'
+[{"name":"unresolved save","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "save":{"gone":"/rows/9/uuid"}}]
+JSON
+cat > undefined.json <<'JSON'
+[{"name":"undefined variable","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/nothing":"$never_saved"}}]
+JSON
+printf '{"canary":"SAVEDVALUECANARY"}' > vars.json
+cat > unsent.json <<'JSON'
+[{"name":"unknown argument variable","tool":"list_opnsense_interfaces","arguments":{"device":"stub","search_phrase":"$nowhere"},"expect":"error"}]
+JSON
+cat > crash.json <<'JSON'
+[{"name":"saves first","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "save":{"kept":"/product_version"}},
+ {"name":"then crashes","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/note":"("}}]
+JSON
+printf '{"gone":"STALEVALUE"}' > stale.json
+cd - >/dev/null
+client=(python3 -I scripts/live/mcp_call.py)
+server=(--stdio -- "$bin" --device-mapping "$work/devices.json" --inventory-readonly)
+out=$("${client[@]}" "$work/calls.json" "${server[@]}") || true  # a failing call must still print its FAIL line
+printf '%s\n' "$out"
+[ "$(printf '%s\n' "$out" | grep -c '^PASS')" = 4 ]
+if printf '%s' "$out" | grep -q 'DEVICE-ERROR-CANARY\|untrusted-device-content'; then echo 'device error text leaked'; exit 1; fi
+# A $var pointer mismatch must FAIL without printing the saved value.
+mismatch=$("${client[@]}" "$work/mismatch.json" --vars "$work/vars.json" "${server[@]}") || true
+printf '%s\n' "$mismatch"
+printf '%s' "$mismatch" | grep -q '^FAIL'
+if printf '%s' "$mismatch" | grep -q 'SAVEDVALUECANARY'; then echo 'saved value leaked'; exit 1; fi
+# Stop at the first FAIL by default; --keep-going runs on.
+guard=$("${client[@]}" "$work/guard.json" "${server[@]}") || true
+printf '%s\n' "$guard"
+printf '%s' "$guard" | grep -q '^ABORT: stopping after guard fails; 1 later call(s) not run'
+if printf '%s' "$guard" | grep -q 'later call  '; then echo 'a call ran after a FAIL'; exit 1; fi
+going=$("${client[@]}" --keep-going "$work/guard.json" "${server[@]}") || true
+printf '%s' "$going" | grep -q '^PASS later call'
+# save and pointers traverse array indexes; an unresolved save or an undefined variable is a FAIL.
+saves=$("${client[@]}" "$work/saves.json" "${server[@]}")
+printf '%s\n' "$saves"
+[ "$(printf '%s\n' "$saves" | grep -c '^PASS')" = 2 ]
+unresolved=$("${client[@]}" "$work/unresolved.json" "${server[@]}") || true
+printf '%s' "$unresolved" | grep -q '^FAIL unresolved save.*save gone: pointer /rows/9/uuid unresolved'
+undefined=$("${client[@]}" "$work/undefined.json" "${server[@]}") || true
+# shellcheck disable=SC2016  # the $ is literal
+printf '%s' "$undefined" | grep -q '^FAIL undefined variable.*unknown variable \$never_saved'
+if printf '%s' "$saves$unresolved$undefined" | grep -q 'ROWUUID'; then echo 'device value leaked'; exit 1; fi
+# An argument naming an unknown variable FAILs and is never sent to the device.
+: > "$work/requests.log"
+unsent=$("${client[@]}" "$work/unsent.json" "${server[@]}") || true
+printf '%s\n' "$unsent"
+# shellcheck disable=SC2016  # the $ is literal
+printf '%s' "$unsent" | grep -q '^FAIL unknown argument variable.*unknown variable \$nowhere in arguments'
+printf '%s' "$unsent" | grep -q '^ABORT'
+if grep -q interfaces "$work/requests.log"; then echo 'call with an unknown variable was sent'; exit 1; fi
+# --save-vars is written even when the client dies mid-sequence.
+"${client[@]}" "$work/crash.json" --save-vars "$work/crash-vars.json" "${server[@]}" >/dev/null 2>&1 && { echo 'crash run exited 0'; exit 1; }
+python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1])).get("kept") == "26.7"' "$work/crash-vars.json"
+# An unresolved save drops a stale value from --vars instead of persisting it.
+"${client[@]}" "$work/unresolved.json" --vars "$work/stale.json" --save-vars "$work/stale-out.json" "${server[@]}" >/dev/null || true
+python3 -I -c 'import json,sys; assert "gone" not in json.load(open(sys.argv[1]))' "$work/stale-out.json"
+# One variable grammar: "$change-set-id" is refused (never sent) whether or not a key of that name exists.
+cat > "$work/hyphen.json" <<'JSON'
+[{"name":"hyphen variable","tool":"list_opnsense_interfaces","arguments":{"device":"stub","search_phrase":"$change-set-id"},"expect":"error"}]
+JSON
+printf '{"change-set-id":"X"}' > "$work/hyphen-vars.json"
+: > "$work/requests.log"
+for extra in "" "--vars $work/hyphen-vars.json"; do
+  # shellcheck disable=SC2086
+  hyphen=$("${client[@]}" "$work/hyphen.json" $extra "${server[@]}" 2>&1) || true
+  # shellcheck disable=SC2016  # the $ is literal
+  printf '%s' "$hyphen" | grep -q '^FAIL.*invalid --vars key\|^FAIL hyphen variable.*unknown variable \$change-set-id'
+done
+if grep -q interfaces "$work/requests.log"; then echo 'hyphenated variable was sent'; exit 1; fi
+# An invalid save key is refused before any call is sent.
+cat > "$work/badkey.json" <<'JSON'
+[{"name":"first","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok"},
+ {"name":"bad key","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok","save":{"a-b":"/product_version"}}]
+JSON
+: > "$work/requests.log"
+badkey=$("${client[@]}" "$work/badkey.json" "${server[@]}") || true
+printf '%s' "$badkey" | grep -q '^FAIL invalid save key.*a-b'
+[ ! -s "$work/requests.log" ] || { echo 'a call was sent despite an invalid save key'; exit 1; }
+# A skipped call drops the save keys it declares, so a stale --vars value cannot reach a later call.
+cat > "$work/skipsave.json" <<'JSON'
+[{"name":"skipped","tool":"list_opnsense_interfaces","arguments":{"search_phrase":"$nowhere"},"expect":"ok",
+  "save":{"stale":"/product_version"}},
+ {"name":"reuses stale","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/note":"$stale"}}]
+JSON
+printf '{"stale":"STALEVALUE"}' > "$work/stale2.json"
+skip=$("${client[@]}" --keep-going "$work/skipsave.json" --vars "$work/stale2.json" --save-vars "$work/skip-out.json" "${server[@]}") || true
+# shellcheck disable=SC2016  # the $ is literal
+printf '%s' "$skip" | grep -q '^FAIL reuses stale.*unknown variable \$stale'
+python3 -I -c 'import json,sys; assert "stale" not in json.load(open(sys.argv[1]))' "$work/skip-out.json"
