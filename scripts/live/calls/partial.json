@@ -1,0 +1,14 @@
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"an existing alias name","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","limit":1},"expect":"ok","save":{"existing":"/rows/0/name"}},
+ {"name":"create three-action set","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"alias","body":{"name":"p3_part_a","type":"host","content":"192.0.2.20"}},
+   {"operation":"create","resource":"alias","body":{"name":"$existing","type":"host","content":"192.0.2.21"}},
+   {"operation":"create","resource":"alias","body":{"name":"p3_part_c","type":"host","content":"192.0.2.22"}}]},
+  "expect":"ok","keys":["change_set_id","plan_digest"],"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply: partial","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},
+  "expect":"error","pointers":{"/state":"^partial$","/succeeded":"^1$","/attempted_and_failed":"^1$","/never_attempted":"^1$","/rollback_failures":"^\\[\\]$"}},
+ {"name":"recorded as failed, not applied","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs"},"expect":"ok","pointers":{"/state":"^failed$","/action_count":"^3$"}},
+ {"name":"rollback removed the first alias","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_part"},"expect":"ok","pointers":{"/total":"^0$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]
