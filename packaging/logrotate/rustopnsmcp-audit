@@ -7,7 +7,8 @@
 #
 # Rename-mode rotation: the server holds one O_APPEND descriptor and reopens
 # the path on SIGHUP, so rename + signal loses nothing. copytruncate has a
-# race window in which audit events are lost; do not use it. The postrotate
+# race window in which audit events are lost; do not use it (nocopytruncate
+# below overrides a global copytruncate in /etc/logrotate.conf). The postrotate
 # is what delivers the signal; without it the renamed file keeps growing and
 # the new audit.jsonl stays empty. The same SIGHUP also reloads the inventory
 # and token store, which is benign: a failed reload keeps the previous one.
@@ -22,8 +23,13 @@
     delaycompress
     create 0600 rustopnsmcp rustopnsmcp
     su rustopnsmcp rustopnsmcp
+    nocopytruncate
     sharedscripts
     postrotate
-        systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service
+        # Only an active unit has a descriptor to reopen; an inactive one is not
+        # a rotation failure. A failed kill of an active unit still fails.
+        if systemctl is-active --quiet rustopnsmcp.service; then
+            systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service
+        fi
     endscript
 }
