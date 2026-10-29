@@ -28,7 +28,8 @@
     }
    ]
   },
-  "expect": "error"
+  "expect": "error",
+  "error_contains": "the configuration changed since fingerprint"
  },
  {
   "name": "create with an unknown field",
@@ -36,10 +37,21 @@
   "arguments": {
    "device": "opnsense-lab",
    "expected_fingerprint": "$fp",
-   "actions": [],
+   "actions": [
+    {
+     "operation": "create",
+     "resource": "alias",
+     "body": {
+      "name": "p3_refusal",
+      "type": "host",
+      "content": "192.0.2.1"
+     }
+    }
+   ],
    "surprise": 1
   },
-  "expect": "error"
+  "expect": "error",
+  "error_contains": "unknown field"
  },
  {
   "name": "create with a non-writable field",
@@ -54,12 +66,14 @@
      "body": {
       "name": "p3_refusal",
       "type": "host",
+      "content": "192.0.2.1",
       "uuid": "x"
      }
     }
    ]
   },
-  "expect": "error"
+  "expect": "error",
+  "error_contains": "sets field 'uuid'"
  },
  {
   "name": "create a url alias",
@@ -79,7 +93,8 @@
     }
    ]
   },
-  "expect": "error"
+  "expect": "error",
+  "error_contains": "urltable"
  },
  {
   "name": "approve an unknown id",
