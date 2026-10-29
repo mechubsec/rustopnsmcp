@@ -511,3 +511,59 @@ async fn capturing_a_preimage_of_a_missing_alias_is_refused_as_not_found() {
         );
     }
 }
+
+/// Upstream's filter apply returns configd's raw output, `"OK\n\n"`, not
+/// `"ok"` (26.7.5, live).
+#[tokio::test]
+async fn reconfigure_filter_accepts_configds_uppercase_ok() {
+    let routes = HashMap::from([(
+        rustopnsmcp_core::endpoints::FILTER_APPLY.to_owned(),
+        serde_json::json!({"status": "OK\n\n"}),
+    )]);
+    let client = client_against(routes).await;
+
+    client
+        .reconfigure_filter()
+        .await
+        .expect("configd's OK is success");
+}
+
+/// The live defect: a created rule whose apply answered `"OK\n\n"` was
+/// recorded `NotLoaded` and rolled back.
+#[tokio::test]
+async fn a_rule_create_whose_apply_answers_configd_ok_is_applied() {
+    use rustopnsmcp_core::changeset::{Preimage, State, apply_sequentially};
+    use rustopnsmcp_core::endpoints as ep;
+
+    let uuid = "99999999-9999-4999-8999-999999999999";
+    let routes = HashMap::from([
+        (
+            ep::FILTER_ADD_RULE.to_owned(),
+            serde_json::json!({"result": "saved", "uuid": uuid}),
+        ),
+        (
+            ep::filter_get_rule(uuid),
+            serde_json::json!({"rule": {
+                "description": "p3-live",
+                "action": {"pass": {"value": "Pass", "selected": 1}},
+                "interface": {"lan": {"value": "LAN", "selected": 1}},
+            }}),
+        ),
+        (
+            ep::FILTER_APPLY.to_owned(),
+            serde_json::json!({"status": "OK\n\n"}),
+        ),
+    ]);
+    let client = client_against(routes).await;
+
+    let mutations = [StagedMutation::create(
+        ResourceKind::Rule,
+        serde_json::json!({"description": "p3-live", "action": "pass", "interface": "lan"}),
+    )];
+    let preimage = Preimage::capture(&client, &mutations)
+        .await
+        .expect("capture");
+    let outcome = apply_sequentially(&client, &preimage, &mutations).await;
+
+    assert_eq!(outcome.state, State::Applied, "{outcome:?}");
+}

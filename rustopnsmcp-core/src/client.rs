@@ -527,7 +527,9 @@ fn interpret_get_item_response(
 /// Interpret a raw `reconfigure` response.
 ///
 /// A missing `status` field is not evidence of success — only an explicit
-/// `"ok"` is. Treating an ambiguous or absent field as success is exactly the
+/// `"ok"` is. The alias reconfigure answers a plain `"ok"`; the filter apply
+/// returns configd's raw output (`"OK\n\n"`), so the match ignores ASCII
+/// whitespace and case. Treating an ambiguous or absent field as success is exactly the
 /// "probably fine" default this server must not take: a genuine failure with
 /// a differently-shaped body would otherwise be recorded as `Applied`.
 ///
@@ -535,8 +537,15 @@ fn interpret_get_item_response(
 ///
 /// Returns [`OpnsenseError::WriteRefused`] for anything but `status: "ok"`.
 fn interpret_reconfigure_response(raw: &serde_json::Value) -> Result<(), OpnsenseError> {
-    match raw.get("status").and_then(serde_json::Value::as_str) {
-        Some("ok") => Ok(()),
+    let status = raw.get("status").and_then(serde_json::Value::as_str);
+    match status {
+        Some(text)
+            if text
+                .trim_matches(|c: char| c.is_ascii_whitespace())
+                .eq_ignore_ascii_case("ok") =>
+        {
+            Ok(())
+        }
         _ => Err(OpnsenseError::WriteRefused(format!(
             "reconfigure did not report success: {}",
             crate::error::sanitize_detail(&raw.to_string())
@@ -976,6 +985,36 @@ mod tests {
         assert_eq!(body.get("type"), Some(&serde_json::json!("host")));
         // The read-only uuid must not be replayed as a write field.
         assert!(body.get("uuid").is_none());
+    }
+
+    /// configd's raw output (`"OK\n\n"`) from the filter apply is success;
+    /// anything but a whole-word, case-insensitive "ok" is not.
+    #[test]
+    fn reconfigure_accepts_configd_ok_in_any_case_and_padding() {
+        for status in ["ok", "OK", "OK\n\n", " ok \n"] {
+            assert!(
+                super::interpret_reconfigure_response(&serde_json::json!({"status": status}))
+                    .is_ok(),
+                "{status:?}"
+            );
+        }
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"status": "error"}),
+            serde_json::json!({"status": "failed"}),
+            serde_json::json!({"status": "OK but not really"}),
+            serde_json::json!({"status": ""}),
+            serde_json::json!({"status": true}),
+            serde_json::json!({"status": null}),
+        ] {
+            let error = super::interpret_reconfigure_response(&body).expect_err("refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("reconfigure did not report success"),
+                "{error}"
+            );
+        }
     }
 
     /// A missing `status` field must not be read as success — only an
