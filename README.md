@@ -60,3 +60,8 @@ Design and scope: [mecmcp#425](https://github.com/mechubsec/mecmcp/issues/425).
 ## License
 
 Licensed under [MIT](LICENSE).
+
+## Documentation
+
+- [Operating rustopnsmcp](docs/OPERATIONS.md): SIGHUP reload, health, audit, upgrades.
+- [Filesystem layout](packaging/FILESYSTEM.md): paths, owners and modes for the LXC package.
