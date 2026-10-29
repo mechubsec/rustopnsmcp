@@ -6,8 +6,8 @@ claim holds on your guest.
 
 ## Reloading with SIGHUP
 
-A SIGHUP reloads the following. Each is swapped under a lock, so calls already
-in flight finish on the old state:
+A SIGHUP reloads the following. The device clients are swapped under a lock, so
+calls already in flight finish on the old clients:
 
 - the device inventory (`devices.json`), then rebuilds the HTTP client for
   every device from it. Credentials named as `*_file` and the CA file named by
@@ -43,11 +43,18 @@ file is configured. Each part that fails keeps its old state and logs one of:
 - `token store reload failed; retaining previous snapshot`;
 - `audit file reopen failed`.
 
-After fixing a credential or `devices.json`, this must print nothing:
+To check one reload on its own, stamp the time before sending the signal, so an
+older failure still in the journal is not mistaken for this one. This is
+`sh` syntax, wrapped so it also pastes into fish:
 
 ```sh
-journalctl -u rustopnsmcp -n 20 | grep -i failed
+sh -c 'since=$(date "+%Y-%m-%d %H:%M:%S"); systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service; sleep 2; journalctl -u rustopnsmcp --since "$since" --no-pager | grep -E "reloaded|rebuilt|reopened|reload failed|rebuild failed|reopen failed"'
 ```
+
+A good reload prints `device inventory reloaded`, `HTTP clients rebuilt from
+reloaded inventory` and `token store reloaded` (and `audit file reopened` if an
+audit file is configured) and none of the four failure lines above. The unit
+defines no `ExecReload`, so `systemctl reload` does not work; use the signal.
 
 ## `add_device` and `--inventory-readonly`
 
