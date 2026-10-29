@@ -1,5 +1,6 @@
 # Example Compose deployment for rustopnsmcp (mecmcp docs/DOCKER-STANDARD.md).
 # Copy it, set the image tag (pin by digest in production), and adjust paths.
+# Walk-through: docs/HOW-TO-SETUP-DOCKER.md
 #
 # Prepare the host directories FIRST. The container runs as uid 65532 and a
 # bind mount carries the host uid straight through:

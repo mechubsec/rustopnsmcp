@@ -64,13 +64,19 @@ real=$({
 } | sort -u)
 # Flags another tool owns. Add one only when the docs show that tool, and say
 # which, so this list cannot quietly hide a misspelt rustopnsmcp flag.
-# systemctl: --kill-whom --signal. journalctl: --after-cursor --show-cursor
-# --no-pager. systemd-tmpfiles: --create. curl: --cacert.
+# systemctl/docker: --kill-whom --signal --now. journalctl: --after-cursor
+# --show-cursor --no-pager. systemd-tmpfiles: --create. curl: --cacert.
+# pct: --features. cosign: --bundle --certificate-oidc-issuer
+# --certificate-identity-regexp. docker: --rm --restart --read-only --cap-drop
+# --security-opt --tmpfs --env-file --platform (--name is also a real token flag).
 foreign=" \
-    --kill-whom --signal \
+    --kill-whom --signal --now \
     --after-cursor --show-cursor --no-pager \
     --create \
     --cacert \
+    --features \
+    --bundle --certificate-oidc-issuer --certificate-identity-regexp \
+    --rm --restart --read-only --cap-drop --security-opt --tmpfs --env-file --platform \
 "
 while IFS= read -r flag; do
     if [[ "$flag" == *'*' ]]; then
@@ -84,18 +90,15 @@ while IFS= read -r flag; do
     fail "docs mention $flag, which rustopnsmcp --help does not list (add it to 'foreign' only if another tool owns it)"
 done < <(grep -ohE -- '--[a-z0-9][a-z0-9-]*\*?' "${docs[@]}" | sort -u || true)
 
-# 4. The override example in the LXC guide is the shipped file. Skipped only
-# while the guide does not exist yet; the commit that adds it makes this
-# check mandatory.
+# 4. The override example in the LXC guide is the shipped file.
 guide=docs/HOW-TO-SETUP-LXC.md
 example=packaging/systemd/rustopnsmcp.override.conf.example
-if [[ -e "$guide" ]]; then
-    embedded=$(sed -n '/<!-- override-example:start -->/,/<!-- override-example:end -->/p' "$guide" \
-        | sed -E -e '/<!--/d' -e '/^[`]{3}/d' | grep -v '^#' | sed 's/[[:space:]]*$//' || true)
-    shipped=$(grep -v '^#' "$example" | sed 's/[[:space:]]*$//')
-    [[ -n "$embedded" ]] || fail "$guide has no override-example block"
-    [[ "$embedded" == "$shipped" ]] || fail "$guide's override block differs from $example"
-fi
+[[ -e "$guide" ]] || fail "$guide is missing"
+embedded=$(sed -n '/<!-- override-example:start -->/,/<!-- override-example:end -->/p' "$guide" 2>/dev/null \
+    | sed -E -e '/<!--/d' -e '/^[`]{3}/d' | grep -v '^#' | sed 's/[[:space:]]*$//' || true)
+shipped=$(grep -v '^#' "$example" | sed 's/[[:space:]]*$//')
+[[ -n "$embedded" ]] || fail "$guide has no override-example block"
+[[ "$embedded" == "$shipped" ]] || fail "$guide's override block differs from $example"
 
 # 5. Every doc in docs/ is linked from README.md.
 for doc in docs/*.md; do

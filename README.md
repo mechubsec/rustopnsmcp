@@ -65,3 +65,5 @@ Licensed under [MIT](LICENSE).
 
 - [Operating rustopnsmcp](docs/OPERATIONS.md): SIGHUP reload, health, audit, upgrades.
 - [Filesystem layout](packaging/FILESYSTEM.md): paths, owners and modes for the LXC package.
+- [Set up in a Debian 13 LXC](docs/HOW-TO-SETUP-LXC.md): download, install, token, TLS override, journal forwarding.
+- [Set up in Docker](docs/HOW-TO-SETUP-DOCKER.md): prepare mounts, mint a token, run, TLS, Compose.
