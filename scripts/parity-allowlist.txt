@@ -31,7 +31,7 @@ flag|only-junos|--approver-require-auth-time|never|MEC-994/995 verified-approver
 flag|only-junos|--approver-role|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
 flag|only-junos|--approver-replay-store|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
 flag|only-junos|--require-verified-proposer|never|MEC-994/995 verified-approver identity is a rustjunosmcp-only pilot (W8); not yet rolled out to other mechub servers
-flag|only-junos|--tool-mode|P7|shared mecmcp_runtime::cli::ToolModeArgs flag that rustjunosmcp v2.4.0 adopted; rustopnsmcp pins mecmcp v0.30.1 without it, so adopt it at the next mecmcp bump (the flag is absent here, not ignored)
+flag|only-junos|--tool-mode|P7|mecmcp_runtime::cli::ToolModeArgs already exists at the pinned mecmcp v0.30.1, but rustopnsmcp does not flatten it and has no compact tool set yet, so the flag is absent here, not ignored; decide at P7 whether to adopt it
 
 # --- subcommands ---
 subcommand|only-junos|state|P5|state resolve lands with startup reconciliation of interrupted applies in P5
