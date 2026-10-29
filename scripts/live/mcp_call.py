@@ -118,6 +118,14 @@ def resolve(payload, pointer):
     return True, node
 
 
+def unknown_variables(value, saved):
+    """Names of every "$name" string in `value` that has no saved value."""
+    if isinstance(value, str):
+        return [value[1:]] if re.fullmatch(r"\$\w+", value) and value[1:] not in saved else []
+    children = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+    return [name for child in children for name in unknown_variables(child, saved)]
+
+
 def substitute(value, saved):
     if isinstance(value, str) and value.startswith("$") and value[1:] in saved:
         return saved[value[1:]]
@@ -128,26 +136,18 @@ def substitute(value, saved):
     return value
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("calls")
-    parser.add_argument("--stdio", action="store_true")
-    parser.add_argument("--url")
-    parser.add_argument("--token-env")
-    parser.add_argument("--stderr", help="file for the server's stderr (stdio only); default discards it")
-    parser.add_argument("--keep-going", action="store_true", help="run every call even after a FAIL (read-only runs)")
-    parser.add_argument("--vars")
-    parser.add_argument("--save-vars")
-    parser.add_argument("server", nargs="*")
-    args = parser.parse_args()
-    client = Stdio(args.server, args.stderr) if args.stdio else Http(args.url, os.environ[args.token_env])
-    client.rpc({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp_call", "version": "0"}}})
-    client.rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, want_reply=False)
-    saved = json.load(open(args.vars)) if args.vars else {}
+def run_calls(client, calls, saved, keep_going):
+    """Run the calls in order, mutating `saved`; return the number of FAILed calls."""
     failures = 0
-    calls = json.load(open(args.calls))
     for index, call in enumerate(calls, start=1):
+        unknown = unknown_variables(call.get("arguments", {}), saved)
+        if unknown:  # never send a literal "$name" to the server
+            failures += 1
+            print("FAIL %-34s not sent" % call["name"], *("<- unknown variable $%s in arguments" % n for n in unknown))
+            if not keep_going:
+                print("ABORT: stopping after %s; %d later call(s) not run" % (call["name"], len(calls) - index))
+                break
+            continue
         reply = client.rpc({"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {
             "name": call["tool"], "arguments": substitute(call.get("arguments", {}), saved)}})
         result = reply.get("result") or {}
@@ -176,6 +176,7 @@ def main():
             found, node = resolve(payload, pointer)
             if not found:
                 problems.append("save %s: pointer %s unresolved" % (variable, pointer))
+                saved.pop(variable, None)  # a stale value from --vars must not survive into --save-vars
                 continue
             saved[variable] = node
         failures += bool(problems)
@@ -184,14 +185,38 @@ def main():
         print("%s %-34s %s%s" % ("FAIL" if problems else "PASS", call["name"],
                                  "[error] " if is_error else "", detail), *("<- " + p for p in problems),
               *(["shown " + json.dumps(shown)] if shown else []))
-        if problems and not args.keep_going:  # later calls may act on state this one was guarding
+        if problems and not keep_going:  # later calls may act on state this one was guarding
             print("ABORT: stopping after %s; %d later call(s) not run" % (call["name"], len(calls) - index))
             break
-    if args.save_vars:
-        fd = os.open(args.save_vars, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            json.dump(saved, handle)
-    client.close()
+    return failures
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("calls")
+    parser.add_argument("--stdio", action="store_true")
+    parser.add_argument("--url")
+    parser.add_argument("--token-env")
+    parser.add_argument("--stderr", help="file for the server's stderr (stdio only); default discards it")
+    parser.add_argument("--keep-going", action="store_true", help="run every call even after a FAIL (read-only runs)")
+    parser.add_argument("--vars")
+    parser.add_argument("--save-vars")
+    parser.add_argument("server", nargs="*")
+    args = parser.parse_args()
+    client = Stdio(args.server, args.stderr) if args.stdio else Http(args.url, os.environ[args.token_env])
+    client.rpc({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp_call", "version": "0"}}})
+    client.rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, want_reply=False)
+    saved = json.load(open(args.vars)) if args.vars else {}
+    failures = 0
+    try:
+        failures = run_calls(client, json.load(open(args.calls)), saved, args.keep_going)
+    finally:  # keep ids saved so far even when a later call kills the client
+        if args.save_vars:
+            fd = os.open(args.save_vars, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump(saved, handle)
+        client.close()
     sys.exit(1 if failures else 0)
 
 

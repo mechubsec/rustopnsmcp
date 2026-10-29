@@ -24,7 +24,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *args):
-        pass
+        with open("requests.log", "a") as log:  # lets the test prove which calls reached the device
+            log.write(self.path + "\n")
 server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain("leaf.pem", "leaf.key")
@@ -67,6 +68,16 @@ cat > undefined.json <<'JSON'
   "pointers":{"/nothing":"$never_saved"}}]
 JSON
 printf '{"canary":"SAVEDVALUECANARY"}' > vars.json
+cat > unsent.json <<'JSON'
+[{"name":"unknown argument variable","tool":"list_opnsense_interfaces","arguments":{"device":"stub","search_phrase":"$nowhere"},"expect":"error"}]
+JSON
+cat > crash.json <<'JSON'
+[{"name":"saves first","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "save":{"kept":"/product_version"}},
+ {"name":"then crashes","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/note":"("}}]
+JSON
+printf '{"gone":"STALEVALUE"}' > stale.json
 cd - >/dev/null
 client=(python3 -I scripts/live/mcp_call.py)
 server=(--stdio -- "$bin" --device-mapping "$work/devices.json" --inventory-readonly)
@@ -96,3 +107,17 @@ undefined=$("${client[@]}" "$work/undefined.json" "${server[@]}") || true
 # shellcheck disable=SC2016  # the $ is literal
 printf '%s' "$undefined" | grep -q '^FAIL undefined variable.*unknown variable \$never_saved'
 if printf '%s' "$saves$unresolved$undefined" | grep -q 'ROWUUID'; then echo 'device value leaked'; exit 1; fi
+# An argument naming an unknown variable FAILs and is never sent to the device.
+: > "$work/requests.log"
+unsent=$("${client[@]}" "$work/unsent.json" "${server[@]}") || true
+printf '%s\n' "$unsent"
+# shellcheck disable=SC2016  # the $ is literal
+printf '%s' "$unsent" | grep -q '^FAIL unknown argument variable.*unknown variable \$nowhere in arguments'
+printf '%s' "$unsent" | grep -q '^ABORT'
+if grep -q interfaces "$work/requests.log"; then echo 'call with an unknown variable was sent'; exit 1; fi
+# --save-vars is written even when the client dies mid-sequence.
+"${client[@]}" "$work/crash.json" --save-vars "$work/crash-vars.json" "${server[@]}" >/dev/null 2>&1 && { echo 'crash run exited 0'; exit 1; }
+python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1])).get("kept") == "26.7"' "$work/crash-vars.json"
+# An unresolved save drops a stale value from --vars instead of persisting it.
+"${client[@]}" "$work/unresolved.json" --vars "$work/stale.json" --save-vars "$work/stale-out.json" "${server[@]}" >/dev/null || true
+python3 -I -c 'import json,sys; assert "gone" not in json.load(open(sys.argv[1]))' "$work/stale-out.json"
