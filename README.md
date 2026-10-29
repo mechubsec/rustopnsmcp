@@ -1,6 +1,3 @@
-> [!WARNING]
-> 🚧 **Under construction — not operational.** `rustopnsmcp` is in early development and is not ready for use. Tools, configuration and APIs will change without notice. Do not deploy it against a real OPNsense firewall.
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mechub-mark.svg">
@@ -32,28 +29,30 @@ workflows.
 
 ## Status
 
-**In development.** Nothing is released yet.
+**Verified against OPNsense 26.7.5 (opnsense-lab):** reads, the configuration
+fingerprint, alias and filter-rule change sets, and a forced partial apply.
 
-- **Phase 1 — reads:** system status, interfaces, firewall rules and aliases,
-  NAT, routes, DHCP leases, gateways, firmware/version. OPNsense REST API with an
-  API key and secret from the environment or an owner-only file; TLS always
-  verified.
-- **Phase 2a — governed writes, aliases:** create/update/delete firewall
-  aliases through mecmcp's change sets (plan, digest, human approval, apply
-  with a drift check). OPNsense has no candidate configuration, so writes
-  persist to `config.xml` immediately and only take effect once `apply`
-  calls `reconfigure`; a partial apply is a reachable outcome.
-- **Phase 2b — governed writes, firewall rules:** the same lifecycle,
-  extended to firewall filter rules, through the same seven change-set
-  tools — a change set stages mutations against exactly one resource kind
-  (alias or rule) at a time. As with aliases, OPNsense has no candidate
-  configuration for filter rules: writes persist to `config.xml`
-  immediately and only take effect once `apply` calls the filter
-  controller's `apply` endpoint.
+v1.0 will cover OPNsense reads, governed alias and filter-rule writes through
+mecmcp change sets (plan, digest, approval, apply with a drift check), scoped
+tokens and audit, all over the OPNsense REST API with an API key and secret
+from the environment or an owner-only file; TLS is always verified.
 
-None of this has been exercised against a live OPNsense instance yet — every
-test here runs against synthetic fixtures. The under-construction banner
-above stays until a live-device verification pass has run.
+Limits, stated plainly:
+
+- Writes persist to `config.xml` immediately and take effect on `apply`; a
+  partial apply is a reachable, reported outcome.
+- `confirm_timeout_mins` is refused until filter-rule commit-confirm lands.
+- Automatic and legacy filter rules can be listed but not changed.
+- NAT port forwards are not listed yet (deferred to P4/P5.2).
+- Not yet released or packaged.
+
+### Tools
+
+| Group | Tools |
+|---|---|
+| Fleet | `get_device_list`, `gather_device_facts`, `opnsmcp_status`, `add_device`, `reload_devices` |
+| Reads | `get_opnsense_system_status`, `get_opnsense_firmware_status`, `list_opnsense_interfaces`, `list_opnsense_firewall_rules`, `list_opnsense_aliases`, `list_opnsense_nat_rules`, `list_opnsense_routes`, `list_opnsense_gateways`, `list_opnsense_dhcp_leases` |
+| Change control | `get_opnsense_config_fingerprint`, `create_opnsense_change_set`, `approve_opnsense_change_set`, `apply_opnsense_change_set`, `confirm_opnsense_change_set`, `cancel_opnsense_change_set`, `get_opnsense_change_set_status`, `list_opnsense_change_sets` |
 
 Design and scope: [mecmcp#425](https://github.com/mechubsec/mecmcp/issues/425).
 
