@@ -26,10 +26,16 @@
     nocopytruncate
     sharedscripts
     postrotate
-        # Only an active unit has a descriptor to reopen; an inactive one is not
-        # a rotation failure. A failed kill of an active unit still fails.
-        if systemctl is-active --quiet rustopnsmcp.service; then
-            systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service
-        fi
+        # is-active exits 0 when active and 3 when inactive (4: no such unit);
+        # those are not rotation failures. Any other status means the query
+        # itself failed (bus unavailable, ...): the server may be running and
+        # still writing to the rotated file, so fail rather than skip silently.
+        status=0
+        systemctl is-active --quiet rustopnsmcp.service || status=$?
+        case $status in
+            0) systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service ;;
+            3|4) ;;
+            *) echo "rustopnsmcp-audit: systemctl is-active failed ($status); not signalling" >&2; exit "$status" ;;
+        esac
     endscript
 }

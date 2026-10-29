@@ -11,12 +11,12 @@ command -v logrotate >/dev/null || { echo "FAIL: logrotate not installed"; exit 
 
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin"
-# STUB_ACTIVE=0 -> is-active reports inactive; STUB_KILL_FAIL=1 -> kill exits 1.
+# STUB_ACTIVE_RC=<n> -> is-active exits n (3 inactive, 4 no such unit); STUB_KILL_FAIL=1 -> kill exits 1.
 cat >"$scratch/bin/systemctl" <<EOS
 #!/bin/sh
 echo "\$@" >> "$scratch/systemctl.log"
 case "\$1" in
-    is-active) [ "\${STUB_ACTIVE:-1}" = 1 ]; exit \$? ;;
+    is-active) exit "\${STUB_ACTIVE_RC:-0}" ;;
     kill) [ "\${STUB_KILL_FAIL:-0}" = 1 ] && exit 1; exit 0 ;;
 esac
 EOS
@@ -46,9 +46,18 @@ grep -qxF 'kill --kill-whom=main --signal=HUP rustopnsmcp.service' "$scratch/sys
     || { echo "FAIL: postrotate did not signal the server (whole-line match)"; exit 1; }
 
 # Inactive unit: rotation succeeds, nothing is killed.
-STUB_ACTIVE=0 rotate || { echo "FAIL: rotation failed with an inactive unit"; cat "$scratch/err"; exit 1; }
+STUB_ACTIVE_RC=3 rotate || { echo "FAIL: rotation failed with an inactive unit"; cat "$scratch/err"; exit 1; }
 [[ -f "$scratch/var/audit.jsonl.1" ]] || { echo "FAIL: inactive case did not rotate"; exit 1; }
 if grep -q '^kill ' "$scratch/systemctl.log"; then echo "FAIL: killed an inactive unit"; exit 1; fi
+
+# Unknown unit (4) is quiet too; a failed QUERY (any other status) must fail the
+# rotation, with no kill, rather than leave a live server on the rotated file.
+STUB_ACTIVE_RC=4 rotate || { echo "FAIL: rotation failed with an unknown unit"; cat "$scratch/err"; exit 1; }
+if grep -q '^kill ' "$scratch/systemctl.log"; then echo "FAIL: killed an unknown unit"; exit 1; fi
+for rc in 1 2 5 255; do
+    if STUB_ACTIVE_RC=$rc rotate; then echo "FAIL: is-active query failure ($rc) was treated as inactive"; exit 1; fi
+    if grep -q '^kill ' "$scratch/systemctl.log"; then echo "FAIL: signalled after a failed query"; exit 1; fi
+done
 
 # Active unit whose kill fails: the rotation must report failure.
 if STUB_KILL_FAIL=1 rotate; then echo "FAIL: failed kill of an active unit was swallowed"; exit 1; fi
