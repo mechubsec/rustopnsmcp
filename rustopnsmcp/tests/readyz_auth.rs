@@ -107,6 +107,11 @@ fn server_for(port: u16, cert_pem: &str, dir: &std::path::Path) -> OpnsenseServe
 
 /// One in-process call to a read tool, so the client sees the device's reply.
 async fn call_status(server: &OpnsenseServer) {
+    call_tool(server, "get_opnsense_system_status").await;
+}
+
+/// One in-process call to the named tool taking only `device`.
+async fn call_tool(server: &OpnsenseServer, tool: &str) {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let serving = server.clone();
     let task = tokio::spawn(async move {
@@ -118,10 +123,7 @@ async fn call_status(server: &OpnsenseServer) {
         unreachable!()
     };
     let _ = client
-        .call_tool(
-            CallToolRequestParams::new("get_opnsense_system_status".to_owned())
-                .with_arguments(arguments),
-        )
+        .call_tool(CallToolRequestParams::new(tool.to_owned()).with_arguments(arguments))
         .await;
     client.cancel().await.unwrap();
     let _ = task.await;
@@ -219,4 +221,23 @@ async fn a_403_alone_never_fails_readiness() {
     let server = server_for(port, &cert_pem, dir.path());
     call_status(&server).await;
     assert_eq!(readyz(&server).await.0, 200);
+}
+
+/// List tools and the fingerprint go out as POST, a different client path
+/// from the GET behind `get_opnsense_system_status`.
+#[tokio::test]
+async fn readyz_follows_the_key_through_a_post_backed_tool() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let status = Arc::new(AtomicU16::new(401));
+    let (port, cert_pem) = mock_device(Arc::clone(&status)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_for(port, &cert_pem, dir.path());
+
+    call_tool(&server, "list_opnsense_aliases").await;
+    let (code, raw) = readyz(&server).await;
+    assert_eq!(code, 503, "a 401 on a POST path must fail readiness: {raw}");
+
+    status.store(200, Ordering::SeqCst);
+    call_tool(&server, "list_opnsense_aliases").await;
+    assert_eq!(readyz(&server).await.0, 200, "a 2xx on POST clears it");
 }
