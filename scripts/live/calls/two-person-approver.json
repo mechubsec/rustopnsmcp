@@ -1,0 +1,5 @@
+[
+ {"name":"approve with a stale digest","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"expect":"error"},
+ {"name":"still planned","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs"},"expect":"ok","pointers":{"/state":"^planned$"}},
+ {"name":"approve","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"ok","pointers":{"/state":"^approved$"}}
+]

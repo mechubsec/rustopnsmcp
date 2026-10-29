@@ -1,0 +1,11 @@
+[
+ {"name":"fingerprint still the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"apply with a drifted fingerprint","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"expect":"error"},
+ {"name":"nothing was written","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_approved"},"expect":"ok","pointers":{"/total":"^0$"}},
+ {"name":"apply","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"alias is live","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_approved"},"expect":"ok","pointers":{"/total":"^1$"},"save":{"alias":"/rows/0/uuid"}},
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp":"/fingerprint"}},
+ {"name":"inverse: delete alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"delete","resource":"alias","uuid":"$alias"}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}}
+]
