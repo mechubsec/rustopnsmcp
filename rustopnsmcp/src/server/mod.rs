@@ -34,7 +34,7 @@ use rustopnsmcp_core::{
     client::OpnsenseClient,
     error::OpnsenseError,
     inventory::DeviceRegistry,
-    tools::{WRITE_TOOLS, changeset, fleet, read},
+    tools::{WRITE_TOOLS, changeset, feed, fleet, read},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -762,6 +762,34 @@ impl OpnsenseServer {
             "list_opnsense_aliases",
             &device,
             move |client| async move { read::list_aliases(&client, &args).await },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "get_opnsense_feed_status",
+        description = "mecfeedmcp feed subscriptions on an OPNsense device: each URL-table alias \
+                       whose URL path is /feeds/opnsense-url-table/{address,prefix,domain}, with \
+                       its kind, refresh interval, auth type (never the credentials), item \
+                       counts, last update, and content_etag, the mecfeed-serve ETag recomputed \
+                       from the live pf table (null when it cannot be reproduced exactly). \
+                       Fetch errors are not reported: OPNsense exposes none through its API. \
+                       Read-only. \
+                       Output is redacted: values matching known secret patterns (API keys \
+                       and secrets, pre-shared keys, private keys, certificates, password \
+                       hashes) are replaced before being returned, and device-sourced \
+                       content is marked as untrusted."
+    )]
+    async fn get_opnsense_feed_status(
+        &self,
+        Parameters(args): Parameters<read::DeviceArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.read_device(
+            &context,
+            "get_opnsense_feed_status",
+            &args.device,
+            |client| async move { feed::feed_status(&client).await },
         )
         .await
     }
@@ -1701,7 +1729,7 @@ mod tests {
         }
     }
 
-    /// The eleven read tools, all redacted through the shared
+    /// The twelve read tools, all redacted through the shared
     /// [`respond::respond_device`] path with [`OPNSENSE_PROFILE`].
     const RESPOND_REDACTED_TOOLS: &[&str] = &[
         "gather_device_facts",
@@ -1711,6 +1739,7 @@ mod tests {
         "list_opnsense_gateways",
         "list_opnsense_firewall_rules",
         "list_opnsense_aliases",
+        "get_opnsense_feed_status",
         "list_opnsense_nat_rules",
         "list_opnsense_routes",
         "list_opnsense_dhcp_leases",

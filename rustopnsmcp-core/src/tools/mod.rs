@@ -31,6 +31,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_opnsense_interfaces",
     "list_opnsense_firewall_rules",
     "list_opnsense_aliases",
+    "get_opnsense_feed_status",
     "list_opnsense_nat_rules",
     "list_opnsense_routes",
     "list_opnsense_gateways",
