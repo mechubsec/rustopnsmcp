@@ -13,5 +13,5 @@ case "$actor" in agent|human) ;; *) echo "actor must be agent or human" >&2; exi
 vmid=$("$here/rig-ctl.sh" vmid "$rig")
 # Ids get recycled: prove the same guest still answers to the name immediately before minting.
 [ "$("$here/rig-ctl.sh" vmid "$rig" 2>/dev/null)" = "$vmid" ] || { echo "$rig no longer resolves to the same guest; refusing" >&2; exit 1; }
-ssh "$RIG_PVE" pct exec "$vmid" -- runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \
+ssh -n "$RIG_PVE" pct exec "$vmid" -- runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \
   --tokens-file /var/lib/rustopnsmcp/tokens.json --name "$name" --devices opnsense-lab --tools '\*' --actor-type "$actor"

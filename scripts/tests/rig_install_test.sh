@@ -11,16 +11,20 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tmp" "$work/guest"; export TMPDIR="$work/tmp"
 cat > "$work/bin/ssh" <<STUB
 #!/usr/bin/env bash
+# Like real ssh: without -n it reads stdin to EOF, passing it to the remote command or, for the local
+# pvesh/hostname answers, swallowing it.
+nostdin=0; [ "\$1" = -n ] && { nostdin=1; shift; }
 host=\$1; shift
 echo "ssh \$host \$*" >> "$work/ssh-calls"
 case "\$*" in
   *"pvesh get /cluster/resources"*)
+    [ \$nostdin = 1 ] || cat >/dev/null
     n=\$(( \$(cat "$work/pvesh-count" 2>/dev/null || echo 0) + 1 )); echo \$n > "$work/pvesh-count"
     vmid=901
     if [ -e "$work/flip" ] || [ \$n -gt "\${FLIP_AFTER:-999}" ]; then vmid=902; fi
     printf '[{"name":"test-labmode-opns","type":"lxc","node":"nodeA","vmid":%s,"status":"running","tags":"disposable"}]' \$vmid ;;
-  "hostname -s") echo nodeA ;;
-  *) exec bash -c "\$*" ;;
+  "hostname -s") [ \$nostdin = 1 ] || cat >/dev/null; echo nodeA ;;
+  *) [ \$nostdin = 1 ] && exec bash -c "\$*" </dev/null; exec bash -c "\$*" ;;
 esac
 STUB
 cat > "$work/bin/scp" <<STUB
@@ -37,9 +41,10 @@ case \$1 in
     case \$1 in
       hostname) echo 192.0.2.10 ;;
       systemd-sysusers|systemd-tmpfiles|systemctl|chown) ;;
-      install) mkdir -p "\$root\${@: -1}"; touch "$work/credentials-dir-made" ;;
+      install) mkdir -p "\$root\${@: -1}"; touch "$work/credentials-dir-made"; [ -z "\${FLIP_ON_INSTALL:-}" ] || touch "$work/flip" ;;
       mkdir) mkdir -p "\$root\${@: -1}" ;;
-      sh) shift 2; sh -c "\$(printf '%s' "\$1" | sed -E "s#(^|[ >])/(etc|usr|var)/#\\1\$root/\\2/#g")" ;;
+      sh) shift 2; cmd="\$(printf '%s' "\$1" | sed -E "s#(^|[ >])/(etc|usr|var)/#\\1\$root/\\2/#g")"
+          if [ -n "\${ZERO_WRITES:-}" ]; then sh -c "\$cmd" </dev/null; else sh -c "\$cmd"; fi ;;
       stat) shift; fmt=\$2; shift 2; for f in "\$@"; do stat -c "\$fmt" "\$root\$f"; done | sed "s#\$root##" ;;
       runuser) echo "p3-token-value" ;;
       *) echo "unexpected guest command: \$*" >&2; exit 9 ;;
@@ -50,7 +55,7 @@ chmod +x "$work/bin"/*
 printf 'OPNSENSE_URL=https://192.0.2.1\nOPNSENSE_API_KEY=CANARY-KEY\nOPNSENSE_API_SECRET=CANARY-SECRET\nOPNSENSE_CA=%s\n' "$work/ca.pem" > "$work/env"
 printf 'CA-BYTES' > "$work/ca.pem"; printf 'BIN' > "$work/binary"
 reset() { rm -rf "$work/guest" "$work/flip" "$work/credentials-dir-made" "$work/pvesh-count"; mkdir "$work/guest"; : > "$work/ssh-calls"; : > "$work/pct-calls"; }
-run() { PATH="$work/bin:$PATH" RIG_PVE=pvehost LAB_HOST=labhost LAB_ENV_FILE="${ENVF-$work/env}" bash "$live/$1" "${@:2}" 2>"$work/err"; }
+run() { PATH="$work/bin:$PATH" RIG_PVE=pvehost LAB_HOST=labhost LAB_ENV_FILE="${ENVF-$work/env}" bash "$live/$1" "${@:2}" 2>"$work/err" </dev/null; }
 fail() { echo "FAIL $*"; exit 1; }
 
 # 1. Happy path: files land, the stat report works and every size is non-zero, no credential in any output.
@@ -65,12 +70,16 @@ grep -q -- '--audit-journald' "$work/guest/etc/systemd/system/rustopnsmcp.servic
 grep -q 'systemctl enable' "$work/pct-calls" || fail "service not enabled"
 echo "ok   install: stat report is parsed correctly, 4 files, 600, non-zero, no credential in argv or output"
 
+# 1b. If the rig received nothing (zero-size files), the install fails loudly and prints no secret.
+reset
+if ZERO_WRITES=1 run rig-install.sh test-labmode-opns "$work/binary" >"$work/out"; then fail "install succeeded with empty credential files"; fi
+grep -q 'missing or empty' "$work/err" || fail "no clear message: $(head -1 "$work/err")"
+grep -q CANARY "$work/out" "$work/err" && fail "secret printed"
+echo "ok   install: zero-size credential files make the install fail with a clear message"
+
 # 2. A guest id that changes after resolve is refused before any credential is sent.
 reset
-rm -f "$work/flip"
-( while [ ! -e "$work/credentials-dir-made" ]; do :; done; touch "$work/flip" ) & watcher=$!
-if run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then kill $watcher 2>/dev/null || true; fail "install proceeded after the vmid changed"; fi
-kill $watcher 2>/dev/null || true
+if FLIP_ON_INSTALL=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install proceeded after the vmid changed"; fi
 [ ! -e "$work/guest/etc/rustopnsmcp/credentials/api-key" ] || fail "credential written after the vmid changed"
 grep -q 'no longer resolves' "$work/err" || fail "wrong refusal: $(head -1 "$work/err")"
 echo "ok   install: vmid changed after the credentials directory was made, refused with nothing written"

@@ -18,20 +18,20 @@ vmid=$("$here/rig-ctl.sh" vmid "$rig")
 same_guest() {
   [ "$("$here/rig-ctl.sh" vmid "$rig" 2>/dev/null)" = "$vmid" ] || { echo "$rig no longer resolves to the same guest; refusing" >&2; exit 1; }
 }
-inrig() { same_guest; ssh "$RIG_PVE" pct exec "$vmid" -- "$@"; }
+inrig() { same_guest; ssh -n "$RIG_PVE" pct exec "$vmid" -- "$@"; }
 ip=$(inrig hostname -I | awk '{print $1}')
 [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "$rig has no IPv4 address" >&2; exit 1; }
 mode=""; [ "$rig" = test-labmode-opns ] && mode="--lab-mode"
 emit() { ssh "$LAB_HOST" env "LAB_ENV_FILE=$LAB_ENV_FILE" bash -s -- "$1" < "$here/emit-credential.sh"; }
-tmp=$(ssh "$RIG_PVE" mktemp -d); local_tmp=$(mktemp -d)
+tmp=$(ssh -n "$RIG_PVE" mktemp -d); local_tmp=$(mktemp -d)
 require_match "node temp dir" "$tmp" "$abs_path_re"
-trap 'ssh "$RIG_PVE" rm -rf "$tmp"; rm -rf "$local_tmp"' EXIT
+trap 'ssh -n "$RIG_PVE" rm -rf "$tmp"; rm -rf "$local_tmp"' EXIT
 sed -e "s/@RIG_IP@/$ip/g" -e "s/@RIG_NAME@/$rig/g" -e "s/@LAB_MODE@/$mode/" "$here/rig-override.conf.in" > "$local_tmp/override.conf"
 cp "$binary" "$local_tmp/rustopnsmcp"
 scp -q "$local_tmp/rustopnsmcp" "$root/packaging/systemd/rustopnsmcp.service" "$root/packaging/systemd/rustopnsmcp.sysusers" \
   "$root/packaging/systemd/rustopnsmcp.tmpfiles" "$local_tmp/override.conf" "$RIG_PVE:$tmp/"
 # shellcheck disable=SC2029 # vmid and paths are expanded locally on purpose
-push() { same_guest; ssh "$RIG_PVE" pct push "$vmid" "$tmp/$1" "$2" --perms "$3"; }
+push() { same_guest; ssh -n "$RIG_PVE" pct push "$vmid" "$tmp/$1" "$2" --perms "$3"; }
 inrig mkdir -p /etc/systemd/system/rustopnsmcp.service.d
 push rustopnsmcp /usr/local/bin/rustopnsmcp 0755
 push rustopnsmcp.service /etc/systemd/system/rustopnsmcp.service 0644
@@ -42,9 +42,10 @@ inrig systemd-sysusers
 inrig systemd-tmpfiles --create
 inrig install -d -m 0700 -o rustopnsmcp -g rustopnsmcp /etc/rustopnsmcp/credentials
 # umask 077 and the stream: the file is created 0600; ownership is fixed afterwards. The guest check runs
-# before the remote command starts, so nothing is sent to a recycled id.
+# before the remote command starts, so nothing is sent to a recycled id. This is the only ssh to the node that
+# reads stdin (the credential stream); every other one takes -n, or it would swallow the stream first.
 # shellcheck disable=SC2029 # vmid and the path are expanded locally on purpose
-put() { same_guest; ssh "$RIG_PVE" "pct exec $vmid -- sh -c 'umask 077; cat > $1'"; inrig chown rustopnsmcp:rustopnsmcp "$1"; }
+put() { same_guest </dev/null; ssh "$RIG_PVE" "pct exec $vmid -- sh -c 'umask 077; cat > $1'"; inrig chown rustopnsmcp:rustopnsmcp "$1"; }
 emit key    | put /etc/rustopnsmcp/credentials/api-key
 emit secret | put /etc/rustopnsmcp/credentials/api-secret
 emit ca     | put /etc/rustopnsmcp/credentials/ca.pem
@@ -56,5 +57,9 @@ inrig systemctl enable rustopnsmcp
 # shell re-splits ssh arguments, so the whole remote command goes as one string with the stat format quoted.
 same_guest
 # shellcheck disable=SC2029 # vmid is expanded locally on purpose
-ssh "$RIG_PVE" "pct exec $vmid -- stat -c '%a %U %s %n' /etc/rustopnsmcp/devices.json /etc/rustopnsmcp/credentials/api-key /etc/rustopnsmcp/credentials/api-secret /etc/rustopnsmcp/credentials/ca.pem" \
-  | sed 's#/etc/rustopnsmcp/##'
+report=$(ssh -n "$RIG_PVE" "pct exec $vmid -- stat -c '%a %U %s %n' /etc/rustopnsmcp/devices.json /etc/rustopnsmcp/credentials/api-key /etc/rustopnsmcp/credentials/api-secret /etc/rustopnsmcp/credentials/ca.pem" \
+  | sed 's#/etc/rustopnsmcp/##')
+printf '%s\n' "$report"
+if [ "$(printf '%s\n' "$report" | wc -l)" != 4 ] || printf '%s\n' "$report" | awk '$3 + 0 == 0 { bad = 1 } END { exit !bad }'; then
+  echo "install failed: a credential file or devices.json is missing or empty on $rig" >&2; exit 1
+fi

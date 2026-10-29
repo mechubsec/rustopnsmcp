@@ -15,7 +15,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/rig-lib.sh"
 require_match RIG_PVE "$RIG_PVE" "$alias_re"
 # Resolve the name to a guest and its tags every time; ids get recycled.
-info=$(ssh "$RIG_PVE" pvesh get /cluster/resources --type vm --output-format json | NAME="$name" python3 -I -c '
+info=$(ssh -n "$RIG_PVE" pvesh get /cluster/resources --type vm --output-format json | NAME="$name" python3 -I -c '
 import json, os, sys
 rows = [r for r in json.load(sys.stdin) if r.get("name") == os.environ["NAME"]]
 if len(rows) != 1:
@@ -27,22 +27,22 @@ if guest.get("type") != "lxc" or "protected" in tags or "disposable" not in tags
 print(guest["vmid"], guest["node"], guest["status"])')
 read -r vmid node status <<<"$info"
 require_match "guest id" "$vmid" '^[0-9]{1,10}$'
-[ "$node" = "$(ssh "$RIG_PVE" hostname -s)" ] || { echo "$name is on $node, not on the node $RIG_PVE reaches" >&2; exit 1; }
+[ "$node" = "$(ssh -n "$RIG_PVE" hostname -s)" ] || { echo "$name is on $node, not on the node $RIG_PVE reaches" >&2; exit 1; }
 echo "$name: node $node, $status, tags include disposable and not protected" >&2
-inrig() { ssh "$RIG_PVE" pct exec "$vmid" -- "$@"; }
+inrig() { ssh -n "$RIG_PVE" pct exec "$vmid" -- "$@"; }
 need_running() { [ "$status" = running ] || { echo "$name is $status; start it first" >&2; exit 1; }; }
 case "$action" in
   vmid) echo "$vmid" ;;
   check) ;;
   start)
     # shellcheck disable=SC2029 # vmid is resolved locally on purpose
-    [ "$status" = running ] || ssh "$RIG_PVE" pct start "$vmid"
+    [ "$status" = running ] || ssh -n "$RIG_PVE" pct start "$vmid"
     for _ in $(seq 30); do
       [ -n "$(inrig hostname -I 2>/dev/null | tr -d ' \n')" ] && exit 0
       sleep 2
     done
     echo "$name has no address after 60 s" >&2; exit 1 ;;
-  stop) [ "$status" = stopped ] || ssh "$RIG_PVE" pct shutdown "$vmid" --timeout 30 ;;
+  stop) [ "$status" = stopped ] || ssh -n "$RIG_PVE" pct shutdown "$vmid" --timeout 30 ;;
   svc)
     case "${3:?verb}" in start|stop|restart|reload|status|is-active) ;; *) echo "verb not allowed: $3" >&2; exit 2 ;; esac
     need_running; inrig systemctl "$3" rustopnsmcp ;;
