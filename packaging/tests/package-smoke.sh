@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # RELEASE-ARTIFACTS §8: assert a built archive's shape without installing it.
 # Usage: package-smoke.sh <rustopnsmcp-v*.tar.gz>   (needs the .sha256 beside it)
+#
+# This EXECUTES the package's own packaging/lxc/install.sh (check-only) and
+# bin/rustopnsmcp --version: use it on archives you built, never to vet an
+# untrusted download. A package whose glibc floor exceeds this host's fails
+# check 10 by design.
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
+command -v jq >/dev/null || fail "jq is required (SBOM check) but not on PATH"
 
 # Resolve everything from the repo BEFORE any cd; an unreadable pin is a failure,
 # never a skipped check (an unrun guard is an inert guard).
@@ -70,7 +76,7 @@ for required in bin/rustopnsmcp packaging/lxc/install.sh packaging/systemd/rusto
     [[ -s "$required" ]] || fail "missing $required"
 done
 
-# 6. BUILD-INFO keys and formats. (binary_sha256 is verified by install.sh below.)
+# 6. BUILD-INFO keys and formats; binary_sha256 is compared here independently of install.sh.
 info() { sed -n "s/^$1=//p" BUILD-INFO | head -n 1; }
 for key in release_status version git_commit git_dirty source_date_epoch target mecmcp_ref glibc_floor rustc binary_sha256; do
     [[ -n "$(info "$key")" ]] || fail "BUILD-INFO lacks $key"
@@ -82,6 +88,7 @@ done
 [[ "$(info source_date_epoch)" =~ ^[0-9]+$ ]] || fail "source_date_epoch is not an integer"
 [[ "$(info glibc_floor)" =~ ^[0-9]+\.[0-9]+ ]] || fail "glibc_floor is not a version"
 [[ "$(info binary_sha256)" =~ ^[0-9a-f]{64}$ ]] || fail "binary_sha256 is not 64-hex"
+[[ "$(info binary_sha256)" == "$(sha256sum bin/rustopnsmcp | cut -d' ' -f1)" ]] || fail "binary_sha256 does not match bin/rustopnsmcp"
 [[ "$(info version)" == "${root_dir#rustopnsmcp-v}" ]] || fail "BUILD-INFO version differs from the archive name"
 [[ "$archive_name" == "$root_dir-$(info target).tar.gz" ]] || fail "BUILD-INFO target differs from the archive name"
 case "$(info rustc)" in "rustc "* | "unknown ("*) ;; *) fail "rustc must be 'rustc …' or 'unknown (…)'" ;; esac
