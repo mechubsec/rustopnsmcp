@@ -119,14 +119,14 @@
   "name": "add_device refused read-only",
   "tool": "add_device",
   "arguments": {
-   "device": "x",
+   "device": "opnsense-lab",
    "endpoint": "https://x.example.org",
    "api_key_file": "/nope",
    "api_secret_file": "/nope",
    "ca_pem_path": "/nope"
   },
   "expect": "error",
-  "error_contains": "readonly"
+  "error_contains": "inventory is read-only"
  },
  {
   "name": "reload_devices refused read-only",
