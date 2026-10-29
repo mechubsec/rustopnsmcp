@@ -432,6 +432,128 @@ async fn list_dhcp_leases_parses_the_search_envelope() {
     assert_eq!(leases["rows"][0]["hostname"], "example-host");
 }
 
+/// Routes for a device; `None` leaves that backend's settings endpoint absent (404).
+/// ISC is served only when `isc` is true.
+fn dhcp_routes(
+    dnsmasq_enabled: Option<&str>,
+    kea_enabled: Option<&str>,
+    isc: bool,
+) -> HashMap<String, serde_json::Value> {
+    use rustopnsmcp_core::endpoints as ep;
+    let mut routes = default_routes();
+    routes.remove(ep::DHCP_LEASES_SEARCH);
+    if isc {
+        routes.insert(
+            ep::DHCP_LEASES_SEARCH.to_owned(),
+            rustopnsmcp_core::testing::fixture("dhcp_leases"),
+        );
+    }
+    if let Some(enabled) = dnsmasq_enabled {
+        routes.insert(
+            ep::DNSMASQ_SETTINGS_GET.to_owned(),
+            serde_json::json!({ "dnsmasq": { "enable": enabled } }),
+        );
+    }
+    if let Some(enabled) = kea_enabled {
+        routes.insert(
+            ep::KEA_DHCPV4_GET.to_owned(),
+            serde_json::json!({ "dhcpv4": { "general": { "enabled": enabled } } }),
+        );
+    }
+    routes.insert(
+        ep::DNSMASQ_LEASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [{ "address": "192.0.2.50" }], "rowCount": 1, "total": 1, "current": 1 }),
+    );
+    routes.insert(
+        ep::KEA_LEASES4_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "total": 0, "current": 1,
+                            "stats": { "active": 0, "inactive": 0, "total": 0 } }),
+    );
+    routes
+}
+
+async fn dhcp_backend_for(
+    dnsmasq: Option<&str>,
+    kea: Option<&str>,
+    isc: bool,
+) -> Result<serde_json::Value, rustopnsmcp_core::error::OpnsenseError> {
+    let client = client_against(dhcp_routes(dnsmasq, kea, isc)).await;
+    read::list_dhcp_leases(&client, &no_filter()).await
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_dnsmasq_when_it_is_the_enabled_backend() {
+    let leases = dhcp_backend_for(Some("1"), Some("0"), false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq");
+    assert_eq!(leases["rows"][0]["address"], "192.0.2.50");
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_dnsmasq_when_kea_is_not_installed() {
+    let leases = dhcp_backend_for(Some("1"), None, false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq");
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_kea_when_it_is_the_enabled_backend() {
+    let leases = dhcp_backend_for(Some("0"), Some("1"), false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "kea");
+    let leases = dhcp_backend_for(None, Some("1"), false)
+        .await
+        .expect("leases");
+    assert_eq!(leases["backend"], "kea");
+}
+
+#[tokio::test]
+async fn two_enabled_dhcp_backends_are_refused_not_silently_narrowed() {
+    let error = dhcp_backend_for(Some("1"), Some("1"), true)
+        .await
+        .expect_err("both enabled");
+    assert!(error.to_string().contains("both"), "{error}");
+}
+
+#[tokio::test]
+async fn neither_backend_enabled_falls_back_to_isc_when_it_answers() {
+    for (dnsmasq, kea) in [
+        (None, None),
+        (Some("0"), None),
+        (None, Some("0")),
+        (Some("0"), Some("0")),
+    ] {
+        let leases = dhcp_backend_for(dnsmasq, kea, true).await.expect("leases");
+        assert_eq!(leases["backend"], "isc", "{dnsmasq:?} {kea:?}");
+        assert_eq!(leases["rows"][0]["hostname"], "example-host");
+    }
+}
+
+#[tokio::test]
+async fn neither_backend_enabled_and_no_isc_says_no_supported_backend_is_enabled() {
+    for (dnsmasq, kea) in [
+        (None, None),
+        (Some("0"), None),
+        (None, Some("0")),
+        (Some("0"), Some("0")),
+    ] {
+        let error = dhcp_backend_for(dnsmasq, kea, false)
+            .await
+            .expect_err("no backend");
+        let message = error.to_string();
+        assert!(
+            message.contains("no supported DHCP backend is enabled"),
+            "{message}"
+        );
+        for name in ["Dnsmasq", "Kea", "ISC"] {
+            assert!(message.contains(name), "{message}");
+        }
+    }
+}
+
 /// NAT has no combined endpoint on OPNsense, so this tool fetches both the
 /// outbound and 1:1 controllers and must return both.
 #[tokio::test]

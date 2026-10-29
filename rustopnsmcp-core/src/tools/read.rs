@@ -433,16 +433,90 @@ pub async fn list_routes(
     to_json(&search_page(client, endpoints::ROUTES_SEARCH, args, &page).await?)
 }
 
-/// `list_opnsense_dhcp_leases`: DHCPv4 leases, one page.
+/// Which DHCPv4 service answers lease queries on a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DhcpBackend {
+    Dnsmasq,
+    Kea,
+    Isc,
+}
+
+impl DhcpBackend {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dnsmasq => "dnsmasq",
+            Self::Kea => "kea",
+            Self::Isc => "isc",
+        }
+    }
+    const fn leases_path(self) -> &'static str {
+        match self {
+            Self::Dnsmasq => endpoints::DNSMASQ_LEASES_SEARCH,
+            Self::Kea => endpoints::KEA_LEASES4_SEARCH,
+            Self::Isc => endpoints::DHCP_LEASES_SEARCH,
+        }
+    }
+}
+
+/// Whether a backend's settings say it is enabled; an absent (404) endpoint counts as not enabled.
+async fn backend_enabled(
+    client: &OpnsenseClient,
+    path: &str,
+    pointer: &str,
+) -> Result<bool, OpnsenseError> {
+    match client.get(path).await {
+        Ok(settings) => Ok(settings
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            == Some("1")),
+        Err(OpnsenseError::Upstream { status: 404, .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Pick the enabled backend: Dnsmasq or Kea by their settings, else legacy ISC.
+async fn dhcp_backend(client: &OpnsenseClient) -> Result<DhcpBackend, OpnsenseError> {
+    let dnsmasq =
+        backend_enabled(client, endpoints::DNSMASQ_SETTINGS_GET, "/dnsmasq/enable").await?;
+    let kea = backend_enabled(client, endpoints::KEA_DHCPV4_GET, "/dhcpv4/general/enabled").await?;
+    match (dnsmasq, kea) {
+        (true, true) => Err(OpnsenseError::Config(
+            "both Dnsmasq and Kea DHCPv4 are enabled; listing one would hide the other's leases"
+                .to_owned(),
+        )),
+        (true, false) => Ok(DhcpBackend::Dnsmasq),
+        (false, true) => Ok(DhcpBackend::Kea),
+        (false, false) => Ok(DhcpBackend::Isc),
+    }
+}
+
+/// `list_opnsense_dhcp_leases`: DHCPv4 leases from the enabled backend, one page.
+///
+/// The result's `backend` field says which service answered.
 ///
 /// # Errors
-/// As [`list_firewall_rules`].
+/// As [`list_firewall_rules`], and [`OpnsenseError::Config`] when two backends are
+/// enabled or none is (Dnsmasq and Kea off and the legacy ISC endpoint absent).
 pub async fn list_dhcp_leases(
     client: &OpnsenseClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
     let page = page_request(args)?;
-    to_json(&search_page(client, endpoints::DHCP_LEASES_SEARCH, args, &page).await?)
+    let backend = dhcp_backend(client).await?;
+    let found = match search_page(client, backend.leases_path(), args, &page).await {
+        Err(OpnsenseError::Upstream { status: 404, .. }) if backend == DhcpBackend::Isc => {
+            return Err(OpnsenseError::Config(
+                "no supported DHCP backend is enabled (checked Dnsmasq, Kea and legacy ISC)"
+                    .to_owned(),
+            ));
+        }
+        other => other?,
+    };
+    let mut result = to_json(&found)?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("backend".to_owned(), backend.label().into());
+    }
+    Ok(result)
 }
 
 /// `list_opnsense_nat_rules`: outbound and 1:1 NAT rules, one page each.
