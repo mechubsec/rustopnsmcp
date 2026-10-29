@@ -1,0 +1,58 @@
+name: Release image
+
+# Builds, SBOMs, pushes and keyless-signs the image on every version tag, by
+# calling mecmcp's reusable workflow (docs/RELEASE-WORKFLOWS.md). Pushes to GHCR
+# and Docker Hub, then cosign-verifies the signature on both (a hard gate).
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for the image, e.g. v1.0.0 (-> tags 1.0.0, 1.0, latest)'
+        required: true
+
+jobs:
+  # The trigger glob also matches v01.2.3, and a dispatch version is free
+  # text. The reusable workflow only warns on a non-semver label and still
+  # pushes and signs raw `latest`, so refuse before anything is built.
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Version is strict vMAJOR.MINOR.PATCH
+        env:
+          VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be strict semver vMAJOR.MINOR.PATCH without leading zeros, got '$VERSION'."; exit 1
+          fi
+
+  release:
+    needs: validate-version
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign signing exchanges this job's OIDC token for a
+      # short-lived certificate. A reusable workflow's permissions can only be
+      # narrowed by its caller, so this job must grant them itself.
+      id-token: write
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      image: ghcr.io/${{ github.repository }}
+      # Docker Hub images are linux/amd64 only; platforms keeps its default.
+      dockerhub-image: docker.io/mechub/rustopnsmcp
+      description: 'OPNsense MCP server'
+      version: ${{ github.event.inputs.version }}
+      # No `ref` input: the reusable's image revision label is github.sha, so a
+      # separate ref would record a commit that was not built. It has no
+      # revision input; the default (the triggering ref) always matches the sha.
+    # Mapped by name, never `secrets: inherit`, which would hand the reusable
+    # workflow every repository and org secret this job can see.
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}

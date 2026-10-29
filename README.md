@@ -60,3 +60,15 @@ Design and scope: [mecmcp#425](https://github.com/mechubsec/mecmcp/issues/425).
 ## License
 
 Licensed under [MIT](LICENSE).
+
+## Documentation
+
+- [Operating rustopnsmcp](docs/OPERATIONS.md): SIGHUP reload, health, audit, upgrades.
+- [Filesystem layout](packaging/FILESYSTEM.md): paths, owners and modes for the LXC package.
+- [Set up in a Debian 13 LXC](docs/HOW-TO-SETUP-LXC.md): download, install, token, TLS override, journal forwarding.
+- [Set up in Docker](docs/HOW-TO-SETUP-DOCKER.md): prepare mounts, mint a token, run, TLS, Compose.
+- [Audit records](docs/AUDIT.md): fields, device pseudonyms, key custody, evidence pipeline flags.
+- [Metrics](docs/METRICS.md): the `/metrics` endpoint and the series it returns.
+- [Threat model](docs/THREAT-MODEL.md): assets, trust boundaries, controls and limits.
+- [Changelog](CHANGELOG.md): what has changed, under Unreleased until the first release.
+- [Contributing](CONTRIBUTING.md): the gates a change must pass and the public-repo rules.

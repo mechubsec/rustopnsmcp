@@ -1,0 +1,22 @@
+# mecmcp package conformance manifest (mecmcp packaging/conformance/README.md).
+binary     = "bin/rustopnsmcp"
+installer  = "packaging/lxc/install.sh"
+service    = "rustopnsmcp"
+config_dir = "/etc/rustopnsmcp"
+tokens     = "/var/lib/rustopnsmcp/tokens.json"
+
+# scripts/package-lxc.sh has a skip-build path (OPNSMCP_PACKAGE_SKIP_BUILD) and
+# writes an honest BUILD-INFO either way, so R3 is fatal, not a warning. See
+# the conformance README, "Provenance ordering".
+build_info     = true
+skip_build_env = "OPNSMCP_PACKAGE_SKIP_BUILD"
+
+units = ["packaging/systemd/rustopnsmcp.service"]
+
+# Docker replaces CMD wholesale but only appends to ENTRYPOINT, so everything
+# that must survive an operator's `--host 0.0.0.0` lives in ENTRYPOINT.
+# --audit-hmac-key-file closes mecmcp#376: the binary creates its own key
+# because the image is distroless and has no shell for a wrapper, so the flag
+# must stay in ENTRYPOINT and R6 proves it reaches argv.
+must_survive_override = ["--device-mapping", "--tokens-file", "--state-file", "--audit-hmac-key-file"]
+audit_hmac_flag       = "--audit-hmac-key-file"

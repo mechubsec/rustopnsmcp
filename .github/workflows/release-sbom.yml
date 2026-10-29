@@ -1,0 +1,23 @@
+name: Release SBOM
+
+# Attaches a CycloneDX SBOM of the Rust dependency graph to the GitHub release
+# and cosign-attests it on the image digest. Triggered by `release: published`
+# (the release does not exist at tag-push time); the reusable workflow polls
+# for the image digest because the tag-triggered image build is an independent
+# event with no ordering guarantee. The SBOM covers the Rust dependency graph,
+# not the distroless runtime base; do not call it a full image SBOM.
+on:
+  release:
+    types: [published]
+
+jobs:
+  sbom:
+    permissions:
+      contents: write   # gh release upload
+      packages: write   # cosign attest pushes the attestation to GHCR
+      id-token: write   # keyless cosign signing
+    uses: mechubsec/mecmcp/.github/workflows/reusable-attest-release-sbom.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      image: ghcr.io/${{ github.repository }}
+      cargo-manifest-path: rustopnsmcp/Cargo.toml
+      sbom-file: rustopnsmcp/rustopnsmcp.cdx.json

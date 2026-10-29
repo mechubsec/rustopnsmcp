@@ -1,0 +1,26 @@
+# Site drop-in for rustopnsmcp. Install as
+#   /etc/systemd/system/rustopnsmcp.service.d/override.conf
+# then: systemctl daemon-reload && systemctl restart rustopnsmcp
+#
+# A drop-in can only REPLACE ExecStart, so this restates every flag of the
+# stock unit. Keep it in step with /etc/systemd/system/rustopnsmcp.service;
+# packaging/tests/unit-contract.sh fails if this example drops a stock flag.
+# Addresses and names below are documentation values (RFC 5737, example.org).
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rustopnsmcp \
+    --device-mapping /etc/rustopnsmcp/devices.json \
+    --tokens-file /var/lib/rustopnsmcp/tokens.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --inventory-readonly \
+    --transport streamable-http \
+    --host 192.0.2.10 --port 30037 \
+    --allowed-host rustopnsmcp.example.org:30037 \
+    --allowed-host 192.0.2.10:30037 \
+    --allowed-origin https://console.example.org \
+    --tls-cert /etc/rustopnsmcp/fullchain.pem \
+    --tls-key /etc/rustopnsmcp/privkey.pem \
+    --audit-format json \
+    --audit-journald \
+    --audit-redact devices=hmac \
+    --audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key

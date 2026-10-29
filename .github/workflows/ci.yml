@@ -44,6 +44,9 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --locked
 
+      - name: Documentation gate
+        run: scripts/check-docs.sh
+
       - name: Run tests
         run: cargo test --workspace --locked
 
@@ -109,7 +112,10 @@ jobs:
 
       - name: Build and verify container argv
         run: |
-          docker build -t rustopnsmcp:ci .
+          set -euo pipefail
+          # Keep the plain progress log: the context-size step reads it, so the
+          # image is built once.
+          docker build --progress=plain -t rustopnsmcp:ci . 2>&1 | tee "$RUNNER_TEMP/docker-build.log"
 
           # Config paths must survive operator overrides. Docker replaces CMD
           # entirely when the caller supplies args, but appends to ENTRYPOINT,
@@ -119,7 +125,165 @@ jobs:
           argv=$(docker inspect "$container_id" --format '{{join .Args "\n"}}')
           docker rm "$container_id" > /dev/null
 
-          for p in /etc/rustopnsmcp/devices.json /var/lib/rustopnsmcp/tokens.json; do
+          # Distroless has no shell, so inspect the image filesystem from the
+          # outside. A named volume seeded from the image inherits these modes.
+          container_id=$(docker create rustopnsmcp:ci)
+          modes=$(docker export "$container_id" | tar -tvf - etc/rustopnsmcp/ var/lib/rustopnsmcp/ | awk '{print $1, $2, $NF}')
+          docker rm "$container_id" > /dev/null
+          echo "$modes"
+          echo "$modes" | grep -qx 'drwxr-x--- 65532/65532 etc/rustopnsmcp/' || { echo "FAIL: /etc/rustopnsmcp is not 0750 65532"; exit 1; }
+          echo "$modes" | grep -qx 'drwx------ 65532/65532 var/lib/rustopnsmcp/' || { echo "FAIL: /var/lib/rustopnsmcp is not 0700 65532"; exit 1; }
+
+          for p in /etc/rustopnsmcp/devices.json /var/lib/rustopnsmcp/tokens.json \
+                   /var/lib/rustopnsmcp/changeset-state.json /var/lib/rustopnsmcp/audit-hmac.key; do
             echo "$argv" | grep -q -- "$p" || { echo "FAIL: $p missing from argv with --host override"; exit 1; }
           done
-          echo "PASS: config paths survive --host override"
+          for flag in --inventory-readonly --audit-format --audit-redact; do
+            echo "$argv" | grep -qx -- "$flag" || { echo "FAIL: $flag missing from argv with --host override"; exit 1; }
+          done
+          if echo "$argv" | grep -q -- '--audit-journald'; then
+            echo "FAIL: --audit-journald has no socket in a container"; exit 1
+          fi
+          echo "PASS: config and audit flags survive --host override"
+
+      - name: First run in a container creates the audit key and keeps state private
+        run: |
+          set -euo pipefail
+          state=$(mktemp -d); conf=$(mktemp -d)
+          printf '{"version":1,"devices":{}}\n' > "$conf/devices.json"
+          sudo chown -R 65532:65532 "$state" "$conf"
+          sudo chmod 0700 "$state"; sudo chmod 0750 "$conf"; sudo chmod 0600 "$conf/devices.json"
+          # Stdio with stdin closed exits non-zero by design. Capture the code
+          # instead of letting set -e abort, then reject a crash (>= 126:
+          # exec failure or a signal) so the key assertions cannot mask one.
+          exit_code=0
+          docker run --rm -i -v "$conf:/etc/rustopnsmcp:ro" -v "$state:/var/lib/rustopnsmcp" \
+            rustopnsmcp:ci --transport stdio </dev/null || exit_code=$?
+          echo "server exit code with stdin closed: $exit_code"
+          if [ "$exit_code" -eq 0 ] || [ "$exit_code" -ge 126 ]; then
+            echo "FAIL: expected a clean non-zero exit, got $exit_code"; exit 1
+          fi
+          test "$(sudo stat -c '%a %u' "$state/audit-hmac.key")" = "600 65532"
+          test "$(sudo stat -c %s "$state/audit-hmac.key")" = 32
+
+          # A named volume is seeded from the image, so it must come up 0700
+          # and uid 65532 without any host-side chmod.
+          docker volume create rustopnsmcp-ci-state > /dev/null
+          trap 'docker volume rm -f rustopnsmcp-ci-state > /dev/null' EXIT
+          exit_code=0
+          docker run --rm -i -v "$conf:/etc/rustopnsmcp:ro" -v rustopnsmcp-ci-state:/var/lib/rustopnsmcp \
+            rustopnsmcp:ci --transport stdio </dev/null || exit_code=$?
+          if [ "$exit_code" -eq 0 ] || [ "$exit_code" -ge 126 ]; then
+            echo "FAIL: expected a clean non-zero exit, got $exit_code"; exit 1
+          fi
+          volume_dir=$(docker volume inspect rustopnsmcp-ci-state --format '{{.Mountpoint}}')
+          test "$(sudo stat -c '%a %u' "$volume_dir")" = "700 65532" \
+            || { echo "FAIL: seeded volume is $(sudo stat -c '%a %u' "$volume_dir"), want 700 65532"; exit 1; }
+          test "$(sudo stat -c '%a %u' "$volume_dir/audit-hmac.key")" = "600 65532"
+
+      - name: Image reports its version and runs as the non-root user
+        run: |
+          set -euo pipefail
+          docker run --rm rustopnsmcp:ci --version | grep -q '^rustopnsmcp '
+          test "$(docker inspect rustopnsmcp:ci --format '{{.Config.User}}')" = "65532:65532"
+
+      - name: Docker build context is small
+        run: |
+          set -euo pipefail
+          # Read from the container-guard build's plain progress log; no rebuild.
+          size=$(grep -oE 'transferring context: [0-9.]+[kMG]?B' "$RUNNER_TEMP/docker-build.log" \
+            | tail -n 1 | grep -oE '[0-9.]+[kMG]?B' || true)
+          echo "Docker build context: ${size:-unknown}"
+          test -n "$size" || { echo "FAIL: no context-transfer line in the build log"; exit 1; }
+          case "$size" in *GB) echo "FAIL: context over 1 GB"; exit 1 ;; esac
+          case "$size" in *MB) test "$(printf '%.0f' "${size%MB}")" -le 100 || { echo "FAIL: context over 100 MB"; exit 1; } ;; esac
+
+  conformance:
+    name: Package conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # Under RUNNER_TEMP, never the checkout: a stray archive would dirty the
+      # tree and BUILD-INFO would record git_dirty=true.
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+          TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+        run: |
+          set -euo pipefail
+          trivy_dir="${RUNNER_TEMP}/trivy"
+          mkdir -p "$trivy_dir"
+          curl -sSfL -o "${trivy_dir}/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${trivy_dir}/trivy.tar.gz" | sha256sum -c -
+          tar -xzf "${trivy_dir}/trivy.tar.gz" -C "$trivy_dir" trivy
+          sudo install -m 0755 "${trivy_dir}/trivy" /usr/local/bin/trivy
+
+      - name: Install logrotate
+        run: command -v logrotate >/dev/null || { sudo apt-get update && sudo apt-get install -y logrotate; }
+
+      - name: Shell static analysis
+        run: shellcheck packaging/lxc/install.sh scripts/*.sh packaging/tests/*.sh
+
+      - name: Build the release package
+        run: scripts/package-lxc.sh
+
+      - name: Package tests
+        run: |
+          set -euo pipefail
+          packaging/tests/package-smoke.sh dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz
+          packaging/tests/package-refusals.sh
+          packaging/tests/unit-contract.sh
+          packaging/tests/logrotate.sh
+          packaging/tests/skip-build-provenance.sh
+          packaging/tests/installer-idempotence.sh
+          packaging/tests/journald-dropin-ordering.sh
+
+      # BUILD-INFO travels inside the tarball. The release dry-run downloads this runner-built artifact (`gh run download`) to check what a release would publish.
+      - name: Upload the package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rustopnsmcp-package
+          path: |
+            dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz
+            dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Stage the package
+        run: |
+          set -euo pipefail
+          mkdir staging
+          tar -xzf dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz -C staging --strip-components=1
+          cp packaging/conformance.toml staging/conformance.toml
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: rustopnsmcp:conformance
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Conformance
+        uses: mechubsec/mecmcp/packaging/conformance@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+        with:
+          staging: staging
+          manifest: staging/conformance.toml
+          image: rustopnsmcp:conformance
