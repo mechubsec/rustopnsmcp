@@ -10,20 +10,18 @@ Group=rustopnsmcp
 ExecStart=/usr/local/bin/rustopnsmcp \
     --device-mapping /etc/rustopnsmcp/devices.json \
     --tokens-file /var/lib/rustopnsmcp/tokens.json \
-    --state-file /var/lib/rustopnsmcp/changesets.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --inventory-readonly \
     --transport streamable-http \
-    --host @OPNSMCP_BIND_HOST@ --port 30037 \
-    --allowed-host @OPNSMCP_ALLOWED_HOST@ \
-    --allowed-origin @OPNSMCP_ALLOWED_ORIGIN@ \
-    --tls-cert /etc/rustopnsmcp/tls/fullchain.pem \
-    --tls-key /etc/rustopnsmcp/tls/privkey.pem \
+    --host 127.0.0.1 --port 30037 \
     --audit-format json \
-    --audit-log-file /var/lib/rustopnsmcp/audit.jsonl \
-    --audit-journald
+    --audit-journald \
+    --audit-redact devices=hmac \
+    --audit-hmac-key-file /etc/rustopnsmcp/audit-hmac.key
 Restart=on-failure
 RestartSec=5
 UMask=0077
-EnvironmentFile=-/etc/rustopnsmcp/secrets.env
+EnvironmentFile=-/etc/rustopnsmcp/credentials.env
 
 # /etc/rustopnsmcp stays read-only to the service. This is deliberate: it is
 # what makes editing the device inventory a root operation rather than
