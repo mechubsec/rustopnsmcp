@@ -102,8 +102,8 @@ new file, run `chown rustopnsmcp:rustopnsmcp` and `chmod 600` on it.
 Run `token add` as the service user, not as root. A root run leaves a
 root-owned `tokens.json` that the service cannot read (see Troubleshooting).
 `runuser` is part of util-linux, so it exists on a minimal guest; the
-installer's own hint uses `sudo -u rustopnsmcp`, which does the same where sudo
-is installed.
+installer's printed hint uses it too, and shows a read-only token and one that
+names the write tools.
 
 ```sh
 runuser -u rustopnsmcp -- rustopnsmcp token add \

@@ -10,9 +10,11 @@
 #   sudo chown -R 65532:65532 config state
 #   sudo chmod 0750 config; sudo chmod 0700 state
 #   sudo chmod 0600 config/devices.json state/tokens.json
-# tokens.json must exist before the first HTTP start (the server exits with
-# "token file ...: No such file or directory" otherwise); stdio does not need
-# it. The DIRECTORIES must be writable by 65532 as well: state files are
+# The server exits at an HTTP start with "token file ...: No such file or
+# directory" if tokens.json is absent; stdio does not need it. `token add`
+# creates it (docs/HOW-TO-SETUP-DOCKER.md), so the pre-created empty file above
+# is optional; mint a token before the first HTTP start either way.
+# The DIRECTORIES must be writable by 65532 as well: state files are
 # written atomically through a temp file in the same directory.
 services:
   rustopnsmcp:

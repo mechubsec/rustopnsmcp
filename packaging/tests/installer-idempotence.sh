@@ -42,6 +42,14 @@ install_into >"$scratch/first.log"
 jq -e '.version == 1 and (.devices | type == "object")' "$target/etc/rustopnsmcp/devices.json" >/dev/null \
     || fail "devices.json is not a valid inventory"
 grep -q 'systemctl start rustopnsmcp' "$scratch/first.log" || fail "next steps not printed"
+grep -q 'runuser -u rustopnsmcp -- rustopnsmcp token add' "$scratch/first.log" || fail "token hint must use runuser"
+if grep -q 'sudo' "$scratch/first.log"; then fail "token hint must not need sudo"; fi
+# The write-token hint names real write tools (checked against the source list).
+for write_tool in create approve apply confirm cancel; do
+    name=${write_tool}_opnsense_change_set
+    grep -q "$name" "$scratch/first.log" || fail "write-token hint lacks $name"
+    grep -q "\"$name\"" rustopnsmcp-core/src/tools/mod.rs || fail "$name is not a tool name in the source"
+done
 # Test mode skips systemctl, so assert on the script itself.
 if grep -nE '^[[:space:]]*systemctl[[:space:]]+(enable|start|restart)' "$pkg/packaging/lxc/install.sh"; then
     fail "installer must never enable or start the service"
