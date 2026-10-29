@@ -9317,7 +9317,7 @@ git commit -m "scripts: test-rig build, install and control for the live run (#4
 **Interfaces:**
 - Consumes: Task 1 and 2 outputs.
 
-- [ ] **Step 1: Write `scripts/live/calls/reads.json`**
+- [x] **Step 1: Write `scripts/live/calls/reads.json`**
 
 Fleet-meta and the nine reads, each with the key or pointer that shows the right shape and that redaction did not eat identifiers (a UUID must survive the redaction pass):
 
@@ -9342,7 +9342,7 @@ Fleet-meta and the nine reads, each with the key or pointer that shows the right
 ]
 ```
 
-- [ ] **Step 2: Write `scripts/live/calls/refusals.json`** (no device write)
+- [x] **Step 2: Write `scripts/live/calls/refusals.json`** (no device write)
 
 ```json
 [
@@ -9360,41 +9360,48 @@ Fleet-meta and the nine reads, each with the key or pointer that shows the right
 
 The `confirm_timeout_mins` refusal needs an existing change set and is exercised in Task 12 (Step 6), before its apply.
 
-- [ ] **Step 3: Run both against the lab**
+- [x] **Step 3: Run both against the lab**
 
 Start `test-labmode-opns` (Task 2 Step 5), then on the workstation `python3 -I scripts/live/mcp_call.py scripts/live/calls/reads.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`, then the same with `refusals.json`. Both rigs run with `--inventory-readonly`, which the `add_device` and `reload_devices` rows rely on. Stop the rig afterwards.
 
 If `error_contains` for `add_device` does not match the server's real wording, set it to what the run shows; the wording is not part of the contract, the refusal is.
 
-- [ ] **Step 4: Fill in the pass/fail table** (this is the P3.3 deliverable). Predictions come from the probes; the Result column is filled from the run.
+- [x] **Step 4: Fill in the pass/fail table** (this is the P3.3 deliverable). Predictions come from the probes; the Result column is filled from the run.
 
 | # | Tool / call | Predicted before fixes | Result | Notes |
 |---|---|---|---|---|
-| 1 | `get_device_list` | PASS | | |
-| 2 | `gather_device_facts` | PASS with `product_name`, `uptime`, `cpu_type`, `load_average` all null | | Fixed in Task 5 |
-| 3 | `opnsmcp_status` | PASS | | |
-| 4 | `get_opnsense_system_status` | PASS (health summary only) | | Description fixed in Task 5 |
-| 5 | `get_opnsense_firmware_status` | PASS | | |
-| 6 | `list_opnsense_interfaces` | PASS (array branch) | | |
-| 7 | `list_opnsense_gateways` | PASS | | |
-| 8 | `list_opnsense_firewall_rules` (+ page 2) | PASS, `coverage: complete`, total 38 | | 31 rows are legacy/automatic |
-| 9 | `list_opnsense_aliases` (+ search, max_bytes) | PASS; UUIDs survive redaction | | Verify no row is over-redacted |
-| 10 | `list_opnsense_nat_rules` | PASS (outbound 3, one-to-one 0; port forwards not listed) | | port forwards deferred to P4/P5.2 |
-| 11 | `list_opnsense_routes` | PASS (0 rows) | | |
-| 12 | `list_opnsense_dhcp_leases` | **FAIL** (upstream 404) | | Fixed in Task 4 |
-| 13 | `get_opnsense_config_fingerprint` | PASS | | Stability checked in Task 8 |
-| 14 | create with a wrong fingerprint | refused | | |
-| 15 | create with an unknown field | refused | | |
-| 16 | create with a non-writable field | refused | | |
-| 17 | create a `urltable` alias | refused | | |
-| 18 | approve an unknown id | refused | | |
-| 19 | `list_opnsense_change_sets` | PASS | | |
-| 20 | `add_device` under `--inventory-readonly` | refused | | |
-| 21 | `reload_devices` under `--inventory-readonly` | refused | | |
+| 1 | `get_device_list` | PASS | PASS (1 device) | |
+| 2 | `gather_device_facts` | PASS with `product_name`, `uptime`, `cpu_type`, `load_average` all null | PASS; name, uptime, load non-null, no `cpu_type` | Fixed in Task 5 |
+| 3 | `opnsmcp_status` | PASS | PASS | |
+| 4 | `get_opnsense_system_status` | PASS (health summary only) | PASS | Description fixed in Task 5 |
+| 5 | `get_opnsense_firmware_status` | PASS | PASS | |
+| 6 | `list_opnsense_interfaces` | PASS (array branch) | PASS (5 rows) | |
+| 7 | `list_opnsense_gateways` | PASS | PASS (2 rows) | |
+| 8 | `list_opnsense_firewall_rules` (+ page 2) | PASS, `coverage: complete`, total 38 | PASS, `coverage: complete`, total 38; page 2 PASS | 31 rows are legacy/automatic |
+| 9 | `list_opnsense_aliases` (+ search, max_bytes) | PASS; UUIDs survive redaction | PASS (10 rows); `password` redacted on all rows, identifiers kept | Verify no row is over-redacted |
+| 10 | `list_opnsense_nat_rules` | PASS (outbound 3, one-to-one 0; port forwards not listed) | PASS (outbound 3) | port forwards deferred to P4/P5.2 |
+| 11 | `list_opnsense_routes` | PASS (0 rows) | PASS (0 rows) | |
+| 12 | `list_opnsense_dhcp_leases` | **FAIL** (upstream 404) | PASS, `backend: dnsmasq`, 0 rows | Fixed in Task 4 |
+| 13 | `get_opnsense_config_fingerprint` | PASS | PASS; identical across 3 runs | Stability checked in Task 8 |
+| 14 | create with a wrong fingerprint | refused | refused | |
+| 15 | create with an unknown field | refused | refused | |
+| 16 | create with a non-writable field | refused | refused | |
+| 17 | create a `urltable` alias | refused | refused | |
+| 18 | approve an unknown id | refused | refused (unknown change set) | |
+| 19 | `list_opnsense_change_sets` | PASS | PASS (0 rows) | |
+| 20 | `add_device` under `--inventory-readonly` | refused | refused (`inventory is read-only`) | |
+| 21 | `reload_devices` under `--inventory-readonly` | refused | refused (`inventory is read-only`) | |
 
 Record key names, counts and pass/fail only. A row whose Result differs from its prediction gets a note and, if it is a code defect, a task.
 
-- [ ] **Step 5: Commit the calls files and the filled table**
+Results are from the live run after the Task 4, 5 and 7 fixes (Tasks 3 and 8 ran as one session); the Predicted column is the before. Final run: every read PASS and every refusal refused. Notes:
+
+- The first run had two FAILs, both calls-file pointers and not server defects: internal interfaces carry an empty `identifier`, and built-in aliases are keyed by name rather than UUID. The pointers were corrected in the calls file.
+- The configuration fingerprint was identical across three runs several minutes apart (Task 8 Step 3).
+- The refusal rows ran with a token scoped to named tools (a wildcard tool scope excludes write tools by design), and all passed. `add_device` targets the in-scope device `opnsense-lab`, because a scope preflight rejects an unscoped device name before the read-only check.
+- Rig check: `test-twoperson-opns` runs without `--lab-mode` and `test-labmode-opns` with it.
+
+- [x] **Step 5: Commit the calls files and the filled table**
 
 ```bash
 git add scripts/live/calls/reads.json scripts/live/calls/refusals.json docs/design/2026-09-30-rustopnsmcp-v1-plan.md
@@ -9722,11 +9729,11 @@ In `client.rs`, `preimage_matches`: replace `Some(live) if live == recorded => {
 
 **Needs user acknowledgement:** same as Task 3 (read-only, `POST` searches).
 
-- [ ] **Step 1: Rebuild and reinstall.** Run `scripts/live/build-trixie.sh`, start `test-labmode-opns`, and re-run `scripts/live/rig-install.sh` (it overwrites the binary and leaves `tokens.json`; restart the service with `rig-ctl.sh svc test-labmode-opns restart`).
-- [ ] **Step 2: Re-run `reads.json` and `refusals.json`.** Expected: every row of the Task 3 table is PASS, including `list_opnsense_dhcp_leases` (`backend: dnsmasq`), `gather_device_facts` (non-null name, uptime and load), and `list_opnsense_nat_rules` (outbound and one-to-one only; port forwards are deferred).
-- [ ] **Step 3: Stability check.** Run `reads.json` a second time 30 seconds after the first, with `--save-vars $P3_WORK/fp-run2.json`, and the first with `--save-vars $P3_WORK/fp-run1.json`; `cmp` the two files. Expected: identical. Before Task 7 they would differ whenever an alias counter ticked.
-- [ ] **Step 4: Record the baseline.** The first clean run's `fp-run1.json` is copied to `$P3_WORK/baseline.json` after renaming its `fp` key to `baseline` (`jq '{baseline: .fp}'`). Every later write task requires the live fingerprint to equal it. It is a hash of configuration, not a secret, but it lives in `$P3_WORK` so the plan stays free of device facts. Stop the rig.
-- [ ] **Step 5: Update the Task 3 table's Result column** and commit the plan file (`docs(plan): P3 live read results after endpoint fixes (#425)`).
+- [x] **Step 1: Rebuild and reinstall.** Run `scripts/live/build-trixie.sh`, start `test-labmode-opns`, and re-run `scripts/live/rig-install.sh` (it overwrites the binary and leaves `tokens.json`; restart the service with `rig-ctl.sh svc test-labmode-opns restart`).
+- [x] **Step 2: Re-run `reads.json` and `refusals.json`.** Expected: every row of the Task 3 table is PASS, including `list_opnsense_dhcp_leases` (`backend: dnsmasq`), `gather_device_facts` (non-null name, uptime and load), and `list_opnsense_nat_rules` (outbound and one-to-one only; port forwards are deferred).
+- [x] **Step 3: Stability check.** Run `reads.json` a second time 30 seconds after the first, with `--save-vars $P3_WORK/fp-run2.json`, and the first with `--save-vars $P3_WORK/fp-run1.json`; `cmp` the two files. Expected: identical. Before Task 7 they would differ whenever an alias counter ticked.
+- [x] **Step 4: Record the baseline.** The first clean run's `fp-run1.json` is copied to `$P3_WORK/baseline.json` after renaming its `fp` key to `baseline` (`jq '{baseline: .fp}'`). Every later write task requires the live fingerprint to equal it. It is a hash of configuration, not a secret, but it lives in `$P3_WORK` so the plan stays free of device facts. Stop the rig.
+- [x] **Step 5: Update the Task 3 table's Result column** and commit the plan file (`docs(plan): P3 live read results after endpoint fixes (#425)`).
 
 ### P3-Task 9: Fixture sanitizer (P3.5)
 
