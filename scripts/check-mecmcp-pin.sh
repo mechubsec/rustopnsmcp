@@ -17,7 +17,7 @@ refs=$(printf '%s\n' "$tree" \
 count=$(printf '%s\n' "$refs" | grep -c . || true)
 if [ "$count" -ne 1 ]; then
   echo "FAIL: mecmcp crates resolve to $count refs:"
-  printf '  %s\n' $refs
+  printf '%s\n' "$refs" | sed 's/^/  /'
   exit 1
 fi
 
@@ -27,7 +27,7 @@ dups=$(printf '%s\n' "$tree" \
   | awk '{print $1}' | uniq -d)
 if [ -n "$dups" ]; then
   echo "FAIL: mecmcp crates present more than once in the graph:"
-  printf '  %s\n' $dups
+  printf '%s\n' "$dups" | sed 's/^/  /'
   exit 1
 fi
 
