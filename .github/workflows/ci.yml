@@ -53,6 +53,9 @@ jobs:
       - name: One mecmcp pin
         run: scripts/check-mecmcp-pin.sh
 
+      - name: Fixture sanitizer self-test
+        run: scripts/tests/sanitize-fixture.test.sh
+
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
 
