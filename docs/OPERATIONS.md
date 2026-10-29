@@ -22,12 +22,14 @@ It does not reload command-line flags, TLS certificate and key
 (`--tls-cert`, `--tls-key`), the HMAC key, or the unit. Those need
 `systemctl restart rustopnsmcp`.
 
-A reload is not all-or-nothing. If `devices.json` fails to parse or validate, the
-previous inventory is kept and the client rebuild is skipped. But if it parses
-and a client cannot then be built (an unset environment variable, an unreadable
-credential file or `ca_pem_path`), the new inventory is already committed while
-the old clients are kept. In that state `get_device_list` shows the new
-inventory but calls still use the old client map, so a device you removed can
+A reload is not all-or-nothing. If `devices.json` fails to parse or its schema
+check fails, the previous inventory is kept and the client rebuild is skipped.
+But if it parses and a client cannot then be built, the new inventory is already
+committed while the old clients are kept. The causes are an unset environment
+variable, an unreadable credential file or `ca_pem_path`, and the semantic
+device checks (an `http://` endpoint, or both or neither credential source for
+the key or secret), which run only when the client is built. In that state `get_device_list` shows
+the new inventory but calls still use the old client map, so a device you removed can
 stay callable, and a changed credential is not in use, until a later reload
 succeeds or the service restarts. The log line `client rebuild failed; retaining
 previous clients` marks this state. Fix the cause and send SIGHUP again, or run
@@ -53,10 +55,11 @@ file is configured. Each part that fails keeps its old state and logs one of:
 
 To check one reload on its own, capture a journal cursor before sending the
 signal, so an older failure is not mistaken for this one (a timestamp is only
-second-granular). This is `sh` syntax, wrapped so it also pastes into fish:
+second-granular). The cursor is taken from the whole journal, because a quiet
+unit with no retained entries prints no cursor under `-u`. This is `sh` syntax, wrapped so it also pastes into fish:
 
 ```sh
-sh -c 'cursor=$(journalctl -u rustopnsmcp -n 0 --show-cursor | sed -n "s/^-- cursor: //p"); systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service; sleep 2; journalctl -u rustopnsmcp --after-cursor "$cursor" --no-pager | grep -E "reloaded|rebuilt|reopened|reload failed|rebuild failed|reopen failed"'
+sh -c 'cursor=$(journalctl -n 0 --show-cursor | sed -n "s/^-- cursor: //p"); systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service; sleep 2; journalctl -u rustopnsmcp --after-cursor "$cursor" --no-pager | grep -E "reloaded|rebuilt|reopened|reload failed|rebuild failed|reopen failed"'
 ```
 
 A good reload prints `device inventory reloaded`, `HTTP clients rebuilt from
