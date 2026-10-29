@@ -13,7 +13,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # The last non-empty ExecStart= with its line continuations joined.
 exec_line() {
-    sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' "$1" | grep -E '^ExecStart=.' | tail -n 1
+    local line
+    line=$(sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' "$1" | grep -E '^ExecStart=.' | tail -n 1 || true)
+    [[ -n "$line" ]] || fail "no ExecStart in $1"
+    echo "$line"
 }
 flags_of() { grep -oE -- ' --[a-z0-9-]+' | sort -u; }
 
@@ -45,7 +48,12 @@ grep -qx 'EnvironmentFile=-/etc/rustopnsmcp/credentials.env' "$unit" \
 if grep -q 'secrets.env' "$unit"; then fail "secrets.env was renamed credentials.env"; fi
 
 # 3. The override example resets ExecStart first, then restates every stock flag.
-grep -qx 'ExecStart=' "$override" || fail "override example must clear ExecStart= before setting it"
+# systemd applies them in order: a reset below the command leaves no command.
+[[ $(grep -cx 'ExecStart=' "$override") -eq 1 ]] || fail "override example needs exactly one empty ExecStart= reset"
+[[ $(grep -c '^ExecStart=.' "$override") -eq 1 ]] || fail "override example needs exactly one populated ExecStart="
+reset_line=$(grep -nx 'ExecStart=' "$override" | cut -d: -f1)
+set_line=$(grep -n '^ExecStart=.' "$override" | cut -d: -f1)
+(( reset_line < set_line )) || fail "override example must clear ExecStart= before setting it"
 missing=$(comm -23 <(flags_of <<<"$stock") <(flags_of <<<"$site"))
 [[ -z "$missing" ]] || fail "override example drops stock flags:$missing"
 for needle in '--tls-cert' '--tls-key' '--allowed-host' '--allowed-origin' \
@@ -65,5 +73,11 @@ if command -v systemd-analyze >/dev/null; then
     problems=$(systemd-analyze verify "$scratch/rustopnsmcp.service" 2>&1 \
         | grep -v 'is not executable: No such file or directory' || true)
     [[ -z "$problems" ]] || fail "systemd-analyze verify: $problems"
+    # And with the example installed as a drop-in, so systemd judges the merge.
+    mkdir "$scratch/rustopnsmcp.service.d"
+    cp "$override" "$scratch/rustopnsmcp.service.d/override.conf"
+    problems=$(systemd-analyze verify "$scratch/rustopnsmcp.service" 2>&1 \
+        | grep -v 'is not executable: No such file or directory' || true)
+    [[ -z "$problems" ]] || fail "systemd-analyze verify with override: $problems"
 fi
 echo "unit-contract: ok"
