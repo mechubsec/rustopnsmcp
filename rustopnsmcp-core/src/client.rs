@@ -16,7 +16,7 @@ use crate::error::OpnsenseError;
 use crate::inventory::Device;
 use mecmcp_http::{HttpClient, HttpClientConfig, HttpRequest, Method};
 use mecmcp_openapi::expand_path;
-use mecmcp_secret::OutboundSecret;
+use mecmcp_secret::{AuthFailureTracker, OutboundSecret};
 use std::time::Duration;
 
 /// Requests in flight to one device.
@@ -34,6 +34,8 @@ pub struct OpnsenseClient {
     endpoint: String,
     http: std::sync::Arc<HttpClient>,
     basic_auth: OutboundSecret,
+    /// Whether the device last accepted this client's API key. Clones share it.
+    auth: AuthFailureTracker,
 }
 
 impl OpnsenseClient {
@@ -76,7 +78,27 @@ impl OpnsenseClient {
             endpoint: device.endpoint,
             http: std::sync::Arc::new(http),
             basic_auth,
+            auth: AuthFailureTracker::new(),
         })
+    }
+
+    /// Record what a reply says about the API key. Only 401 is an
+    /// authentication failure: OPNsense answers 403 when a working key lacks
+    /// the privilege for one endpoint, which says nothing about the key.
+    fn note_auth_outcome(&self, status: u16) {
+        match status {
+            401 => self.auth.record_failure(),
+            200..=299 => self.auth.record_success(),
+            _ => {}
+        }
+    }
+
+    /// `false` once the device's most recent reply was a 401. A client that
+    /// has made no request yet reports healthy: readiness reflects proven
+    /// failure, not silence.
+    #[must_use]
+    pub fn is_auth_healthy(&self) -> bool {
+        !self.auth.is_failing()
     }
 
     /// Issue a GET against an absolute API path.
@@ -94,6 +116,7 @@ impl OpnsenseClient {
             .secret_header("Authorization", &self.basic_auth)?;
 
         let response = self.http.send(request).await?;
+        self.note_auth_outcome(response.status());
 
         if response.status() >= 300 {
             return Err(Self::upstream_error(response.status(), response.body()));
@@ -130,6 +153,7 @@ impl OpnsenseClient {
             .body(body_bytes);
 
         let response = self.http.send(request).await?;
+        self.note_auth_outcome(response.status());
 
         if response.status() >= 300 {
             return Err(Self::upstream_error(response.status(), response.body()));

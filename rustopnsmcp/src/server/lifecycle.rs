@@ -393,6 +393,7 @@ mod tests {
             id: crate::changeset_state::new_change_set_id(),
             owner: owner.to_owned(),
             owner_subject: None,
+            owner_verified: false,
             device: device.to_owned(),
             expected_candidate_fingerprint: FINGERPRINT.to_owned(),
             actions,

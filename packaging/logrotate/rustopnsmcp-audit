@@ -1,0 +1,41 @@
+# logrotate fragment for the optional rustopnsmcp JSON audit file.
+#
+# Install as /etc/logrotate.d/rustopnsmcp-audit (root:root, 0644). The stock
+# unit logs to journald only; this file matters once an operator adds
+#   --audit-log-file /var/lib/rustopnsmcp/audit.jsonl
+# to their override. It is harmless otherwise (missingok).
+#
+# Rename-mode rotation: the server holds one O_APPEND descriptor and reopens
+# the path on SIGHUP, so rename + signal loses nothing. copytruncate has a
+# race window in which audit events are lost; do not use it (nocopytruncate
+# below overrides a global copytruncate in /etc/logrotate.conf). The postrotate
+# is what delivers the signal; without it the renamed file keeps growing and
+# the new audit.jsonl stays empty. The same SIGHUP also reloads the inventory
+# and token store, which is benign: a failed reload keeps the previous one.
+
+/var/lib/rustopnsmcp/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 rustopnsmcp rustopnsmcp
+    su rustopnsmcp rustopnsmcp
+    nocopytruncate
+    sharedscripts
+    postrotate
+        # is-active exits 0 when active and 3 when inactive (4: no such unit);
+        # those are not rotation failures. Any other status means the query
+        # itself failed (bus unavailable, ...): the server may be running and
+        # still writing to the rotated file, so fail rather than skip silently.
+        status=0
+        systemctl is-active --quiet rustopnsmcp.service || status=$?
+        case $status in
+            0) systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service ;;
+            3|4) ;;
+            *) echo "rustopnsmcp-audit: systemctl is-active failed ($status); not signalling" >&2; exit "$status" ;;
+        esac
+    endscript
+}

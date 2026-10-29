@@ -2,7 +2,7 @@
 
 use anyhow::{Context as _, Result, bail};
 use mecmcp_audit::AuditFileSink;
-use mecmcp_runtime::cli::Command;
+use mecmcp_runtime::cli::{Command, TokenAction};
 use mecmcp_transport::serve_router;
 use rmcp::ServiceExt;
 use rustopnsmcp::cli::OpnsCli;
@@ -50,6 +50,10 @@ fn init_token_audit() {
 /// construct the journald layer. A server that starts anyway is a server
 /// that runs with no audit trail while believing it has one.
 fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<AuditFileSink>>> {
+    if let Some(path) = args.audit_hmac_key_file.as_deref() {
+        rustopnsmcp::startup::ensure_audit_hmac_key(path)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    }
     let audit_config =
         rustopnsmcp::startup::audit_config(args).map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
 
@@ -75,6 +79,18 @@ async fn main() -> Result<()> {
     let cli = parsed.cli;
 
     if let Some(Command::Token { action }) = cli.common.command {
+        // The HTTP path builds CallerCtx without device attributes, so a selector
+        // token would match no device: refuse rather than mint a dead credential.
+        if let TokenAction::Add {
+            device_selector, ..
+        } = &action
+            && !device_selector.is_empty()
+        {
+            bail!(
+                "--device-selector is not supported by this server yet; \
+                 scope the token with --devices <name,...> instead"
+            );
+        }
         init_token_audit();
         let known_tools: Vec<&str> = rustopnsmcp_core::tools::TOOL_NAMES.to_vec();
         return mecmcp_runtime::token_cmd::run(action, &[], &known_tools)

@@ -1,0 +1,7 @@
+scan:
+  skip-dirs:
+    - target
+    - dist
+    - .git
+    - .worktrees
+    - .claude

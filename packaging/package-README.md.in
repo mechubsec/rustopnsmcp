@@ -1,0 +1,32 @@
+# rustopnsmcp @VERSION@
+
+OPNsense MCP server, packaged for a Debian 13 LXC. Unofficial community project; not affiliated with Deciso B.V. or the OPNsense project.
+
+- Archive: `@ARCHIVE@`
+- Git commit: `@GIT_COMMIT@` (built from a dirty tree: `@GIT_DIRTY@`)
+- mecmcp: `@MECMCP_REF@`
+- glibc floor: `@GLIBC_FLOOR@` (Debian 13 ships 2.41; Debian 12 and older cannot run this)
+
+## Prerequisites
+
+Debian 13, unprivileged LXC with `nesting=1`, 1 vCPU, 256 MB RAM, 1 GB disk, HTTPS reach to the OPNsense API.
+
+## Verify the download
+
+    sha256sum -c @ARCHIVE@.sha256
+
+## Install
+
+    tar -xzf @ARCHIVE@
+    cd rustopnsmcp-v@VERSION@
+    sudo packaging/lxc/install.sh
+
+The installer never enables or starts the service. It prints the next steps.
+
+## Next steps
+
+The operations guide is `docs/operations.md`. The security model and contact are in `SECURITY.md`. The site override example is `packaging/systemd/rustopnsmcp.override.conf.example`.
+
+## License
+
+MIT, see `LICENSE`.
