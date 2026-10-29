@@ -6,10 +6,12 @@ claim holds on your guest.
 
 ## Reloading with SIGHUP
 
-A SIGHUP reloads, without dropping connections:
+A SIGHUP reloads the following. Each is swapped under a lock, so calls already
+in flight finish on the old state:
 
 - the device inventory (`devices.json`), then rebuilds the HTTP client for
-  every device from it. Credentials named as `*_file` are read again;
+  every device from it. Credentials named as `*_file` and the CA file named by
+  `ca_pem_path` are read again;
   credentials named as `*_env` are not, because the environment is fixed when
   the process starts (restart to change those);
 - the token store (`--tokens-file`);
@@ -32,8 +34,20 @@ journalctl -u rustopnsmcp -n 20
 
 Expect `device inventory reloaded`, `HTTP clients rebuilt from reloaded
 inventory` and `token store reloaded`, plus `audit file reopened` when an audit
-file is configured. A line containing `reload failed` means that part kept its
-old state.
+file is configured. Each part that fails keeps its old state and logs one of:
+
+- `device inventory reload failed; retaining previous snapshot` (the client
+  rebuild is then skipped);
+- `client rebuild failed; retaining previous clients` (the old clients keep the
+  old credentials and CA);
+- `token store reload failed; retaining previous snapshot`;
+- `audit file reopen failed`.
+
+After fixing a credential or `devices.json`, this must print nothing:
+
+```sh
+journalctl -u rustopnsmcp -n 20 | grep -i failed
+```
 
 ## `add_device` and `--inventory-readonly`
 
