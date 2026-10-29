@@ -152,8 +152,9 @@ Things that are different from a plain install:
   The publish above keeps the host side on loopback. Because the bind is not
   loopback, the server refuses to start without `--allowed-host` and
   `--allowed-origin`, and without TLS it also needs `--allow-insecure-bind`
-  (acceptable here only because the host side is loopback). Use the values
-  clients actually dial.
+  (acceptable here only because the host side is loopback). `--allowed-host` is
+  what clients dial; `--allowed-origin` is, for a browser-based MCP client, the
+  URL that serves the client UI, not this server's address.
 - **Audit is `--audit-format json`, not `--audit-journald`.** A container has no
   journald socket. Records go to stdout for the container runtime to collect
   (`docker logs rustopnsmcp`). The keyed redaction of device names is still on:
@@ -234,7 +235,11 @@ docker compose up -d
 docker compose ps
 ```
 
-The `env_file` it names must exist, or Compose refuses to start.
+The `env_file` is marked `required: false` so `docker compose config` passes on
+a fresh copy, but the server has no API credentials until `credentials.env`
+(created above) exists, so create it before `docker compose up`. Replace the
+example `--allowed-origin http://client.example.org` with the URL that serves
+your browser-based MCP client.
 
 ### Health check
 

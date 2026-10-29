@@ -37,15 +37,21 @@ services:
       - /tmp:size=64m,mode=1777
     # The OPNsense API key and secret reach the container as environment
     # variables named by devices.json (api_key_env / api_secret_env). Keep the
-    # env file out of the repository and mode 0600.
+    # env file out of the repository and mode 0600. required: false lets
+    # Compose parse (and `docker compose config` pass) before the file exists;
+    # create it before `up` or the server has no credentials to read.
     env_file:
-      - ./credentials.env
+      - path: ./credentials.env
+        required: false
     # ENTRYPOINT already carries the config paths, --state-file, --inventory-readonly
     # and the audit baseline. Only the bind address and port are replaceable.
     # Binding 0.0.0.0 inside the container is required to publish the port;
     # the host side above stays on loopback. A non-loopback bind needs both
-    # --allowed-host and --allowed-origin or the server refuses to start; the
-    # values must match what clients dial. For a LAN-facing listener put TLS
+    # --allowed-host and --allowed-origin or the server refuses to start.
+    # --allowed-host is the host:port clients dial. --allowed-origin is the
+    # Origin a browser-based MCP client sends: the URL that serves the client
+    # UI, not this server's address. Replace the example below with yours; a
+    # non-browser client sends no Origin. For a LAN-facing listener put TLS
     # in front of it.
     command:
       - --transport
@@ -58,5 +64,5 @@ services:
       - --allowed-host
       - localhost:30037
       - --allowed-origin
-      - http://localhost:30037
+      - http://client.example.org
     restart: unless-stopped
