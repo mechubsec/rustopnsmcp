@@ -463,12 +463,15 @@ impl OpnsenseClient {
 /// into the body, so this unwraps that envelope and inserts `uuid` itself,
 /// which is what [`crate::changeset::Preimage`] keys entries by.
 ///
-/// OPNsense answers an unknown UUID with HTTP 200 and a bare `[]`, not a 404
-/// status — a device response this crate's HTTP layer never turns into an
-/// error — so that shape must be translated into the same "not found" signal
-/// callers of [`crate::changeset::ControllerOps::fetch_resource`] already
-/// expect from a real 404. Without this, every delete would be misread as
-/// having left the resource in place.
+/// OPNsense does not answer a missing UUID with a 404 status. `getRule` answers
+/// HTTP 200 with a bare `[]`. Alias `getItem` (26.7.5) answers HTTP 200 with
+/// the default alias template: an `"alias"` object whose fields are all at
+/// their defaults, `name` empty. Both must be translated into the same "not
+/// found" signal callers of [`crate::changeset::ControllerOps::fetch_resource`]
+/// already expect from a real 404. Without this, every delete would be
+/// misread as having left the resource in place, and a missing alias would
+/// be captured as a pre-image. A stored alias always has a non-empty `name`
+/// (OPNsense requires one), so an alias body without one is the template.
 ///
 /// A URL-table alias's body can carry `username`/`password` for an
 /// authenticated fetch. Those fields are dropped here, at the one place every
@@ -479,18 +482,19 @@ impl OpnsenseClient {
 /// # Errors
 ///
 /// Returns [`OpnsenseError::Upstream`] with `status: 404` for an empty-array
-/// response, and [`OpnsenseError::Malformed`] if the response has no
-/// `envelope_key` object.
+/// response or an alias with no name, and [`OpnsenseError::Malformed`] if the
+/// response has no `envelope_key` object.
 fn interpret_get_item_response(
     raw: serde_json::Value,
     uuid: &str,
     envelope_key: &str,
 ) -> Result<serde_json::Value, OpnsenseError> {
+    let not_found = || OpnsenseError::Upstream {
+        status: 404,
+        detail: "not found".to_owned(),
+    };
     if matches!(&raw, serde_json::Value::Array(items) if items.is_empty()) {
-        return Err(OpnsenseError::Upstream {
-            status: 404,
-            detail: "not found".to_owned(),
-        });
+        return Err(not_found());
     }
 
     let Some(item) = raw.get(envelope_key).filter(|value| value.is_object()) else {
@@ -498,6 +502,14 @@ fn interpret_get_item_response(
             "response has no {envelope_key} object"
         )));
     };
+    if envelope_key == "alias"
+        && item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(not_found());
+    }
 
     let mut body = item.clone();
     let object = body
@@ -515,7 +527,9 @@ fn interpret_get_item_response(
 /// Interpret a raw `reconfigure` response.
 ///
 /// A missing `status` field is not evidence of success — only an explicit
-/// `"ok"` is. Treating an ambiguous or absent field as success is exactly the
+/// `"ok"` is. The alias reconfigure answers a plain `"ok"`; the filter apply
+/// returns configd's raw output (`"OK\n\n"`), so the match ignores ASCII
+/// whitespace and case. Treating an ambiguous or absent field as success is exactly the
 /// "probably fine" default this server must not take: a genuine failure with
 /// a differently-shaped body would otherwise be recorded as `Applied`.
 ///
@@ -523,8 +537,15 @@ fn interpret_get_item_response(
 ///
 /// Returns [`OpnsenseError::WriteRefused`] for anything but `status: "ok"`.
 fn interpret_reconfigure_response(raw: &serde_json::Value) -> Result<(), OpnsenseError> {
-    match raw.get("status").and_then(serde_json::Value::as_str) {
-        Some("ok") => Ok(()),
+    let status = raw.get("status").and_then(serde_json::Value::as_str);
+    match status {
+        Some(text)
+            if text
+                .trim_matches(|c: char| c.is_ascii_whitespace())
+                .eq_ignore_ascii_case("ok") =>
+        {
+            Ok(())
+        }
         _ => Err(OpnsenseError::WriteRefused(format!(
             "reconfigure did not report success: {}",
             crate::error::sanitize_detail(&raw.to_string())
@@ -701,7 +722,7 @@ impl crate::changeset::ControllerOps for OpnsenseClient {
 
             let current = self.fetch_resource(mutation.kind(), uuid).await?;
             match current {
-                Some(live) if live == recorded => {}
+                Some(live) if crate::changeset::same_configuration(&recorded, &live) => {}
                 _ => return Ok(false),
             }
         }
@@ -868,15 +889,17 @@ mod tests {
         assert!(OpnsenseClient::require_saved(&raw).is_ok());
     }
 
-    /// OPNsense answers an unknown UUID with HTTP 200 and a bare `[]`, not a
-    /// 404 — without this translation, `fetch_alias`'s `Ok(None)` arm (which
-    /// only fires on a real 404) can never be reached, and every successful
-    /// delete would be misread as having left the alias in place.
+    /// `getRule` answers an unknown UUID with HTTP 200 and a bare `[]`, not a
+    /// 404 — without this translation, `fetch_resource`'s `Ok(None)` arm
+    /// (which only fires on a real 404) can never be reached, and every
+    /// successful delete would be misread as having left the resource in
+    /// place. (Alias `getItem` answers the default template instead; see
+    /// `tests/rollback_delete_idempotent.rs`.)
     #[test]
     fn get_item_interprets_an_empty_array_as_not_found() {
         let raw = serde_json::json!([]);
         let error =
-            super::interpret_get_item_response(raw, "u1", "alias").expect_err("must be refused");
+            super::interpret_get_item_response(raw, "u1", "rule").expect_err("must be refused");
         assert!(
             matches!(
                 error,
@@ -962,6 +985,36 @@ mod tests {
         assert_eq!(body.get("type"), Some(&serde_json::json!("host")));
         // The read-only uuid must not be replayed as a write field.
         assert!(body.get("uuid").is_none());
+    }
+
+    /// configd's raw output (`"OK\n\n"`) from the filter apply is success;
+    /// anything but a whole-word, case-insensitive "ok" is not.
+    #[test]
+    fn reconfigure_accepts_configd_ok_in_any_case_and_padding() {
+        for status in ["ok", "OK", "OK\n\n", " ok \n"] {
+            assert!(
+                super::interpret_reconfigure_response(&serde_json::json!({"status": status}))
+                    .is_ok(),
+                "{status:?}"
+            );
+        }
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"status": "error"}),
+            serde_json::json!({"status": "failed"}),
+            serde_json::json!({"status": "OK but not really"}),
+            serde_json::json!({"status": ""}),
+            serde_json::json!({"status": true}),
+            serde_json::json!({"status": null}),
+        ] {
+            let error = super::interpret_reconfigure_response(&body).expect_err("refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("reconfigure did not report success"),
+                "{error}"
+            );
+        }
     }
 
     /// A missing `status` field must not be read as success — only an

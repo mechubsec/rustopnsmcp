@@ -1,0 +1,4 @@
+[
+ {"name":"status","tool":"opnsmcp_status","arguments":{},"expect":"ok"},
+ {"name":"firmware status","tool":"get_opnsense_firmware_status","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["product"]}
+]

@@ -1,0 +1,182 @@
+{
+  "alias": {
+    "authtype": {
+      "": {
+        "selected": 1,
+        "value": "None"
+      },
+      "Basic": {
+        "selected": 0,
+        "value": "Basic"
+      },
+      "Bearer": {
+        "selected": 0,
+        "value": "Bearer"
+      },
+      "Header": {
+        "selected": 0,
+        "value": "Header"
+      }
+    },
+    "categories": [],
+    "content": {
+      "192.0.2.72/24": {
+        "selected": 1,
+        "value": "192.0.2.72/24"
+      },
+      "__lan_network": {
+        "description": "desc-628729",
+        "selected": 0,
+        "value": "__lan_network"
+      },
+      "__lo0_network": {
+        "description": "desc-62677",
+        "selected": 0,
+        "value": "__lo0_network"
+      },
+      "__wan_network": {
+        "description": "desc-454732",
+        "selected": 0,
+        "value": "__wan_network"
+      },
+      "bogons": {
+        "description": "desc-877214",
+        "selected": 0,
+        "value": "bogons"
+      },
+      "bogonsv6": {
+        "description": "desc-985065",
+        "selected": 0,
+        "value": "bogonsv6"
+      },
+      "lab_clients": {
+        "description": "desc-866870",
+        "selected": 0,
+        "value": "lab_clients"
+      },
+      "lab_server": {
+        "description": "desc-613246",
+        "selected": 0,
+        "value": "lab_server"
+      },
+      "sshlockout": {
+        "description": "desc-903225",
+        "selected": 0,
+        "value": "sshlockout"
+      },
+      "virusprot": {
+        "description": "desc-872691",
+        "selected": 0,
+        "value": "virusprot"
+      },
+      "web_ports": {
+        "description": "desc-361121",
+        "selected": 0,
+        "value": "web_ports"
+      }
+    },
+    "counters": "0",
+    "current_items": "1",
+    "description": "desc-866870",
+    "enabled": "1",
+    "eval_match": "0",
+    "eval_nomatch": "5293",
+    "expire": "",
+    "in_block_b": "0",
+    "in_block_p": "0",
+    "in_pass_b": "0",
+    "in_pass_p": "0",
+    "interface": {
+      "": {
+        "selected": 1,
+        "value": "None"
+      },
+      "lan": {
+        "selected": 0,
+        "value": "LAN"
+      },
+      "wan": {
+        "selected": 0,
+        "value": "WAN"
+      }
+    },
+    "last_updated": "2026-09-30T17:38:08.721761",
+    "name": "lab_clients",
+    "out_block_b": "0",
+    "out_block_p": "0",
+    "out_pass_b": "0",
+    "out_pass_p": "0",
+    "password": "",
+    "path_expression": "",
+    "proto": {
+      "IPv4": {
+        "selected": 0,
+        "value": "IPv4"
+      },
+      "IPv6": {
+        "selected": 0,
+        "value": "IPv6"
+      }
+    },
+    "type": {
+      "asn": {
+        "selected": 0,
+        "value": "BGP ASN"
+      },
+      "authgroup": {
+        "selected": 0,
+        "value": "OpenVPN group"
+      },
+      "dynipv6host": {
+        "selected": 0,
+        "value": "Dynamic IPv6 Host"
+      },
+      "external": {
+        "selected": 0,
+        "value": "External (advanced)"
+      },
+      "geoip": {
+        "selected": 0,
+        "value": "GeoIP"
+      },
+      "host": {
+        "selected": 0,
+        "value": "Host(s)"
+      },
+      "internal": {
+        "selected": 0,
+        "value": "Internal (automatic)"
+      },
+      "mac": {
+        "selected": 0,
+        "value": "MAC address"
+      },
+      "network": {
+        "selected": 1,
+        "value": "Network(s)"
+      },
+      "networkgroup": {
+        "selected": 0,
+        "value": "Network group"
+      },
+      "port": {
+        "selected": 0,
+        "value": "Port(s)"
+      },
+      "url": {
+        "selected": 0,
+        "value": "URL (IPs)"
+      },
+      "urljson": {
+        "selected": 0,
+        "value": "URL Table in JSON format (IPs)"
+      },
+      "urltable": {
+        "selected": 0,
+        "value": "URL Table (IPs)"
+      }
+    },
+    "updatefreq": "",
+    "username": ""
+  }
+}

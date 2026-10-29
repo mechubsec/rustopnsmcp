@@ -1,14 +1,149 @@
 {
+  "current": 1,
+  "rowCount": 3,
   "rows": [
     {
-      "uuid": "44444444-4444-4444-4444-444444444444",
+      "%interface": "WAN",
+      "%ipprotocol": "IPv4",
+      "%target": "WAN address",
+      "alias_meta_destination_net": [
+        {
+          "%value": "any",
+          "description": "",
+          "isAlias": false,
+          "value": "any"
+        }
+      ],
+      "alias_meta_source_net": [
+        {
+          "%value": "lab_clients",
+          "description": "desc-866870",
+          "isAlias": true,
+          "summary": "desc-186840",
+          "value": "lab_clients"
+        }
+      ],
+      "alias_meta_target": [
+        {
+          "%value": "WAN address",
+          "description": "",
+          "isAlias": false,
+          "value": "wanip"
+        }
+      ],
+      "audit": "",
+      "categories": "",
+      "category_colors": [],
+      "description": "desc-222070",
+      "destination_net": "any",
+      "destination_not": "0",
+      "destination_port": "",
+      "enabled": "1",
+      "endpoint-independent": "0",
       "interface": "wan",
-      "source_net": "lan",
-      "target": "",
-      "description": "Auto outbound NAT for LAN"
+      "ipprotocol": "inet",
+      "log": "0",
+      "nonat": "0",
+      "nosync": "0",
+      "poolopts": "",
+      "poolopts_sourcehashkey": "",
+      "prio_group": "400000",
+      "protocol": "any",
+      "sequence": "100",
+      "sort_order": "400000.0000100",
+      "source_net": "lab_clients",
+      "source_not": "0",
+      "source_port": "",
+      "staticnatport": "0",
+      "tag": "",
+      "tagged": "",
+      "target": "wanip",
+      "target_port": "",
+      "uuid": "9761e810-a5ba-4fb8-893f-014cdfe26b1e"
+    },
+    {
+      "%interface": "WAN",
+      "%ipprotocol": "IPv4",
+      "alias_meta_destination_port": [
+        {
+          "%value": "500",
+          "description": "",
+          "isAlias": false,
+          "value": "500"
+        }
+      ],
+      "alias_meta_source_net": [
+        {
+          "%value": "LAN network",
+          "description": "",
+          "isAlias": false,
+          "value": "lan"
+        },
+        {
+          "%value": "Loopback network",
+          "description": "",
+          "isAlias": false,
+          "value": "lo0"
+        },
+        {
+          "%value": "127.0.0.0/8",
+          "description": "",
+          "isAlias": false,
+          "value": "127.0.0.0/8"
+        }
+      ],
+      "category_colors": [],
+      "description": "desc-429345",
+      "destination_port": "500",
+      "enabled": "1",
+      "interface": "wan",
+      "ipprotocol": "inet",
+      "is_automatic": true,
+      "prio_group": "500000",
+      "protocol": "any",
+      "sequence": "1",
+      "sort_order": "500000.0000001",
+      "source_net": "lan,lo0,127.0.0.0/8",
+      "staticnatport": "1",
+      "uuid": "automatic_isakmp_wan"
+    },
+    {
+      "%interface": "WAN",
+      "%ipprotocol": "IPv4",
+      "alias_meta_source_net": [
+        {
+          "%value": "LAN network",
+          "description": "",
+          "isAlias": false,
+          "value": "lan"
+        },
+        {
+          "%value": "Loopback network",
+          "description": "",
+          "isAlias": false,
+          "value": "lo0"
+        },
+        {
+          "%value": "127.0.0.0/8",
+          "description": "",
+          "isAlias": false,
+          "value": "127.0.0.0/8"
+        }
+      ],
+      "category_colors": [],
+      "description": "desc-810317",
+      "enabled": "1",
+      "interface": "wan",
+      "ipprotocol": "inet",
+      "is_automatic": true,
+      "prio_group": "500000",
+      "protocol": "any",
+      "sequence": "2",
+      "sort_order": "500000.0000002",
+      "source_net": "lan,lo0,127.0.0.0/8",
+      "staticnatport": "0",
+      "uuid": "automatic_wan"
     }
   ],
-  "rowCount": 1,
-  "total": 1,
-  "current": 1
+  "total": 3
 }
