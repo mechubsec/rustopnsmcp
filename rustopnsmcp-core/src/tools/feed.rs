@@ -35,6 +35,7 @@
 //! (`alias resolve error`) and keeps the previous content. No API returns it,
 //! so there is no `last_error` field.
 
+use crate::changeset::fingerprint::whole_collection;
 use crate::client::OpnsenseClient;
 use crate::endpoints;
 use crate::error::OpnsenseError;
@@ -88,7 +89,7 @@ pub struct FeedSubscription {
     /// Document kind.
     pub kind: FeedKind,
     /// Refresh interval in days (`updatefreq`), if set.
-    pub update_frequency_days: Option<f64>,
+    pub update_frequency_days: Option<serde_json::Number>,
     /// `authtype` (for example `Basic`). Credentials are never reported.
     pub auth: Option<String>,
     /// Entries the search row reports for the alias.
@@ -101,6 +102,10 @@ pub struct FeedSubscription {
     pub table_updated: Option<Value>,
     /// mecfeed-serve's ETag recomputed from the pf table; see the module docs.
     pub content_etag: Option<String>,
+    /// Why the pf table could not be read, when `content_etag` is `null` for
+    /// that reason; a short fixed phrase, never the device's error text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub etag_unavailable: Option<&'static str>,
 }
 
 /// An alias that was not examined, and why.
@@ -170,6 +175,9 @@ fn matching_urls(content: &str) -> Vec<(FeedKind, String)> {
         .into_iter()
         .filter_map(|mut parsed| {
             let kind = FeedKind::from_path(parsed.path())?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return None;
+            }
             parsed.host_str()?;
             let _ = parsed.set_username("");
             let _ = parsed.set_password(None);
@@ -178,6 +186,18 @@ fn matching_urls(content: &str) -> Vec<(FeedKind, String)> {
             Some((kind, parsed.to_string()))
         })
         .collect()
+}
+
+/// A refresh interval as JSON: whole days as an integer, fractions kept.
+fn days_number(days: f64) -> Option<serde_json::Number> {
+    if !days.is_finite() {
+        return None;
+    }
+    if days.fract() == 0.0 && days.abs() < 1e12 {
+        #[allow(clippy::cast_possible_truncation)]
+        return Some(serde_json::Number::from(days as i64));
+    }
+    serde_json::Number::from_f64(days)
 }
 
 fn text(row: &Value, key: &str) -> Option<String> {
@@ -281,7 +301,7 @@ fn candidates(rows: &[Value]) -> (Vec<Candidate>, Vec<SkippedAlias>) {
         let single_url = url_lines(&content).len() == 1;
         let frequency = text(row, "updatefreq")
             .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite());
+            .and_then(days_number);
         let subscriptions = urls
             .into_iter()
             .map(|(kind, url)| FeedSubscription {
@@ -290,13 +310,14 @@ fn candidates(rows: &[Value]) -> (Vec<Candidate>, Vec<SkippedAlias>) {
                 enabled: text(row, "enabled").as_deref() == Some("1"),
                 url,
                 kind,
-                update_frequency_days: frequency,
+                update_frequency_days: frequency.clone(),
                 auth: text(row, "authtype"),
                 current_items: text(row, "current_items").and_then(|value| value.parse().ok()),
                 last_updated: text(row, "last_updated"),
                 table_count: None,
                 table_updated: None,
                 content_etag: None,
+                etag_unavailable: None,
             })
             .collect();
         found.push(Candidate {
@@ -327,19 +348,39 @@ async fn table_entries(
     Ok(entries.filter(|_| complete))
 }
 
+/// Whether a failure reading one alias's pf table may cost only that feed's
+/// digest. Authentication and transport failures stay fatal: they mean the
+/// whole call cannot be trusted.
+fn is_degradable(error: &OpnsenseError) -> bool {
+    match error {
+        OpnsenseError::Upstream { status, .. } => !matches!(status, 401 | 403),
+        OpnsenseError::Malformed(_) => true,
+        _ => false,
+    }
+}
+
 /// `get_opnsense_feed_status`: the device's mecfeedmcp subscriptions.
 ///
 /// # Errors
-/// As [`crate::tools::read::system_status`]; the alias search, the table-size
-/// read and each table listing must succeed.
+/// As [`crate::tools::read::system_status`]; the alias search must return
+/// every row and the table-size read must succeed. A failure to list one
+/// alias's pf table, other than an authentication or transport failure, only
+/// nulls that feed's `content_etag` and sets `etag_unavailable`.
 pub async fn feed_status(client: &OpnsenseClient) -> Result<Value, OpnsenseError> {
-    let raw = client
-        .post(
-            endpoints::ALIASES_SEARCH,
-            &serde_json::json!({ "current": 1, "rowCount": -1, "searchPhrase": "" }),
-        )
-        .await?;
-    let (found, skipped) = candidates(&SearchResponse::parse(&raw)?.rows);
+    feed_status_with_limit(client, MAX_DIGEST_ENTRIES).await
+}
+
+/// [`feed_status`] with the digest entry cap given, so tests need not build
+/// a 50,000-row table.
+///
+/// # Errors
+/// As [`feed_status`].
+pub async fn feed_status_with_limit(
+    client: &OpnsenseClient,
+    max_entries: u64,
+) -> Result<Value, OpnsenseError> {
+    let rows = whole_collection(client, endpoints::ALIASES_SEARCH).await?;
+    let (found, skipped) = candidates(&rows);
     let mut feeds = Vec::new();
     if !found.is_empty() {
         let sizes = client.get(endpoints::ALIASES_TABLE_SIZE).await?;
@@ -356,16 +397,25 @@ pub async fn feed_status(client: &OpnsenseClient) -> Result<Value, OpnsenseError
                     .and_then(|detail| detail.get("updated"))
                     .filter(|updated| !updated.is_null())
                     .cloned();
-                if single_url
+                let digestible = single_url
                     && subscription.kind != FeedKind::Domain
                     && subscription
                         .table_count
-                        .is_some_and(|count| count <= MAX_DIGEST_ENTRIES)
-                    && let Some(entries) = table_entries(client, &subscription.alias).await?
-                    && Some(entries.len() as u64) == subscription.table_count
-                    && let Some(body) = render_body(subscription.kind, &entries)
-                {
-                    subscription.content_etag = Some(etag_of(&body));
+                        .is_some_and(|count| count <= max_entries);
+                if digestible {
+                    match table_entries(client, &subscription.alias).await {
+                        Ok(Some(entries))
+                            if Some(entries.len() as u64) == subscription.table_count =>
+                        {
+                            subscription.content_etag =
+                                render_body(subscription.kind, &entries).map(|body| etag_of(&body));
+                        }
+                        Ok(_) => {}
+                        Err(error) if is_degradable(&error) => {
+                            subscription.etag_unavailable = Some("pf table listing failed");
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 feeds.push(subscription);
             }
@@ -449,6 +499,32 @@ mod tests {
     }
 
     #[test]
+    fn only_http_and_https_schemes_match() {
+        assert!(urls("ftp://feeds.example.org/feeds/opnsense-url-table/address").is_empty());
+        assert!(urls("file:///feeds/opnsense-url-table/address").is_empty());
+        assert_eq!(
+            urls("http://feeds.example.org/feeds/opnsense-url-table/address").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn refresh_interval_keeps_fractions_and_drops_a_trailing_zero() {
+        let mut half = row(
+            "half",
+            "https://feeds.example.org/feeds/opnsense-url-table/prefix",
+        );
+        half["updatefreq"] = json!("0.5");
+        let mut empty = half.clone();
+        empty["updatefreq"] = json!("");
+        let (found, _) = candidates(&[half]);
+        let rendered = serde_json::to_value(&found[0].subscriptions[0]).unwrap();
+        assert_eq!(rendered["update_frequency_days"], json!(0.5));
+        let (found, _) = candidates(&[empty]);
+        assert!(found[0].subscriptions[0].update_frequency_days.is_none());
+    }
+
+    #[test]
     fn non_urltable_types_are_ignored() {
         let mut other = row(
             "hosts",
@@ -474,7 +550,10 @@ mod tests {
         assert!(!rendered.contains("synthetic-pass"), "password leaked");
         let feed = &found[0].subscriptions[0];
         assert_eq!(feed.auth.as_deref(), Some("Basic"));
-        assert_eq!(feed.update_frequency_days, Some(1.0));
+        assert_eq!(
+            serde_json::to_value(feed).unwrap()["update_frequency_days"],
+            1
+        );
         assert_eq!(feed.current_items, Some(3052));
         assert!(feed.enabled);
         assert_eq!(feed.last_updated.as_deref(), Some("2026-10-29 01:02:03"));
@@ -499,6 +578,14 @@ mod tests {
         let (found, skipped) = candidates(&rows);
         assert!(found.is_empty());
         assert_eq!(skipped.len(), rows.len());
+        assert_eq!(skipped[0].alias, "a/b");
+        assert_eq!(skipped[1].alias, "..");
+        assert_eq!(skipped[2].alias, "a%2Fb");
+        assert_eq!(skipped[3].alias, "x/../y");
+        assert!(skipped[0].reason.contains("outside [A-Za-z0-9_]"));
+        assert!(skipped[4].reason.contains("1 to 31"));
+        assert!(skipped[5].reason.contains("1 to 31"));
+        assert!(skipped[6].reason.contains("start with a letter"));
         for name in ["a", "_a", "a_", "A1_b", &"a".repeat(31)] {
             assert!(validate_alias_name(name).is_ok(), "{name}");
         }

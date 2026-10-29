@@ -188,11 +188,29 @@ types by design, because such an alias makes the firewall fetch a remote list
 "because a model chose this type, not because a human approved a specific URL".
 Issue #51 tracks whether change sets should govern it.
 
-1. In Firewall > Aliases, add an alias of type "URL Table (IPs)".
-2. Set the URL to `https://<serve host>:8443/feeds/opnsense-url-table/<kind>`,
+Set up mecfeed-serve first, or OPNsense is refused. Follow the
+[mecfeedmcp operations guide](https://github.com/mechubsec/mecfeedmcp/blob/main/docs/operations.md):
+
+1. Let the firewall reach serve. `mecfeed-serve` matches its client allowlist
+   against the TCP peer address, and the default is loopback only, so pass
+   `--allow-cidr` with the firewall's address (and `--listen 0.0.0.0:8443`).
+2. Add a Basic client. Authentication is required with the stock packaging:
+   serve needs `--clients-file`, and a request without valid credentials gets
+   401. Run `mecfeed-serve --generate-basic-password`: stdout is the password
+   to give the firewall, stderr is `basic_sha256: <hex>` for the file. Add the
+   client to `clients.json` with `"feeds": ["opnsense-url-table/<kind>"]`, then
+   `systemctl restart mecfeed-serve`. A client asking for a feed not in its
+   `feeds` list gets 403.
+
+Then on the firewall:
+
+3. If serve's certificate is from a private CA, first import that CA in
+   System > Trust > Authorities. Otherwise the URL-table download fails.
+4. In Firewall > Aliases, add an alias of type "URL Table (IPs)".
+5. Set the URL to `https://<serve host>:8443/feeds/opnsense-url-table/<kind>`,
    where `<kind>` is `address`, `prefix` or `domain`.
-3. Set the refresh frequency, and, if mecfeed-serve requires it, Basic
-   authentication with the mecfeed-serve client's name and password.
+6. Set the refresh frequency and Basic authentication with the mecfeed-serve
+   client's name (the `clients.json` `name`) and the generated password.
 
 Observe it with `get_opnsense_feed_status`. It is read-only and lists each
 URL-table alias whose URL path is exactly one of those three:
@@ -200,7 +218,7 @@ URL-table alias whose URL path is exactly one of those three:
 ```json
 {"feeds": [{"alias": "mecfeed_blocklist", "enabled": true,
   "url": "https://feeds.example.org:8443/feeds/opnsense-url-table/address",
-  "kind": "address", "update_frequency_days": 1.0, "auth": "Basic",
+  "kind": "address", "update_frequency_days": 1, "auth": "Basic",
   "current_items": 3, "last_updated": "2026-10-29 01:02:03",
   "table_count": 3, "content_etag": "\"sha256-...\""}]}
 ```
@@ -210,7 +228,12 @@ equal to the ETag serve sends means the firewall holds the whole document. It is
 `null` when that cannot be known exactly: a `domain` feed (pf holds resolved
 addresses), a table that is not loaded, an entry count that differs from
 `table_count`, more than 50,000 entries, or several URLs in one alias. Username
-and password are never returned. OPNsense logs a failed download to syslog only,
+and password are never returned. The reported `url` is normalised as the `url`
+crate renders it, so it can differ textually from the configured string. For an
+alias with several URLs, each URL is its own entry carrying the whole alias's
+counts and a `null` `content_etag`. If one alias's pf table cannot be listed,
+only that entry's `content_etag` is `null` and it carries `etag_unavailable`.
+OPNsense logs a failed download to syslog only,
 so no fetch error is reported.
 
 ## Upgrading

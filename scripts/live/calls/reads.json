@@ -135,6 +135,17 @@
   }
  },
  {
+  "name": "feed status (no subscription on the lab)",
+  "tool": "get_opnsense_feed_status",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "pointers": {
+   "/feeds": "^\\[\\]$"
+  }
+ },
+ {
   "name": "nat_rules",
   "tool": "list_opnsense_nat_rules",
   "arguments": {
