@@ -1,0 +1,41 @@
+name: Release image
+
+# Builds, SBOMs, pushes and keyless-signs the image on every version tag, by
+# calling mecmcp's reusable workflow (docs/RELEASE-WORKFLOWS.md). Pushes to GHCR
+# and Docker Hub, then cosign-verifies the signature on both (a hard gate).
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for the image, e.g. v1.0.0 (-> tags 1.0.0, 1.0, latest)'
+        required: true
+      ref:
+        description: 'Git ref/commit to build (default: the ref this workflow runs from)'
+        required: false
+        default: ''
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign signing exchanges this job's OIDC token for a
+      # short-lived certificate. A reusable workflow's permissions can only be
+      # narrowed by its caller, so this job must grant them itself.
+      id-token: write
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      image: ghcr.io/${{ github.repository }}
+      # Docker Hub images are linux/amd64 only; platforms keeps its default.
+      dockerhub-image: docker.io/mechub/rustopnsmcp
+      description: 'OPNsense MCP server'
+      version: ${{ github.event.inputs.version }}
+      ref: ${{ github.event.inputs.ref }}
+    # Mapped by name, never `secrets: inherit`, which would hand the reusable
+    # workflow every repository and org secret this job can see.
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
