@@ -192,8 +192,12 @@ the optional `--audit-log-file` sink described above.
    service.
 
 The installer never overwrites `tokens.json`, `changeset-state.json`,
-`devices.json`, `credentials.env` or `audit-hmac.key`, and refuses (rather than
-follows) a symlink or non-regular file at any of those paths. It always
+`devices.json`, `credentials.env` or `audit-hmac.key`. Before changing anything
+it checks those five paths and `/etc/rustopnsmcp` and `/var/lib/rustopnsmcp`:
+a symlink or wrong file type refuses, and so does an existing path whose owner
+or mode is not the documented one (the message gives the `chown`/`chmod` fix; the
+installer never alters an operator's file). New files are created already
+owned by `rustopnsmcp`. It always
 replaces the binary and the unit file. If the installed unit differed from the
 packaged one, the old copy is kept beside it as `rustopnsmcp.service.bak-<timestamp>`
 and the installer says so; a site `override.conf` is untouched, so re-check it
