@@ -31,6 +31,16 @@ def payload_of(result):
         return None
 
 
+def unparsed_note(text):
+    """A fixed class for a body that did not parse, plus only the text before any untrusted tag.
+
+    That leading context line is this server's own words; everything from the tag on is device
+    content and is never echoed.
+    """
+    context = IPV4.sub("x.x.x.x", text.split("<untrusted-device-content", 1)[0].strip())[:160]
+    return ("non-json " + context).strip()
+
+
 def shape(value, depth=0):
     if isinstance(value, dict):
         return "{...}" if depth >= 2 else {k: shape(v, depth + 1) for k, v in list(value.items())[:30]}
@@ -139,10 +149,11 @@ def main():
             for part in [p for p in pointer.split("/") if p]:
                 node = node[int(part)] if isinstance(node, list) and part.isdigit() and int(part) < len(node) else (
                     node.get(part) if isinstance(node, dict) else None)
+            shown_pattern = pattern  # never echo a saved value: it may come from the device
             if pattern.startswith("$"):  # "$name": must equal a saved variable exactly
                 pattern = "^" + re.escape(str(saved.get(pattern[1:]))) + "$"
             if not re.search(pattern, str(node)):
-                problems.append("pointer %s does not match %s" % (pointer, pattern))
+                problems.append("pointer %s does not match %s" % (pointer, shown_pattern))
         if "error_contains" in call and call["error_contains"] not in text:
             problems.append("error text lacks %r" % call["error_contains"])
         for variable, pointer in call.get("save", {}).items():
@@ -152,7 +163,7 @@ def main():
             saved[variable] = node
         failures += bool(problems)
         shown = {name: saved.get(name) for name in call.get("show", [])}  # only for non-secret ids and fingerprints
-        detail = json.dumps(shape(payload)) if payload is not None else IPV4.sub("x.x.x.x", text)[:160]
+        detail = json.dumps(shape(payload)) if payload is not None else unparsed_note(text)
         print("%s %-34s %s%s" % ("FAIL" if problems else "PASS", call["name"],
                                  "[error] " if is_error else "", detail), *("<- " + p for p in problems),
               *(["shown " + json.dumps(shown)] if shown else []))

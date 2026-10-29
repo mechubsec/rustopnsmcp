@@ -17,8 +17,9 @@ cat > stub.py <<'PY'
 import http.server, json, ssl
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # the entity-escaped characters in "note" are what the client must unescape
-        body = json.dumps({"product_version": "26.7", "note": "a<b & c>d"}).encode()
-        self.send_response(200)
+        failing = "firmware" not in self.path  # every other path is a device error carrying a canary
+        body = b"DEVICE-ERROR-CANARY" if failing else json.dumps({"product_version": "26.7", "note": "a<b & c>d"}).encode()
+        self.send_response(500 if failing else 200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -40,9 +41,23 @@ cat > calls.json <<'JSON'
 [{"name":"status","tool":"opnsmcp_status","arguments":{},"expect":"ok","keys":["version"]},
  {"name":"unknown device refused","tool":"get_opnsense_firmware_status","arguments":{"device":"nope"},"expect":"error"},
  {"name":"wrapped device read","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
-  "keys":["product_version"],"pointers":{"/note":"^a<b & c>d$"}}]
+  "keys":["product_version"],"pointers":{"/note":"^a<b & c>d$"}},
+ {"name":"device error","tool":"list_opnsense_interfaces","arguments":{"device":"stub"},"expect":"error"}]
 JSON
+cat > mismatch.json <<'JSON'
+[{"name":"saved-value mismatch","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},
+  "expect":"ok","pointers":{"/note":"$canary"}}]
+JSON
+printf '{"canary":"SAVEDVALUECANARY"}' > vars.json
 cd - >/dev/null
-out=$(python3 -I scripts/live/mcp_call.py "$work/calls.json" --stdio -- "$bin" --device-mapping "$work/devices.json" --inventory-readonly) || true  # a failing call must still print its FAIL line
+client=(python3 -I scripts/live/mcp_call.py)
+server=(--stdio -- "$bin" --device-mapping "$work/devices.json" --inventory-readonly)
+out=$("${client[@]}" "$work/calls.json" "${server[@]}") || true  # a failing call must still print its FAIL line
 printf '%s\n' "$out"
-[ "$(printf '%s\n' "$out" | grep -c '^PASS')" = 3 ]
+[ "$(printf '%s\n' "$out" | grep -c '^PASS')" = 4 ]
+if printf '%s' "$out" | grep -q 'DEVICE-ERROR-CANARY\|untrusted-device-content'; then echo 'device error text leaked'; exit 1; fi
+# A $var pointer mismatch must FAIL without printing the saved value.
+mismatch=$("${client[@]}" "$work/mismatch.json" --vars "$work/vars.json" "${server[@]}") || true
+printf '%s\n' "$mismatch"
+printf '%s' "$mismatch" | grep -q '^FAIL'
+if printf '%s' "$mismatch" | grep -q 'SAVEDVALUECANARY'; then echo 'saved value leaked'; exit 1; fi
