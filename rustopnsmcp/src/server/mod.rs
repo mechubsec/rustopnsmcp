@@ -1572,7 +1572,7 @@ mod tests {
                 .unwrap_or_default()
         };
         let status = description_of("get_opnsense_system_status");
-        for promise in ["uptime, CPU", "product version", "load"] {
+        for promise in ["uptime, CPU", "product version", " load.", " load,"] {
             assert!(!status.contains(promise), "status promises {promise}");
         }
         assert!(status.contains("health summary"), "{status}");

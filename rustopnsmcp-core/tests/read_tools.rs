@@ -363,11 +363,6 @@ async fn device_facts_come_from_system_time_and_firmware_status() {
     use rustopnsmcp_core::endpoints as ep;
     let mut routes = default_routes();
     routes.insert(
-        ep::SYSTEM_STATUS.to_owned(),
-        serde_json::json!({ "metadata": { "system": { "status": 2, "message": "ok", "title": "t" },
-            "translations": {}, "subsystems": [] } }),
-    );
-    routes.insert(
         ep::SYSTEM_TIME.to_owned(),
         serde_json::json!({ "uptime": "3 days, 04:12", "loadavg": "0.12, 0.09, 0.05",
             "datetime": "x", "boottime": "x", "config": "x" }),
