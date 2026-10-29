@@ -25,7 +25,16 @@ mode=""; [ "$rig" = test-labmode-opns ] && mode="--lab-mode"
 emit() { ssh "$LAB_HOST" env "LAB_ENV_FILE=$LAB_ENV_FILE" bash -s -- "$1" < "$here/emit-credential.sh"; }
 tmp=$(ssh -n "$RIG_PVE" mktemp -d); local_tmp=$(mktemp -d)
 require_match "node temp dir" "$tmp" "$abs_path_re"
-trap 'ssh -n "$RIG_PVE" rm -rf "$tmp"; rm -rf "$local_tmp"' EXIT
+# Armed once the service is stopped: a failed install must not leave the rig silently down.
+service_stopped=0
+on_exit() {
+  local status=$?
+  if [ "$status" != 0 ] && [ "$service_stopped" = 1 ]; then
+    echo "rustopnsmcp on $rig was stopped for this install and is still stopped; the binary there is in an unknown state. Fix the cause, then re-run rig-install.sh, or run scripts/live/rig-ctl.sh svc $rig restart." >&2
+  fi
+  ssh -n "$RIG_PVE" rm -rf "$tmp"; rm -rf "$local_tmp"
+}
+trap on_exit EXIT
 sed -e "s/@RIG_IP@/$ip/g" -e "s/@RIG_NAME@/$rig/g" -e "s/@LAB_MODE@/$mode/" "$here/rig-override.conf.in" > "$local_tmp/override.conf"
 cp "$binary" "$local_tmp/rustopnsmcp"
 scp -q "$local_tmp/rustopnsmcp" "$root/packaging/systemd/rustopnsmcp.service" "$root/packaging/systemd/rustopnsmcp.sysusers" \
@@ -37,8 +46,9 @@ inrig mkdir -p /etc/systemd/system/rustopnsmcp.service.d
 # ("Text file busy"). Stop it first rather than rename over it: the stopped service cannot go on serving the old
 # code, and the token/restart step that follows starts the new one. On a first install the unit does not exist yet.
 inrig systemctl stop rustopnsmcp || true
+service_stopped=1
 push rustopnsmcp /usr/local/bin/rustopnsmcp 0755 \
-  || { echo "install failed: could not replace /usr/local/bin/rustopnsmcp on $rig; the old binary is still there" >&2; exit 1; }
+  || { echo "install failed: could not replace /usr/local/bin/rustopnsmcp on $rig" >&2; exit 1; }
 push rustopnsmcp.service /etc/systemd/system/rustopnsmcp.service 0644
 push override.conf /etc/systemd/system/rustopnsmcp.service.d/override.conf 0644
 push rustopnsmcp.sysusers /usr/lib/sysusers.d/rustopnsmcp.conf 0644
@@ -60,8 +70,8 @@ inrig systemctl daemon-reload
 inrig systemctl enable rustopnsmcp
 # The binary on the rig must be the one that was built here.
 local_sum=$(sha256sum "$binary" | awk '{print $1}')
-# shellcheck disable=SC2029 # vmid is expanded locally on purpose
-rig_sum=$(ssh -n "$RIG_PVE" "pct exec $vmid -- sha256sum /usr/local/bin/rustopnsmcp" | awk '{print $1}')
+rig_sum=$(inrig sha256sum /usr/local/bin/rustopnsmcp | awk '{print $1}') \
+  || { echo "install failed: could not read the hash of /usr/local/bin/rustopnsmcp on $rig" >&2; exit 1; }
 [ "$local_sum" = "$rig_sum" ] || { echo "install failed: the binary on $rig does not match the local build" >&2; exit 1; }
 # Sizes and modes only; a zero size means the rig did not forward stdin (see the plan's fallback). The node's
 # shell re-splits ssh arguments, so the whole remote command goes as one string with the stat format quoted.

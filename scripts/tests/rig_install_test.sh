@@ -43,8 +43,10 @@ case \$1 in
   exec) shift 3
     case \$1 in
       hostname) echo 192.0.2.10 ;;
-      systemctl) case \$2 in stop) [ -n "\${STUCK_RUNNING:-}" ] || rm -f "\$root/running" ;; start) touch "\$root/running" ;; esac ;;
-      sha256sum) if [ -n "\${WRONG_HASH:-}" ]; then echo "0000 \$2"; else sha256sum "\$root\$2" | sed "s#\$root##"; fi ;;
+      systemctl) case \$2 in stop) [ -n "\${STUCK_RUNNING:-}" ] || rm -f "\$root/running" ;; start) touch "\$root/running" ;;
+                 enable) [ -z "\${FLIP_ON_ENABLE:-}" ] || touch "$work/flip" ;; esac ;;
+      sha256sum) [ -z "\${NO_HASH:-}" ] || exit 1
+                 if [ -n "\${WRONG_HASH:-}" ]; then echo "0000 \$2"; else sha256sum "\$root\$2" | sed "s#\$root##"; fi ;;
       systemd-sysusers|systemd-tmpfiles|chown) ;;
       install) mkdir -p "\$root\${@: -1}"; touch "$work/credentials-dir-made"; [ -z "\${FLIP_ON_INSTALL:-}" ] || touch "$work/flip" ;;
       mkdir) mkdir -p "\$root\${@: -1}" ;;
@@ -73,6 +75,7 @@ awk '{ if (NF != 4 || $1 != "600" || $3 + 0 == 0) exit 1 }' "$work/out" || fail 
 grep -q CANARY "$work/out" "$work/err" "$work/ssh-calls" "$work/pct-calls" && fail "credential visible in output or arguments"
 grep -q -- '--audit-journald' "$work/guest/etc/systemd/system/rustopnsmcp.service.d/override.conf" || fail "override lacks audit flags"
 grep -q 'systemctl enable' "$work/pct-calls" || fail "service not enabled"
+grep -q 'still stopped' "$work/err" && fail "stopped-service warning on a successful install"
 echo "ok   install: stat report is parsed correctly, 4 files, 600, non-zero, no credential in argv or output"
 
 # 1a. Re-install over a running service: the service is stopped first, the new binary lands and its hash matches.
@@ -81,6 +84,7 @@ mkdir -p "$work/guest/usr/local/bin"; printf OLD > "$work/guest/usr/local/bin/ru
 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null || { cat "$work/err"; fail "re-install over a running service failed"; }
 [ "$(cat "$work/guest/usr/local/bin/rustopnsmcp")" = BIN ] || fail "old binary left in place"
 grep -q 'systemctl stop' "$work/pct-calls" || fail "service not stopped before the push"
+grep -q 'still stopped' "$work/err" && fail "stopped-service warning on a successful re-install"
 echo "ok   install: running service is stopped, the busy binary is replaced, the hash matches"
 
 # 1a2. A binary that does not land (or lands different) fails the install with the old binary untouched.
@@ -88,11 +92,23 @@ reset
 mkdir -p "$work/guest/usr/local/bin"; printf OLD > "$work/guest/usr/local/bin/rustopnsmcp"; touch "$work/guest/running"
 if STUCK_RUNNING=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install exited 0 with the old binary in place"; fi
 grep -q 'could not replace' "$work/err" || fail "no clear message: $(head -1 "$work/err")"
+grep -q 'rustopnsmcp on test-labmode-opns was stopped for this install and is still stopped' "$work/err" \
+  || fail "failed push after the stop did not say the service is still stopped: $(cat "$work/err")"
+grep -q 'rig-ctl.sh svc test-labmode-opns restart' "$work/err" || fail "no recovery command after the failed push"
 [ "$(cat "$work/guest/usr/local/bin/rustopnsmcp")" = OLD ] || fail "binary changed despite the failure"
 reset
 if WRONG_HASH=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install passed with a mismatched binary"; fi
 grep -q 'does not match' "$work/err" || fail "no hash message: $(head -1 "$work/err")"
-echo "ok   install: a failed replace or a hash mismatch fails the install with a clear message"
+grep -q 'still stopped' "$work/err" || fail "hash mismatch did not say the service is still stopped"
+reset
+if NO_HASH=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install passed with no rig hash"; fi
+grep -q 'could not read the hash' "$work/err" || fail "no message when the rig hash cannot be read: $(cat "$work/err")"
+# The hash read is a guest operation too: a recycled id is refused before it, not after.
+reset
+if FLIP_ON_ENABLE=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install passed after the vmid changed"; fi
+grep -q sha256sum "$work/pct-calls" && fail "hash read from the guest after the vmid changed"
+grep -q 'no longer resolves' "$work/err" || fail "wrong refusal: $(head -1 "$work/err")"
+echo "ok   install: a failed replace, hash read or hash mismatch fails clearly and says the service is still stopped"
 
 # 1b. If the rig received nothing (zero-size files), the install fails loudly and prints no secret.
 reset
