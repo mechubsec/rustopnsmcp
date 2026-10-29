@@ -16,6 +16,10 @@
 /// System status. Module `core`, controller `system`.
 pub const SYSTEM_STATUS: &str = "/api/core/system/status";
 
+/// System time: uptime, load average, boot time. Module `diagnostics`,
+/// controller `system`.
+pub const SYSTEM_TIME: &str = "/api/diagnostics/system/systemTime";
+
 /// Firmware and installed-version status. Module `core`, controller `firmware`.
 pub const FIRMWARE_STATUS: &str = "/api/core/firmware/status";
 

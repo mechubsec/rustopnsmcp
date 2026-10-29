@@ -356,6 +356,35 @@ async fn system_status_reads_the_fixture() {
     assert_eq!(status["product_version"], "24.7");
 }
 
+/// The rewiring behind `gather_device_facts`: the three 26.7 shapes in, a fact
+/// sheet with uptime, load and product name out, and no `cpu_type`.
+#[tokio::test]
+async fn device_facts_come_from_system_time_and_firmware_status() {
+    use rustopnsmcp_core::endpoints as ep;
+    let mut routes = default_routes();
+    routes.insert(
+        ep::SYSTEM_STATUS.to_owned(),
+        serde_json::json!({ "metadata": { "system": { "status": 2, "message": "ok", "title": "t" },
+            "translations": {}, "subsystems": [] } }),
+    );
+    routes.insert(
+        ep::SYSTEM_TIME.to_owned(),
+        serde_json::json!({ "uptime": "3 days, 04:12", "loadavg": "0.12, 0.09, 0.05",
+            "datetime": "x", "boottime": "x", "config": "x" }),
+    );
+    routes.insert(
+        ep::FIRMWARE_STATUS.to_owned(),
+        serde_json::json!({ "status": "none", "product": { "product_name": "OPNsense",
+            "product_version": "26.7.5", "product_latest": "26.7.5", "product_series": "26.7" } }),
+    );
+    let client = client_against(routes).await;
+    let facts = read::device_facts(&client, "fw-1").await.expect("facts");
+    assert_eq!(facts["product_name"], "OPNsense");
+    assert_eq!(facts["uptime"], "3 days, 04:12");
+    assert_eq!(facts["load_average"], "0.12, 0.09, 0.05");
+    assert!(facts.get("cpu_type").is_none());
+}
+
 #[tokio::test]
 async fn firmware_status_reads_the_fixture() {
     let client = client_against(default_routes()).await;

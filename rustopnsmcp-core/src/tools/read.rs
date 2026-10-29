@@ -257,6 +257,20 @@ pub async fn system_status(client: &OpnsenseClient) -> Result<serde_json::Value,
     Ok(raw)
 }
 
+/// `gather_device_facts`: the fact sheet, from system time and firmware status.
+///
+/// # Errors
+/// As [`system_status`].
+pub async fn device_facts(
+    client: &OpnsenseClient,
+    device: &str,
+) -> Result<serde_json::Value, OpnsenseError> {
+    let time = client.get(endpoints::SYSTEM_TIME).await?;
+    require_object(&time)?;
+    let firmware = firmware_status(client).await?;
+    Ok(crate::tools::fleet::facts_from(device, &time, &firmware))
+}
+
 /// `get_opnsense_firmware_status`: installed firmware and available-update status.
 ///
 /// # Errors
