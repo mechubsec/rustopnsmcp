@@ -18,8 +18,11 @@ cargo_toml=$repo_root/Cargo.toml
 mapfile -t declared_refs < <(grep -oP 'tag = "\K[^"]+' "$cargo_toml" | sort -u)
 [[ ${#declared_refs[@]} -eq 1 ]] || fail "Cargo.toml must declare exactly one mecmcp tag, found: ${declared_refs[*]:-none}"
 declared_ref=${declared_refs[0]}
+# NAME@VERSION of every declared mecmcp-* dependency, sorted.
+mapfile -t declared_components < <(sed -nE 's/^(mecmcp-[a-z]+) += \{ *version = "([^"]+)".*/\1@\2/p' "$cargo_toml" | sort)
 expected_mecmcp=$(grep -cE '^mecmcp-[a-z]+ += ' "$cargo_toml" || true)
 [[ "$expected_mecmcp" -gt 0 ]] || fail "no mecmcp-* dependencies found in Cargo.toml"
+[[ ${#declared_components[@]} -eq "$expected_mecmcp" ]] || fail "could not read name+version of every mecmcp-* dependency in Cargo.toml"
 
 archive_arg=${1:?usage: package-smoke.sh <rustopnsmcp-v*.tar.gz>}
 [[ -f "$archive_arg" ]] || fail "archive not found: $archive_arg"
@@ -32,8 +35,11 @@ scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
 [[ "$(awk '{print $2}' "$archive.sha256")" == "$archive_name" ]] || fail "checksum filename is not the bare archive name"
 (cd "$(dirname -- "$archive")" && sha256sum -c "$archive_name.sha256" >/dev/null 2>&1) || fail "checksum mismatch"
 
-# 2. gzip and POSIX tar.
+# 2. gzip and POSIX tar. Header bytes 257-264 hold magic+version: POSIX/pax is
+# "ustar\0" "00"; GNU is "ustar  \0" and would still list fine, so check it.
 gzip -t "$archive" || fail "not gzip"
+[[ "$(gzip -dc "$archive" | dd bs=1 skip=257 count=8 2>/dev/null | od -An -tx1 | tr -d ' \n')" == 7573746172003030 ]] \
+    || fail "archive is not POSIX (ustar 00) format; build with tar --format=posix"
 tar -tzvf "$archive" --numeric-owner >"$scratch/listing" || fail "not a tar archive"
 tar -tzf "$archive" >"$scratch/names"
 
@@ -103,6 +109,12 @@ jq -e --arg ver "${declared_ref#v}" --argjson want "$expected_mecmcp" '
     and ([.components[] | select(.name? | strings | startswith("mecmcp-"))] | length) == $want
     and ([.components[] | select(.name? | strings | startswith("mecmcp-")) | .version] | unique) == [$ver]' \
     SBOM.cdx.json >/dev/null || fail "SBOM component set is wrong"
+
+# The SBOM's mecmcp components must be exactly the declared set: counts and a
+# shared version would pass an SBOM that swaps one crate for a duplicate of another.
+mapfile -t sbom_components < <(jq -r '.components[] | select(.name? | strings | startswith("mecmcp-")) | "\(.name)@\(.version)"' SBOM.cdx.json | sort)
+[[ "${sbom_components[*]}" == "${declared_components[*]}" ]] \
+    || fail "SBOM mecmcp components differ from Cargo.toml: sbom=[${sbom_components[*]}] declared=[${declared_components[*]}]"
 
 # 9. No absolute builder paths in the SBOM.
 if grep -Eq '"/(home|workspace|workspaces|tmp)/' SBOM.cdx.json; then fail "SBOM contains an absolute path"; fi
