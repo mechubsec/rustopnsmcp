@@ -54,6 +54,22 @@ if [[ -z "$test_root" ]]; then
     [[ "${ID:-}" == debian && "${VERSION_ID:-}" == 13 ]] \
         || die "requires Debian 13 (detected ${ID:-unknown} ${VERSION_ID:-unknown})"
 fi
+# The binary is never executed here, so BUILD-INFO target is the only guard
+# against an archive built for another architecture.
+machine=$(uname -m)
+[[ -z "$test_root" ]] || machine=${OPNSMCP_INSTALL_TEST_MACHINE:-$machine}
+case "$machine" in
+    x86_64) want_target=x86_64-unknown-linux-gnu ;;
+    aarch64) want_target=aarch64-unknown-linux-gnu ;;
+    *) die "unsupported machine architecture: $machine" ;;
+esac
+[[ "$(build_info target)" == "$want_target" ]] \
+    || die "this package targets $(build_info target); this host ($machine) needs $want_target"
+
+# An existing binary means this is an upgrade: a plain start would be a no-op
+# on the running old process, so the printed steps must say restart.
+start_verb=start
+[[ ! -e "$(dest /usr/local/bin/rustopnsmcp)" ]] || start_verb=restart
 
 # --- 3. Preflight: refuse a bad destination before the first mutation ---------
 # Owners are only checkable as root; in test mode the invoking user stands in,
@@ -163,7 +179,7 @@ fi
 
 cat <<EOF
 
-==> Installation complete. Nothing has been started. Next steps:
+==> Installation complete. Nothing has been started or restarted. Next steps (run them as root):
   1. Edit /etc/rustopnsmcp/devices.json (see devices.example.json beside it);
      keep it mode 0600, owned by rustopnsmcp:rustopnsmcp.
   2. Put the OPNsense API key and secret in /etc/rustopnsmcp/credentials.env
@@ -178,7 +194,7 @@ cat <<EOF
   4. For a non-loopback bind or TLS, create the drop-in ($package_dir/docs/operations.md):
        cp "$package_dir/packaging/systemd/rustopnsmcp.override.conf.example" \
           /etc/systemd/system/rustopnsmcp.service.d/override.conf   # then edit it
-  5. systemctl start rustopnsmcp && curl -fsS http://127.0.0.1:30037/readyz
+  5. systemctl $start_verb rustopnsmcp && curl -fsS http://127.0.0.1:30037/readyz
   6. systemctl enable rustopnsmcp
 Before an upgrade, snapshot this container.
 EOF

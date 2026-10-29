@@ -41,7 +41,9 @@ install_into >"$scratch/first.log"
 # A config that can boot: the shipped devices.json parses.
 jq -e '.version == 1 and (.devices | type == "object")' "$target/etc/rustopnsmcp/devices.json" >/dev/null \
     || fail "devices.json is not a valid inventory"
-grep -q 'systemctl start rustopnsmcp' "$scratch/first.log" || fail "next steps not printed"
+grep -q 'systemctl start rustopnsmcp' "$scratch/first.log" || fail "first install must print start"
+if grep -q 'systemctl restart' "$scratch/first.log"; then fail "first install must not print restart"; fi
+grep -q 'as root' "$scratch/first.log" || fail "next steps must say they run as root"
 grep -q 'runuser -u rustopnsmcp -- rustopnsmcp token add' "$scratch/first.log" || fail "token hint must use runuser"
 if grep -q 'sudo' "$scratch/first.log"; then fail "token hint must not need sudo"; fi
 # The write-token hint names real write tools (checked against the source list).
@@ -68,6 +70,9 @@ for pair in "var/lib/rustopnsmcp/tokens.json:SENTINEL-TOKENS" "var/lib/rustopnsm
     [[ "$(cat "$target/${pair%%:*}")" == "${pair##*:}" ]] || fail "re-run overwrote ${pair%%:*}"
 done
 grep -q '"x"' "$target/etc/rustopnsmcp/devices.json" || fail "re-run overwrote devices.json"
+# An upgrade must print restart: start is a no-op on the running old process.
+grep -q 'systemctl restart rustopnsmcp' "$scratch/second.log" || fail "upgrade must print restart"
+if grep -q 'systemctl start rustopnsmcp' "$scratch/second.log"; then fail "upgrade must not print start"; fi
 
 # 3. A symlink where a state file belongs is refused, not followed.
 rm "$target/var/lib/rustopnsmcp/tokens.json"; ln -s /etc/passwd "$target/var/lib/rustopnsmcp/tokens.json"
@@ -124,6 +129,19 @@ grep -q 'SITE-EDIT' "${backups[0]}" || fail "backup does not hold the modified u
 install_into >/dev/null
 mapfile -t backups < <(find "$target/etc/systemd/system" -maxdepth 1 -name 'rustopnsmcp.service.bak-*')
 [[ ${#backups[@]} -eq 1 ]] || fail "a stock unit must not create another backup"
+
+# 4b. A package for another architecture is refused before anything is written.
+case $(uname -m) in x86_64) other=aarch64 ;; *) other=x86_64 ;; esac
+for machine in "$other" riscv64; do
+    fresh=$scratch/fresh-machine-$machine
+    if OPNSMCP_INSTALL_TEST_MACHINE=$machine OPNSMCP_INSTALL_TEST_ROOT="$fresh" "$pkg/packaging/lxc/install.sh" >/dev/null 2>"$scratch/arch.err"; then
+        fail "installer accepted a package on a $machine host"
+    fi
+    [[ ! -e "$fresh" ]] || fail "$machine: the host was modified before the refusal"
+    grep -q 'architecture\|needs' "$scratch/arch.err" || fail "arch refusal should say so"
+done
+# And the matching machine passes (the default path, plus an explicit override).
+OPNSMCP_INSTALL_TEST_MACHINE=$(uname -m) install_into >/dev/null
 
 # 5. A damaged package is refused before anything is written.
 for damage in tamper-binary drop-build-info drop-sbom bad-sbom floor-too-high; do
