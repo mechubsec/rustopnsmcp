@@ -1,0 +1,52 @@
+name: security
+
+# Trivy filesystem and image scans. Secret scanning, cargo-audit and
+# cargo-deny already run as ci.yml jobs under their required-check names, so
+# they are not repeated here. Trivy is installed from the upstream release
+# binary and checksum-pinned, not via a Docker-based action, so a registry
+# outage cannot turn this gate red for an unrelated reason.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trivy:
+    name: Trivy (filesystem and image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Under RUNNER_TEMP, never the checkout, so the scan never sees (or
+      # reports) its own installer.
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+          TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+        run: |
+          set -euo pipefail
+          trivy_dir="${RUNNER_TEMP}/trivy"
+          mkdir -p "$trivy_dir"
+          curl -sSfL -o "${trivy_dir}/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${trivy_dir}/trivy.tar.gz" | sha256sum -c -
+          tar -xzf "${trivy_dir}/trivy.tar.gz" -C "$trivy_dir" trivy
+          sudo install -m 0755 "${trivy_dir}/trivy" /usr/local/bin/trivy
+
+      - name: trivy fs (dependency and config scan)
+        run: trivy fs --config trivy.yaml --exit-code 1 --severity HIGH,CRITICAL .
+
+      - name: Build image for scanning
+        run: docker build -t rustopnsmcp:ci .
+
+      - name: trivy image (container scan)
+        run: trivy image --config trivy.yaml --exit-code 1 --severity HIGH,CRITICAL rustopnsmcp:ci
