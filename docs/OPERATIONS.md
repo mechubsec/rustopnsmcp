@@ -179,6 +179,40 @@ the journal as JSON on stderr, so the journal mixes both; `MESSAGE=audit`
 selects only the per-call records. For one JSON record per line in a file, use
 the optional `--audit-log-file` sink described above.
 
+## Subscribing to a mecfeedmcp feed
+
+A subscription is a one-time URL-table alias that a human creates in the
+OPNsense web UI. It is not created through this server:
+`rustopnsmcp-core/src/changeset/validate.rs` refuses `url` and `urltable` alias
+types by design, because such an alias makes the firewall fetch a remote list
+"because a model chose this type, not because a human approved a specific URL".
+Issue #51 tracks whether change sets should govern it.
+
+1. In Firewall > Aliases, add an alias of type "URL Table (IPs)".
+2. Set the URL to `https://<serve host>:8443/feeds/opnsense-url-table/<kind>`,
+   where `<kind>` is `address`, `prefix` or `domain`.
+3. Set the refresh frequency, and, if mecfeed-serve requires it, Basic
+   authentication with the mecfeed-serve client's name and password.
+
+Observe it with `get_opnsense_feed_status`. It is read-only and lists each
+URL-table alias whose URL path is exactly one of those three:
+
+```json
+{"feeds": [{"alias": "mecfeed_blocklist", "enabled": true,
+  "url": "https://feeds.example.org:8443/feeds/opnsense-url-table/address",
+  "kind": "address", "update_frequency_days": 1.0, "auth": "Basic",
+  "current_items": 3, "last_updated": "2026-10-29 01:02:03",
+  "table_count": 3, "content_etag": "\"sha256-...\""}]}
+```
+
+`content_etag` is mecfeed-serve's ETag rebuilt from the alias's live pf table;
+equal to the ETag serve sends means the firewall holds the whole document. It is
+`null` when that cannot be known exactly: a `domain` feed (pf holds resolved
+addresses), a table that is not loaded, an entry count that differs from
+`table_count`, more than 50,000 entries, or several URLs in one alias. Username
+and password are never returned. OPNsense logs a failed download to syslog only,
+so no fetch error is reported.
+
 ## Upgrading
 
 1. Snapshot the guest first (Proxmox: `pct snapshot <vmid> pre-upgrade`). A

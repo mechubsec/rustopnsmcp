@@ -9,6 +9,10 @@ has been released yet, so everything is under Unreleased.
 
 ### Added
 
+- `get_opnsense_feed_status`: read-only report of the device's mecfeedmcp
+  subscriptions (URL-table aliases pointing at `/feeds/opnsense-url-table/*`),
+  with item counts, last update, and the mecfeed-serve ETag recomputed from
+  the live pf table. Credentials are never returned.
 - OPNsense read tools over the REST API, with the API key and secret taken from
   the environment or an owner-only file and TLS always verified.
 - Governed writes through `mecmcp-changeset`: firewall aliases, then firewall
