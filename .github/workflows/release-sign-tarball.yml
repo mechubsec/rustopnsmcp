@@ -1,0 +1,156 @@
+name: Sign release tarball
+
+# Builds the LXC tarball for a published release, attaches it with its
+# checksum, and signs it keyless via mecmcp's reusable workflow. Triggered by
+# `release: published` (only a maintainer publishes a release, so this never
+# fires from a PR or an unreviewed tag). workflow_dispatch backfills a release
+# whose own run did not attach the tarball; it refuses a tag that already has
+# a signature bundle, so signed assets are never replaced.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing GitHub-verified signed tag with a published release, e.g. v1.0.0'
+        required: true
+        type: string
+
+jobs:
+  resolve-tag:
+    name: Verify signed published tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+    steps:
+      - name: Verify tag is annotated, GitHub-verified, and published
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must be vMAJOR.MINOR.PATCH, got '$TAG'."; exit 1
+          fi
+          object_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type') \
+            || { echo "::error::$TAG is not a tag in ${GITHUB_REPOSITORY}."; exit 1; }
+          if [[ "$object_type" != "tag" ]]; then
+            echo "::error::$TAG is a lightweight tag; release tags must be annotated and signed (git tag -s)."; exit 1
+          fi
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.verification.verified')
+          if [[ "$verified" != "true" ]]; then
+            reason=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.verification.reason')
+            echo "::error::$TAG is not a GitHub-verified signature (reason: $reason)."; exit 1
+          fi
+          release_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}") \
+            || { echo "::error::$TAG has no GitHub release."; exit 1; }
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != "false" ]]; then
+            echo "::error::$TAG has a draft release; only a published release is built and signed."; exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            bundles=$(jq -r '[.assets[].name | select(endswith(".tar.gz.cosign.bundle"))] | length' <<<"$release_json")
+            if [[ "$bundles" != "0" ]]; then
+              echo "::error::$TAG already has a signed tarball; backfill does not replace signed assets."; exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build-tarball:
+    name: Build release tarball
+    needs: resolve-tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.98.1
+
+      - name: Toolchain matches rust-toolchain.toml
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          have=$(rustc -V | cut -d' ' -f2)
+          test "$want" = "$have" || { echo "::error::rust-toolchain.toml says $want, runner has $have"; exit 1; }
+
+      # Under RUNNER_TEMP, never the checkout: a stray archive would dirty the
+      # tree, and a public package build refuses a dirty tree.
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+          TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+        run: |
+          set -euo pipefail
+          trivy_dir="${RUNNER_TEMP}/trivy"
+          mkdir -p "$trivy_dir"
+          curl -sSfL -o "${trivy_dir}/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${trivy_dir}/trivy.tar.gz" | sha256sum -c -
+          tar -xzf "${trivy_dir}/trivy.tar.gz" -C "$trivy_dir" trivy
+          sudo install -m 0755 "${trivy_dir}/trivy" /usr/local/bin/trivy
+
+      - name: Build release archive
+        env:
+          OPNSMCP_RELEASE_STATUS: public
+        run: scripts/package-lxc.sh
+
+      - name: Smoke the archive
+        run: packaging/tests/package-smoke.sh dist/rustopnsmcp-v*-x86_64-unknown-linux-gnu.tar.gz
+
+      - name: Archive name matches the tag
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: test -f "dist/rustopnsmcp-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-tarball
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          retention-days: 1
+          if-no-files-found: error
+
+  upload-tarball:
+    name: Attach tarball to release
+    needs: [resolve-tag, build-tarball]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # gh release upload
+    timeout-minutes: 10
+    steps:
+      - name: Download tarball artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-tarball
+          path: dist
+
+      - name: Upload tarball to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        # --clobber: a re-run after a partial failure must be able to re-upload.
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 --repo "${{ github.repository }}" --clobber
+
+  sign:
+    needs: [resolve-tag, upload-tarball]
+    permissions:
+      contents: write
+      id-token: write # keyless cosign; a reusable workflow cannot widen these
+    uses: mechubsec/mecmcp/.github/workflows/reusable-sign-release-tarball.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    with:
+      tag: ${{ needs.resolve-tag.outputs.tag }}
+      asset-pattern: 'rustopnsmcp-v*.tar.gz'
