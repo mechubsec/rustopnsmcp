@@ -103,12 +103,28 @@ Run `token add` as the service user, not as root. A root run leaves a
 root-owned `tokens.json` that the service cannot read (see Troubleshooting).
 `runuser` is part of util-linux, so it exists on a minimal guest; the
 installer's printed hint uses it too, and shows a read-only token and one that
-names the write tools.
+names the write tools and the reads they need.
 
 ```sh
-runuser -u rustopnsmcp -- rustopnsmcp token add \
+runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \
   --tokens-file /var/lib/rustopnsmcp/tokens.json \
   --name operator --devices '*' --tools '*'
+```
+
+Use the absolute binary path: a root shell without `/usr/local/bin` on `PATH`
+(`pct exec`, some `sudo`/`su` setups) fails with `runuser: failed to execute
+rustopnsmcp: No such file or directory`.
+
+To create, approve and apply change sets, the token must name the write tools
+and the reads the workflow needs; `create_opnsense_change_set` takes the
+`expected_fingerprint` from `get_opnsense_config_fingerprint`. A tool list is
+exact, so `'*'` cannot be mixed with names:
+
+```sh
+runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \
+  --tokens-file /var/lib/rustopnsmcp/tokens.json \
+  --name changer --devices '*' \
+  --tools 'get_opnsense_config_fingerprint,get_opnsense_change_set_status,list_opnsense_change_sets,create_opnsense_change_set,approve_opnsense_change_set,apply_opnsense_change_set,confirm_opnsense_change_set,cancel_opnsense_change_set'
 ```
 
 The secret is printed once, on stdout. Store it now; only a digest is kept.
@@ -264,7 +280,7 @@ as in step 3 and:
 ```sh
 packaging/lxc/install.sh
 systemctl restart rustopnsmcp
-rustopnsmcp --version
+/usr/local/bin/rustopnsmcp --version
 ```
 
 State, secrets and your `override.conf` are untouched. Re-check the override

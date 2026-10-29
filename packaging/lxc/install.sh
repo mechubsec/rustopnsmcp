@@ -184,13 +184,19 @@ cat <<EOF
      keep it mode 0600, owned by rustopnsmcp:rustopnsmcp.
   2. Put the OPNsense API key and secret in /etc/rustopnsmcp/credentials.env
      (mode 0600), named as the inventory's api_key_env / api_secret_env say.
-  3. Mint a token (run as the service user; runuser is part of util-linux).
+  3. Mint a token (run as the service user; runuser is part of util-linux; the
+     absolute path is needed because a root shell may lack /usr/local/bin on PATH).
      Read-only: '*' means every read tool and NO write tool:
-       runuser -u rustopnsmcp -- rustopnsmcp token add --tokens-file /var/lib/rustopnsmcp/tokens.json \
+       runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \\
+           --tokens-file /var/lib/rustopnsmcp/tokens.json \\
            --name operator --devices '*' --tools '*'
-     To create, approve and apply change sets, name the write tools too:
-       runuser -u rustopnsmcp -- rustopnsmcp token add --tokens-file /var/lib/rustopnsmcp/tokens.json \
-           --name changer --devices '*' --tools 'create_opnsense_change_set,approve_opnsense_change_set,apply_opnsense_change_set,confirm_opnsense_change_set,cancel_opnsense_change_set'
+     To create, approve and apply change sets, name the write tools AND the reads
+     the workflow needs (create needs the fingerprint). A tool list is exact: no
+     wildcard mixing, so '*' cannot be combined with names:
+       runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \\
+           --tokens-file /var/lib/rustopnsmcp/tokens.json \\
+           --name changer --devices '*' \\
+           --tools 'get_opnsense_config_fingerprint,get_opnsense_change_set_status,list_opnsense_change_sets,create_opnsense_change_set,approve_opnsense_change_set,apply_opnsense_change_set,confirm_opnsense_change_set,cancel_opnsense_change_set'
   4. For a non-loopback bind or TLS, create the drop-in ($package_dir/docs/operations.md):
        cp "$package_dir/packaging/systemd/rustopnsmcp.override.conf.example" \
           /etc/systemd/system/rustopnsmcp.service.d/override.conf   # then edit it

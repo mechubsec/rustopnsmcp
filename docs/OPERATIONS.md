@@ -214,7 +214,7 @@ the root and Debian checks, apt, `systemd-sysusers`, `systemd-tmpfiles`,
 behaviour are not covered by them and are verified on a real guest.
 
 ```sh
-rustopnsmcp --version
+/usr/local/bin/rustopnsmcp --version
 systemctl status rustopnsmcp
 ```
 

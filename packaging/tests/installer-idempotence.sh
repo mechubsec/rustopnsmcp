@@ -44,9 +44,15 @@ jq -e '.version == 1 and (.devices | type == "object")' "$target/etc/rustopnsmcp
 grep -q 'systemctl start rustopnsmcp' "$scratch/first.log" || fail "first install must print start"
 if grep -q 'systemctl restart' "$scratch/first.log"; then fail "first install must not print restart"; fi
 grep -q 'as root' "$scratch/first.log" || fail "next steps must say they run as root"
-grep -q 'runuser -u rustopnsmcp -- rustopnsmcp token add' "$scratch/first.log" || fail "token hint must use runuser"
+grep -q 'runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add' "$scratch/first.log" || fail "token hint must use runuser and the absolute binary path"
+if grep -qE '[^ ] {3,}--' "$scratch/first.log"; then fail "token hint has a run of spaces mid-line"; fi
+grep -q -- "--tools 'get_opnsense_config_fingerprint," "$scratch/first.log" || fail "write-token hint must name get_opnsense_config_fingerprint"
 if grep -q 'sudo' "$scratch/first.log"; then fail "token hint must not need sudo"; fi
 # The write-token hint names real write tools (checked against the source list).
+for read_tool in get_opnsense_config_fingerprint get_opnsense_change_set_status list_opnsense_change_sets; do
+    grep -q "$read_tool" "$scratch/first.log" || fail "write-token hint lacks read $read_tool"
+    grep -q "\"$read_tool\"" rustopnsmcp-core/src/tools/mod.rs || fail "$read_tool is not a tool name in the source"
+done
 for write_tool in create approve apply confirm cancel; do
     name=${write_tool}_opnsense_change_set
     grep -q "$name" "$scratch/first.log" || fail "write-token hint lacks $name"
