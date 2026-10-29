@@ -32,11 +32,12 @@ mapfile -t mecmcp_refs < <(grep -oP 'tag = "\K[^"]+' Cargo.toml | sort -u)
 [[ ${#mecmcp_refs[@]} -eq 1 ]] || fail "expected exactly one mecmcp tag, found: ${mecmcp_refs[*]:-none}"
 mecmcp_ref=${mecmcp_refs[0]}
 
-git_commit=$(git rev-parse HEAD)
+git_commit=$(git rev-parse HEAD)   # always the bare 40-hex SHA; dirtiness is a separate key
+git_dirty=false
 # Units, docs, installer and the binary come from the working tree, not HEAD.
 if [[ -n "$(git status --porcelain)" ]]; then
     [[ "$release_status" != public ]] || fail "working tree is dirty; a public package must be built from a clean checkout"
-    git_commit=${git_commit}-dirty
+    git_dirty=true
 fi
 skip_build=${OPNSMCP_PACKAGE_SKIP_BUILD:-0}
 # A prebuilt binary is unrelated to HEAD by construction, so it cannot be public.
@@ -75,7 +76,7 @@ install -m 0644 packaging/examples/devices.example.json "$pkg_root/config/device
 install -m 0644 docs/OPERATIONS.md "$pkg_root/docs/operations.md"
 install -m 0644 -t "$pkg_root" LICENSE SECURITY.md
 sed -e "s|@VERSION@|$version|g" -e "s|@ARCHIVE@|$archive_name|g" \
-    -e "s|@GIT_COMMIT@|$git_commit|g" -e "s|@MECMCP_REF@|$mecmcp_ref|g" \
+    -e "s|@GIT_COMMIT@|$git_commit|g" -e "s|@GIT_DIRTY@|$git_dirty|g" -e "s|@MECMCP_REF@|$mecmcp_ref|g" \
     -e "s|@GLIBC_FLOOR@|$glibc_floor|g" packaging/package-README.md.in >"$pkg_root/README.md"
 
 # SBOM from a directory that holds only Cargo.lock, scanned under the name
@@ -105,6 +106,7 @@ cat >"$pkg_root/BUILD-INFO" <<EOT
 release_status=$release_status
 version=$version
 git_commit=$git_commit
+git_dirty=$git_dirty
 source_date_epoch=$source_date_epoch
 target=$target
 mecmcp_ref=$mecmcp_ref
