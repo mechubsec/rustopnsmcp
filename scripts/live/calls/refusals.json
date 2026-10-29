@@ -1,0 +1,115 @@
+[
+ {
+  "name": "fingerprint",
+  "tool": "get_opnsense_config_fingerprint",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "save": {
+   "fp": "/fingerprint"
+  }
+ },
+ {
+  "name": "create with a wrong fingerprint",
+  "tool": "create_opnsense_change_set",
+  "arguments": {
+   "device": "opnsense-lab",
+   "expected_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+   "actions": [
+    {
+     "operation": "create",
+     "resource": "alias",
+     "body": {
+      "name": "p3_refusal",
+      "type": "host",
+      "content": "192.0.2.1"
+     }
+    }
+   ]
+  },
+  "expect": "error"
+ },
+ {
+  "name": "create with an unknown field",
+  "tool": "create_opnsense_change_set",
+  "arguments": {
+   "device": "opnsense-lab",
+   "expected_fingerprint": "$fp",
+   "actions": [],
+   "surprise": 1
+  },
+  "expect": "error"
+ },
+ {
+  "name": "create with a non-writable field",
+  "tool": "create_opnsense_change_set",
+  "arguments": {
+   "device": "opnsense-lab",
+   "expected_fingerprint": "$fp",
+   "actions": [
+    {
+     "operation": "create",
+     "resource": "alias",
+     "body": {
+      "name": "p3_refusal",
+      "type": "host",
+      "uuid": "x"
+     }
+    }
+   ]
+  },
+  "expect": "error"
+ },
+ {
+  "name": "create a url alias",
+  "tool": "create_opnsense_change_set",
+  "arguments": {
+   "device": "opnsense-lab",
+   "expected_fingerprint": "$fp",
+   "actions": [
+    {
+     "operation": "create",
+     "resource": "alias",
+     "body": {
+      "name": "p3_refusal",
+      "type": "urltable",
+      "content": "https://example.org/x"
+     }
+    }
+   ]
+  },
+  "expect": "error"
+ },
+ {
+  "name": "approve an unknown id",
+  "tool": "approve_opnsense_change_set",
+  "arguments": {
+   "device": "opnsense-lab",
+   "change_set_id": "nope",
+   "expected_digest": "sha256:00"
+  },
+  "expect": "error"
+ },
+ {
+  "name": "list change sets",
+  "tool": "list_opnsense_change_sets",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok"
+ },
+ {
+  "name": "add_device refused read-only",
+  "tool": "add_device",
+  "arguments": {
+   "device": "x",
+   "endpoint": "https://x.example.org",
+   "api_key_file": "/nope",
+   "api_secret_file": "/nope",
+   "ca_pem_path": "/nope"
+  },
+  "expect": "error",
+  "error_contains": "readonly"
+ }
+]

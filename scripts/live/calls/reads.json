@@ -1,0 +1,197 @@
+[
+ {
+  "name": "get_device_list",
+  "tool": "get_device_list",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "name": "gather_device_facts",
+  "tool": "gather_device_facts",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "keys": [
+   "product_version"
+  ],
+  "pointers": {
+   "/product_version": "^26\\.7",
+   "/product_name": "^(?!None$).",
+   "/uptime": "^(?!None$).",
+   "/load_average": "^(?!None$).",
+   "/cpu_type": "^None$"
+  }
+ },
+ {
+  "name": "opnsmcp_status",
+  "tool": "opnsmcp_status",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "name": "system_status",
+  "tool": "get_opnsense_system_status",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok"
+ },
+ {
+  "name": "firmware_status",
+  "tool": "get_opnsense_firmware_status",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "pointers": {
+   "/product/product_version": "^26\\.7"
+  }
+ },
+ {
+  "name": "interfaces",
+  "tool": "list_opnsense_interfaces",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "pointers": {
+   "/total": "^5$",
+   "/rows/0/identifier": "."
+  }
+ },
+ {
+  "name": "gateways",
+  "tool": "list_opnsense_gateways",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "keys": [
+   "rows"
+  ]
+ },
+ {
+  "name": "firewall_rules",
+  "tool": "list_opnsense_firewall_rules",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "pointers": {
+   "/coverage": "^complete$",
+   "/total": "^38$"
+  }
+ },
+ {
+  "name": "firewall_rules page 2",
+  "tool": "list_opnsense_firewall_rules",
+  "arguments": {
+   "device": "opnsense-lab",
+   "limit": 10,
+   "offset": 10
+  },
+  "expect": "ok",
+  "pointers": {
+   "/offset": "^10$",
+   "/next_offset": "^20$"
+  }
+ },
+ {
+  "name": "aliases",
+  "tool": "list_opnsense_aliases",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "pointers": {
+   "/total": "^10$",
+   "/rows/0/uuid": "^[0-9a-f-]{36}$"
+  }
+ },
+ {
+  "name": "aliases search_phrase",
+  "tool": "list_opnsense_aliases",
+  "arguments": {
+   "device": "opnsense-lab",
+   "search_phrase": "a",
+   "limit": 3
+  },
+  "expect": "ok",
+  "keys": [
+   "rows"
+  ]
+ },
+ {
+  "name": "aliases max_bytes",
+  "tool": "list_opnsense_aliases",
+  "arguments": {
+   "device": "opnsense-lab",
+   "max_bytes": 1024
+  },
+  "expect": "ok",
+  "pointers": {
+   "/truncated_to_fit_max_bytes": "^True$"
+  }
+ },
+ {
+  "name": "nat_rules",
+  "tool": "list_opnsense_nat_rules",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "keys": [
+   "outbound",
+   "one_to_one"
+  ]
+ },
+ {
+  "name": "routes",
+  "tool": "list_opnsense_routes",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "keys": [
+   "rows"
+  ]
+ },
+ {
+  "name": "dhcp_leases",
+  "tool": "list_opnsense_dhcp_leases",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "keys": [
+   "rows"
+  ],
+  "pointers": {
+   "/backend": "^dnsmasq$"
+  }
+ },
+ {
+  "name": "fingerprint",
+  "tool": "get_opnsense_config_fingerprint",
+  "arguments": {
+   "device": "opnsense-lab"
+  },
+  "expect": "ok",
+  "pointers": {
+   "/fingerprint": "^sha256:[0-9a-f]{64}$"
+  },
+  "save": {
+   "fp": "/fingerprint"
+  },
+  "show": [
+   "fp"
+  ]
+ },
+ {
+  "name": "reload_devices",
+  "tool": "reload_devices",
+  "arguments": {},
+  "expect": "ok"
+ }
+]
