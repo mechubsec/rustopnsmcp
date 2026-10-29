@@ -112,7 +112,10 @@ jobs:
 
       - name: Build and verify container argv
         run: |
-          docker build -t rustopnsmcp:ci .
+          set -euo pipefail
+          # Keep the plain progress log: the context-size step reads it, so the
+          # image is built once.
+          docker build --progress=plain -t rustopnsmcp:ci . 2>&1 | tee "$RUNNER_TEMP/docker-build.log"
 
           # Config paths must survive operator overrides. Docker replaces CMD
           # entirely when the caller supplies args, but appends to ENTRYPOINT,
@@ -187,11 +190,13 @@ jobs:
       - name: Docker build context is small
         run: |
           set -euo pipefail
-          size=$(docker build --no-cache --progress=plain -f Dockerfile . 2>&1 \
-            | grep -oE 'transferring context: [0-9.]+[kMG]?B' | tail -n 1 | grep -oE '[0-9.]+[kMG]?B')
+          # Read from the container-guard build's plain progress log; no rebuild.
+          size=$(grep -oE 'transferring context: [0-9.]+[kMG]?B' "$RUNNER_TEMP/docker-build.log" \
+            | tail -n 1 | grep -oE '[0-9.]+[kMG]?B' || true)
           echo "Docker build context: ${size:-unknown}"
-          case "${size:-0B}" in *GB) echo "FAIL: context over 1 GB"; exit 1 ;; esac
-          case "${size:-0B}" in *MB) test "$(printf '%.0f' "${size%MB}")" -le 100 || { echo "FAIL: context over 100 MB"; exit 1; } ;; esac
+          test -n "$size" || { echo "FAIL: no context-transfer line in the build log"; exit 1; }
+          case "$size" in *GB) echo "FAIL: context over 1 GB"; exit 1 ;; esac
+          case "$size" in *MB) test "$(printf '%.0f' "${size%MB}")" -le 100 || { echo "FAIL: context over 100 MB"; exit 1; } ;; esac
 
   conformance:
     name: Package conformance
