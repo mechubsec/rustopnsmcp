@@ -112,8 +112,10 @@ runuser -u rustopnsmcp -- rustopnsmcp token add \
 ```
 
 The secret is printed once, on stdout. Store it now; only a digest is kept.
-`--devices` and `--tools` are both required. `'*'` means everything: prefer
-the exact device names and tool names the caller needs. The token is a bearer
+`--devices` and `--tools` are both required. `'*'` means everything, which for
+tools is every read tool and none of the mutating ones (create, approve, apply,
+confirm and cancel a change set, `add_device`, `reload_devices`): those must be
+named. Prefer the exact device and tool names the caller needs. The token is a bearer
 token; MCP clients send it as `Authorization: Bearer <secret>`. List tokens
 with `token list --tokens-file …` (names and scopes only).
 
@@ -244,7 +246,9 @@ systemctl status systemd-journal-upload --no-pager
 The collector must run `systemd-journal-remote` (or accept its protocol);
 use the TLS options in `journal-upload.conf(5)` for anything off the guest's own
 network. `rsyslog` with the `imjournal` input is an alternative if your
-collector speaks syslog; this guide does not configure it.
+collector speaks syslog; this guide does not configure it. What the records
+contain is in [AUDIT.md](AUDIT.md); the threats they answer are in
+[THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## 9. Upgrade
 

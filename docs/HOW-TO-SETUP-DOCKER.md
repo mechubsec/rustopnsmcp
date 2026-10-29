@@ -3,8 +3,8 @@
 Run the published image, or one you build yourself, with a device inventory and
 a bearer token. Commands are POSIX shell. For the LXC/systemd install see
 [HOW-TO-SETUP-LXC.md](HOW-TO-SETUP-LXC.md); for audit records see the
-[operations guide](OPERATIONS.md), which describes the audit flags (the
-container differs only where this page says so).
+[operations guide](OPERATIONS.md) and [AUDIT.md](AUDIT.md) (the container
+differs only where this page says so).
 
 > **Under construction.** No version has been released, so the published
 > images below do not exist yet. Until the first tag, build the image locally
@@ -122,8 +122,9 @@ docker run --rm \
   --name operator --devices '*' --tools '*'
 ```
 
-`--devices` and `--tools` are both required; `'*'` is everything, so prefer the
-exact names the caller needs. Now start the server:
+`--devices` and `--tools` are both required. `'*'` is everything, which for
+tools means every read tool and none of the mutating ones (those must be named),
+so prefer the exact names the caller needs. Now start the server:
 
 ```sh
 docker run -d --name rustopnsmcp \

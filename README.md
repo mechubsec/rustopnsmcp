@@ -67,3 +67,6 @@ Licensed under [MIT](LICENSE).
 - [Filesystem layout](packaging/FILESYSTEM.md): paths, owners and modes for the LXC package.
 - [Set up in a Debian 13 LXC](docs/HOW-TO-SETUP-LXC.md): download, install, token, TLS override, journal forwarding.
 - [Set up in Docker](docs/HOW-TO-SETUP-DOCKER.md): prepare mounts, mint a token, run, TLS, Compose.
+- [Audit records](docs/AUDIT.md): fields, device pseudonyms, key custody, evidence pipeline flags.
+- [Metrics](docs/METRICS.md): the `/metrics` endpoint and the series it returns.
+- [Threat model](docs/THREAT-MODEL.md): assets, trust boundaries, controls and limits.
