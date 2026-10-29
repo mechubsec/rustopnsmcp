@@ -19,3 +19,6 @@ devices.json
 *.opnsensekey
 .opnsense-api-key
 .opnsense-api-secret
+
+# Packaging output.
+/dist
