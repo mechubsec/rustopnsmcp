@@ -22,3 +22,6 @@ devices.json
 
 # Packaging output.
 /dist
+
+# Bytecode from running scripts/sanitize_fixture.py; parity-check lists untracked files.
+__pycache__/
