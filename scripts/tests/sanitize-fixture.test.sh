@@ -84,7 +84,7 @@ for last in range(1, 255):
     seen[fake] = ip
 # 7: free-text keys and emails
 dump("free", {"hostname": "fw-real", "fqdn": "fw-real.lan.example.net", "email": "a.b@gmail.com",
-              "full_name": "Jane Q Public", "descr": "rack 4 uplink", "description": "owner jane",
+              "full_name": "Jane Q Public", "descr": "rack 4 uplink", "description": "owner jane", "summary": "<b>Jane LAN</b>",
               "name": "keepme", "note": "mail jane.q@corp.org now", "ref": "0123456789ABCDEF0123456789ABCDEF"})
 dump("deninput", {"x": "see zanzibar-widget", "y": "z\u00fcrich-widget", "z": "# zanzibar-widget"})
 PY
@@ -120,11 +120,11 @@ if [ -f "$work/collide.json" ]; then
   [ ! -s "$work/c.out" ] || fail "collision still wrote output"
 else fail "no collision pair found for the test"; fi
 "$san" "$work/free.json" > "$work/free.out" || fail "sanitize free"
-for leaked in fw-real Jane rack owner gmail jane.q corp.org; do
+for leaked in fw-real Jane rack owner LAN gmail jane.q corp.org; do
   if grep -q "$leaked" "$work/free.out"; then fail "free text leaked: $leaked"; fi
 done
 jq -e '.name == "keepme" and (.hostname|test("^host-[0-9]+$")) and (.email|test("^user-[0-9]+@example.org$"))
-       and (.descr|test("^desc-[0-9]+$")) and (.ref|test("^[0-9a-f]{32}$")) and .ref != "0123456789abcdef0123456789abcdef"' \
+       and (.descr|test("^desc-[0-9]+$")) and (.summary|test("^desc-[0-9]+$")) and (.ref|test("^[0-9a-f]{32}$")) and .ref != "0123456789abcdef0123456789abcdef"' \
   "$work/free.out" >/dev/null || fail "free-text keys not mapped as specified"
 "$san" --verify "$work/free.out" || fail "free-text output not clean"
 echo '{"hostname":"fw-real"}' > "$work/h.json"

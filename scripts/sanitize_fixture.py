@@ -22,6 +22,7 @@ FREE_TEXT = {
     "fullname": ("user-{n}", re.compile(r"user-\d+")),
     "descr": ("desc-{n}", re.compile(r"desc-\d+")),
     "description": ("desc-{n}", re.compile(r"desc-\d+")),
+    "summary": ("desc-{n}", re.compile(r"desc-\d+")),
 }
 FILE_EXTENSIONS = {"json", "txt", "conf", "cfg", "py", "sh", "rs", "toml", "yml", "yaml", "md", "xml", "pem",
                    "crt", "key", "log", "html", "js", "css", "php", "ini", "csv", "gz", "tar", "zip", "deb",
