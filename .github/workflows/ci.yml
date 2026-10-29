@@ -56,6 +56,12 @@ jobs:
       - name: Fixture sanitizer self-test
         run: scripts/tests/sanitize-fixture.test.sh
 
+      - name: Committed fixtures are clean
+        run: |
+          for fixture in rustopnsmcp-core/tests/fixtures/*.json; do
+            scripts/sanitize-fixture.sh --verify "$fixture" || exit 1
+          done
+
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
 
