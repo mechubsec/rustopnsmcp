@@ -41,11 +41,13 @@ With `cosign` installed, verify before running (use a real version in place of
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/mechubsec/mecmcp/\.github/workflows/reusable-release-image\.yml@' \
+  --certificate-github-workflow-repository mechubsec/rustopnsmcp \
   ghcr.io/mechubsec/rustopnsmcp:<version>
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/mechubsec/mecmcp/\.github/workflows/reusable-release-image\.yml@' \
+  --certificate-github-workflow-repository mechubsec/rustopnsmcp \
   docker.io/mechub/rustopnsmcp:<version>
 ```
 

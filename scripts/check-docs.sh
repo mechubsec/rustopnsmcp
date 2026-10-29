@@ -67,7 +67,7 @@ real=$({
 # systemctl/docker: --kill-whom --signal --now. journalctl: --after-cursor
 # --show-cursor --no-pager. systemd-tmpfiles: --create. curl: --cacert.
 # pct: --features. cosign: --bundle --certificate-oidc-issuer
-# --certificate-identity-regexp. docker: --rm --restart --read-only --cap-drop
+# --certificate-identity-regexp --certificate-github-workflow-repository. docker: --rm --restart --read-only --cap-drop
 # --security-opt --tmpfs --env-file --platform (--name is also a real token flag).
 # cargo: --all --all-features --all-targets --check --locked --no-deps
 # --workspace. scripts/parity-check.sh: --junos-src.
@@ -78,6 +78,7 @@ foreign=" \
     --cacert \
     --features \
     --bundle --certificate-oidc-issuer --certificate-identity-regexp \
+    --certificate-github-workflow-repository \
     --rm --restart --read-only --cap-drop --security-opt --tmpfs --env-file --platform \
     --all --all-features --all-targets --check --locked --no-deps --workspace \
     --junos-src \

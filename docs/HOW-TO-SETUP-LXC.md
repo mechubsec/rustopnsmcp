@@ -51,6 +51,7 @@ curl -fsSLO "$base/$archive.cosign.bundle"
 cosign verify-blob --bundle "$archive.cosign.bundle" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/mechubsec/mecmcp/\.github/workflows/reusable-sign-release-tarball\.yml@' \
+  --certificate-github-workflow-repository mechubsec/rustopnsmcp \
   "$archive"
 ```
 
