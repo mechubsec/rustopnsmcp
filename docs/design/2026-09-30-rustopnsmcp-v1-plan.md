@@ -8698,12 +8698,12 @@ These are the input classes most likely to hurt a user in this phase. Each has a
 **Gate (spec §4):** all tools pass live on 26.7.x. The under-construction banner is removed here.
 
 - [x] P3.1 Write the detailed plan for this phase (writing-plans format) against the code as it stands after the previous gate, append it to this file, and get the reviewer's approval.
-- [ ] P3.2 Lab access: a devices.json entry for "opnsense-lab" that references the owner-only lab credentials on the dev host by env var or file path. The file lives outside the repository, is mode 0600 and is never committed. Document the `baseline-seeded` snapshot reset procedure in the phase plan, not with host details.
-- [ ] P3.3 Run every P1 tool against opnsense-lab on 26.7.x and record a pass/fail table in the phase plan: all nine reads, the fingerprint, the fleet-meta tools, and the lifecycle refusals.
-- [ ] P3.4 Correct endpoint paths and response shapes found wrong live: `rustopnsmcp-core/src/endpoints.rs`, `tools/read.rs` (interfaces `rows` shape, gateway `items`), `changeset/fingerprint.rs` (`VOLATILE_FIELDS`, the `rowCount: -1` behaviour), and ISC versus Kea/Dnsmasq DHCP on 26.7. Version-detect any path that differs between supported versions (spec §3.4).
-- [ ] P3.5 Record sanitized fixtures from the live device into `rustopnsmcp-core/tests/fixtures/`, replacing the synthetic ones. Sanitize with a committed `scripts/sanitize-fixture.sh` (RFC 5737/1918 addresses, `example.org` names, no keys, certificates or hashes). The pre-push secret gate must pass unmodified.
-- [ ] P3.6 Alias change set live: fingerprint → create → approve (second principal) → apply → verify → roll back with the inverse change set; same for filter rules. Evidence goes in the gate comment.
-- [ ] P3.7 A partial apply live: a three-action alias change set whose second action fails device validation. Confirm `state: "partial"`, `never_attempted`, the change set recorded `Failed`, and the best-effort rollback.
+- [x] P3.2 Lab access: a devices.json entry for "opnsense-lab" that references the owner-only lab credentials on the dev host by env var or file path. The file lives outside the repository, is mode 0600 and is never committed. Document the `baseline-seeded` snapshot reset procedure in the phase plan, not with host details.
+- [x] P3.3 Run every P1 tool against opnsense-lab on 26.7.x and record a pass/fail table in the phase plan: all nine reads, the fingerprint, the fleet-meta tools, and the lifecycle refusals.
+- [x] P3.4 Correct endpoint paths and response shapes found wrong live: `rustopnsmcp-core/src/endpoints.rs`, `tools/read.rs` (interfaces `rows` shape, gateway `items`), `changeset/fingerprint.rs` (`VOLATILE_FIELDS`, the `rowCount: -1` behaviour), and ISC versus Kea/Dnsmasq DHCP on 26.7. Version-detect any path that differs between supported versions (spec §3.4).
+- [x] P3.5 Record sanitized fixtures from the live device into `rustopnsmcp-core/tests/fixtures/`, replacing the synthetic ones. Sanitize with a committed `scripts/sanitize-fixture.sh` (RFC 5737/1918 addresses, `example.org` names, no keys, certificates or hashes). The pre-push secret gate must pass unmodified.
+- [x] P3.6 Alias change set live: fingerprint → create → approve (second principal) → apply → verify → roll back with the inverse change set; same for filter rules. Evidence goes in the gate comment.
+- [x] P3.7 A partial apply live: a three-action alias change set whose second action fails device validation. Confirm `state: "partial"`, `never_attempted`, the change set recorded `Failed`, and the best-effort rollback.
 - [ ] P3.8 Remove the under-construction banner from `README.md`, and update the README's tool table to the P1 names.
 
 ### P3 — Detailed plan
@@ -8753,7 +8753,7 @@ All probes were `GET` requests with the lab API user, 2026-10-28, device on firm
 | `/api/kea/leases4/search` | 200 | `{total,rowCount,current,rows:[],stats:{active,inactive,total},interfaces:[]}` | New. 0 rows. |
 | `/api/diagnostics/system/systemTime` | 200 | `{uptime,datetime,boottime,config,loadavg}` | New source for the facts `gather_device_facts` reads from `system_status` and cannot find. |
 | `/api/diagnostics/system/systemResources`, `systemInformation` | 200 | `{memory:{...}}`, `{name,versions[],updates}` | Not used. No CPU-type source found; `cpu_type` has none. |
-| `/api/firewall/alias/getItem/{uuid}` | 200 | `{alias:{27 fields}}`; `type`, `proto`, `content`, `interface`, `authtype` are `{key:{value,selected}}` maps; `categories` is a **list**; unknown uuid answers `[]` | Envelope and choice-map match `interpret_get_item_response` and `flatten_for_write`. `categories` as a list is **not handled** by `flatten_field`. |
+| `/api/firewall/alias/getItem/{uuid}` | 200 | `{alias:{27 fields}}`; `type`, `proto`, `content`, `interface`, `authtype` are `{key:{value,selected}}` maps; `categories` is a **list**; unknown uuid answers HTTP 200 with the default alias template (empty `name`), not `[]` (found live in Task 12, defect 12a) | Envelope and choice-map match `interpret_get_item_response` and `flatten_for_write`. `categories` as a list is **not handled** by `flatten_field`. |
 | `/api/firewall/filter/getRule/{uuid}` | 200 for an MVC rule; **`[]` (HTTP 200) for a legacy/automatic rule** | `{rule:{62 fields}}`; every name in `RULE_WRITABLE_FIELDS` is present | Match. Legacy rules read as "not found", so they cannot be updated or deleted (correct and wanted). |
 
 **Volatile fields (probe, 20-25 s apart, no writes):**
@@ -8826,7 +8826,7 @@ P2 (packaging) is being planned and written at the same time. Files both phases 
 **Interfaces:**
 - Produces: `lab-get.sh shape|raw <path-and-query> [out-file]`; `mcp_call.py` as below, whose calls-file format Tasks 3, 8, 12-15 reuse.
 
-- [ ] **Step 1: Write `scripts/live/lab-get.sh`**
+- [x] **Step 1: Write `scripts/live/lab-get.sh`**
 
 It runs on the dev host (`bash -s` over ssh) and reads `LAB_ENV_FILE` and `LAB_CA_FILE` from its environment. The key and secret reach curl through a config on stdin, never through argv or output.
 
@@ -8862,7 +8862,7 @@ except ValueError:
 PY
 ```
 
-- [ ] **Step 2: Write `scripts/live/mcp_call.py`**
+- [x] **Step 2: Write `scripts/live/mcp_call.py`**
 
 Calls file: a JSON list of `{"name", "tool", "arguments", "expect": "ok"|"error", "error_contains"?, "keys"?, "pointers"?, "save"?, "show"?}`. `"$var"` strings in `arguments` are replaced by values saved from earlier calls (`"save": {"var": "/json/pointer"}`); a pointer pattern of `"$var"` requires equality with a saved value; `show` prints the named saved values and is for fingerprints and change-set ids only, never for anything from the device. The tagged untrusted wrapper is stripped before parsing. Output is key names, types and counts, plus error text with IPv4 addresses masked.
 
@@ -9028,7 +9028,7 @@ def main():
 main()
 ```
 
-- [ ] **Step 3: Write the local smoke test, `scripts/tests/mcp_call_smoke.sh`**
+- [x] **Step 3: Write the local smoke test, `scripts/tests/mcp_call_smoke.sh`**
 
 It proves the client against the built server with a throwaway inventory that points nowhere (no device contact).
 
@@ -9049,12 +9049,12 @@ printf '%s\n' "$out"
 [ "$(printf '%s\n' "$out" | grep -c '^PASS')" = 2 ]
 ```
 
-- [ ] **Step 4: Run it**
+- [x] **Step 4: Run it**
 
 Run: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo build -p rustopnsmcp && env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target bash scripts/tests/mcp_call_smoke.sh`
 Expected: two `PASS` lines (verified while writing this plan: an empty inventory starts, `opnsmcp_status` returns `version`, `endpoint` and `uptime_seconds`, and the client's HTTP path authenticated against a local server too). Sabotage once: change `"expect":"error"` to `"ok"` and confirm the run exits non-zero, then restore.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 chmod +x scripts/live/lab-get.sh scripts/live/mcp_call.py scripts/tests/mcp_call_smoke.sh
@@ -9086,7 +9086,7 @@ The production-tier pair waits for a release and is out of P3 scope. Each rig is
 - Consumes: the lab credentials env file on the dev host defines `OPNSENSE_URL`, `OPNSENSE_API_KEY`, `OPNSENSE_API_SECRET` and `OPNSENSE_CA` (a certificate file path).
 - Produces: a running `rustopnsmcp` on each rig on port 30037, and `rig-token.sh <rig> <name> agent|human`, which prints a token alone for command substitution. Later tasks reach a rig at `http://$RIG_IP:30037/mcp`, with `RIG_IP` looked up by `ssh $RIG_PVE pct exec <id> -- hostname -I`.
 
-- [ ] **Step 1: Write the build script, `scripts/live/build-trixie.sh`.** (Checked while writing this plan: the image tag exists, the build takes about a minute warm, and the result needed `GLIBC_2.38`.)
+- [x] **Step 1: Write the build script, `scripts/live/build-trixie.sh`.** (Checked while writing this plan: the image tag exists, the build takes about a minute warm, and the result needed `GLIBC_2.38`.)
 
 ```bash
 #!/usr/bin/env bash
@@ -9108,7 +9108,7 @@ echo "$bin needs $glibc"
   || { echo "needs glibc newer than Debian 13's 2.41" >&2; exit 1; }
 ```
 
-- [ ] **Step 2: Write `scripts/live/rig-ctl.sh`.** It is the only thing that starts, stops or runs a command inside a rig.
+- [x] **Step 2: Write `scripts/live/rig-ctl.sh`.** It is the only thing that starts, stops or runs a command inside a rig.
 
 ```bash
 #!/usr/bin/env bash
@@ -9156,7 +9156,7 @@ case "$action" in
 esac
 ```
 
-- [ ] **Step 3: Write the install scripts.** `emit-credential.sh` runs on the dev host. The three small files and `rig-install.sh` run on the workstation.
+- [x] **Step 3: Write the install scripts.** `emit-credential.sh` runs on the dev host. The three small files and `rig-install.sh` run on the workstation.
 
 ```bash
 #!/usr/bin/env bash
@@ -9258,7 +9258,7 @@ ssh "$RIG_PVE" pct exec "$vmid" -- runuser -u rustopnsmcp -- /usr/local/bin/rust
   --tokens-file /var/lib/rustopnsmcp/tokens.json --name "$name" --devices opnsense-lab --tools '\*' --actor-type "$actor"
 ```
 
-- [ ] **Step 4: Build and check, no rig contact.**
+- [x] **Step 4: Build and check, no rig contact.**
 
 ```fish
 bash scripts/live/build-trixie.sh
@@ -9266,7 +9266,7 @@ bash scripts/live/build-trixie.sh
 
 Expected: the last line reads `... needs GLIBC_2.38` (anything up to `GLIBC_2.41` is acceptable). The binary is at `$HOME/.cache/rustopnsmcp-p3-trixie/target/release/rustopnsmcp`. Run `for f in scripts/live/*.sh; bash -n $f; end` and expect no output.
 
-- [ ] **Step 5: Evidence check and first install. Needs the user's go-ahead (starts a rig and puts the lab credentials on it).** The user sets `RIG_PVE`, `LAB_HOST` and `LAB_ENV_FILE` in their shell.
+- [x] **Step 5: Evidence check and first install. Needs the user's go-ahead (starts a rig and puts the lab credentials on it).** The user sets `RIG_PVE`, `LAB_HOST` and `LAB_ENV_FILE` in their shell.
 
 ```fish
 bash scripts/live/rig-ctl.sh check test-labmode-opns
@@ -9276,7 +9276,7 @@ bash scripts/live/rig-install.sh test-labmode-opns $HOME/.cache/rustopnsmcp-p3-t
 
 Expected: the check prints the rig's tag evidence; the install ends by printing `600 rustopnsmcp <size> ...` for `devices.json` and the three credential files, all sizes non-zero. A zero size means `pct exec` did not forward stdin; stop, and fall back to staging each secret in a 0700 directory on the node with `umask 077`, `pct push` it with `--perms 0600`, then delete the staging directory and report. Repeat the same three commands for `test-twoperson-opns`.
 
-- [ ] **Step 6: Mint a token and smoke the first device contact (read-only).** The calls file `scripts/live/calls/smoke.json`:
+- [x] **Step 6: Mint a token and smoke the first device contact (read-only).** The calls file `scripts/live/calls/smoke.json`:
 
 ```json
 [
@@ -9294,9 +9294,9 @@ python3 -I scripts/live/mcp_call.py scripts/live/calls/smoke.json --url http://$
 
 Expected: two `PASS`. If `opnsmcp_status` is refused with a Host-header error, adjust the `--allowed-host` entries in the rig's `override.conf` (the template lists the address and name with and without the port). **If the rig cannot reach opnsense-lab, or the HTTP client refuses an IP-literal or private-address endpoint, stop and report**; the fallback is a host-file entry naming `opnsense-lab` on the rig, which needs the user's go-ahead. The token is never printed; the rig keeps its audit lines in the journal, not in any output pasted into a gate comment.
 
-- [ ] **Step 7: Stop the rigs when the run ends:** `bash scripts/live/rig-ctl.sh stop test-labmode-opns` (and the other). Each stop repeats the tag evidence check. The credentials remain on the rig's disk until Task 15's final step removes them.
+- [x] **Step 7: Stop the rigs when the run ends:** `bash scripts/live/rig-ctl.sh stop test-labmode-opns` (and the other). Each stop repeats the tag evidence check. The credentials remain on the rig's disk until Task 15's final step removes them.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 chmod +x scripts/live/*.sh
@@ -9422,7 +9422,7 @@ git commit -m "scripts: live read and refusal runs, with first results (#425)"
 
 Rule: a backend is detected by its own settings endpoint, not by a version number. `Some(true)` = installed and enabled, `Some(false)` = installed and disabled, `None` = endpoint absent (404). Neither new endpoint present means a device that predates both, and the legacy ISC path is used. One enabled: use it. Both enabled: refuse, because silently listing one would hide the other's leases. Present but none enabled: refuse and say so.
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/read_tools.rs`)
+- [x] **Step 1: Write the failing tests** (append to `tests/read_tools.rs`)
 
 ```rust
 fn dhcp_routes(dnsmasq_enabled: &str, kea_enabled: &str) -> HashMap<String, serde_json::Value> {
@@ -9488,12 +9488,12 @@ async fn a_device_with_neither_new_backend_falls_back_to_the_legacy_isc_path() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo test -p rustopnsmcp-core --test read_tools dhcp`
 Expected: compile error, `DNSMASQ_SETTINGS_GET` not found.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `endpoints.rs`: replace the `DHCP_LEASES_SEARCH` doc comment with "Legacy ISC DHCPv4 leases. **Absent on 26.7.5** (404 seen on opnsense-lab); used only when neither Dnsmasq nor Kea answers" and add:
 
@@ -9589,14 +9589,14 @@ pub async fn list_dhcp_leases(
 
 `server/mod.rs`: change the description's second sentence to "From the enabled DHCPv4 backend (Dnsmasq or Kea; legacy ISC only on devices that have neither); the result's backend field names it. DHCPv6 leases are NOT covered."
 
-- [ ] **Step 4: Run to verify pass**, then the full suite.
+- [x] **Step 4: Run to verify pass**, then the full suite.
 
 Run: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo test -p rustopnsmcp-core --test read_tools` then `cargo test --workspace --locked`.
 Expected: PASS. The two settings fixture files are not needed by these tests (inline JSON); do not create them.
 
-- [ ] **Step 5: Sabotage once.** Make `dhcp_backend` return `Ok(DhcpBackend::Dnsmasq)` unconditionally; the Kea and "two enabled" tests must fail. Restore.
+- [x] **Step 5: Sabotage once.** Make `dhcp_backend` return `Ok(DhcpBackend::Dnsmasq)` unconditionally; the Kea and "two enabled" tests must fail. Restore.
 
-- [ ] **Step 6: Commit** (`fix: list DHCP leases from the enabled backend; ISC is gone on 26.7 (#425)`)
+- [x] **Step 6: Commit** (`fix: list DHCP leases from the enabled backend; ISC is gone on 26.7 (#425)`)
 
 ---
 
@@ -9611,7 +9611,7 @@ Expected: PASS. The two settings fixture files are not needed by these tests (in
 
 Findings behind this: `product_name` is at `/product/product_name` of the firmware status; uptime and load are `uptime` and `loadavg` of system time; `/upgrade_needs_reboot` is absent on 26.7.5 so it stays, null when unreported, and the description says so.
 
-- [ ] **Step 1: Rewrite the failing unit test** in `fleet.rs` to use inline shapes seen on the device
+- [x] **Step 1: Rewrite the failing unit test** in `fleet.rs` to use inline shapes seen on the device
 
 ```rust
 #[test]
@@ -9631,13 +9631,13 @@ fn facts_read_the_shapes_26_7_reports() {
 
 Update `a_missing_fact_is_null_not_invented` to drop its `cpu_type` assertion and assert `uptime` is null instead.
 
-- [ ] **Step 2: Run to verify failure** (`cargo test -p rustopnsmcp-core fleet`), expected: wrong `product_name`.
+- [x] **Step 2: Run to verify failure** (`cargo test -p rustopnsmcp-core fleet`), expected: wrong `product_name`.
 
-- [ ] **Step 3: Implement**: the pointers become `firmware /product/product_name`, `time /uptime`, `time /loadavg`; delete `cpu_type`. In `server/mod.rs` read `fleet`'s time with `client.get(endpoints::SYSTEM_TIME)` (and `require_object`) instead of `read::system_status`. Descriptions: `get_opnsense_system_status` becomes "OPNsense system health summary: an overall status code, a message, and any subsystem notices. For version and uptime use gather_device_facts." `gather_device_facts` drops "CPU" and says "upgrade_needs_reboot is null when the device does not report it".
+- [x] **Step 3: Implement**: the pointers become `firmware /product/product_name`, `time /uptime`, `time /loadavg`; delete `cpu_type`. In `server/mod.rs` read `fleet`'s time with `client.get(endpoints::SYSTEM_TIME)` (and `require_object`) instead of `read::system_status`. Descriptions: `get_opnsense_system_status` becomes "OPNsense system health summary: an overall status code, a message, and any subsystem notices. For version and uptime use gather_device_facts." `gather_device_facts` drops "CPU" and says "upgrade_needs_reboot is null when the device does not report it".
 
-- [ ] **Step 4: Update `read_tools.rs`**'s `system_status_reads_the_fixture` to assert `status["metadata"]["system"]["status"]` once Task 10 swaps the fixture. Until then it passes unchanged; keep the old assertion and mark the dependency in the commit body.
+- [x] **Step 4: Update `read_tools.rs`**'s `system_status_reads_the_fixture` to assert `status["metadata"]["system"]["status"]` once Task 10 swaps the fixture. Until then it passes unchanged; keep the old assertion and mark the dependency in the commit body.
 
-- [ ] **Step 5: Run the workspace gates and commit** (`fix: facts and system status match the 26.7 response shapes (#425)`).
+- [x] **Step 5: Run the workspace gates and commit** (`fix: facts and system status match the 26.7 response shapes (#425)`).
 
 ---
 
@@ -9658,7 +9658,7 @@ Update `a_missing_fact_is_null_not_invented` to drop its `cpu_type` assertion an
 
 `counters` (the alias option that turns pf counters on) is configuration and must NOT be in the list.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 In `fingerprint.rs`:
 
@@ -9703,9 +9703,9 @@ fn a_live_counter_tick_is_not_drift_but_a_content_change_is() {
 }
 ```
 
-- [ ] **Step 2: Run, expect failures** (`cargo test -p rustopnsmcp-core fingerprint preimage`).
+- [x] **Step 2: Run, expect failures** (`cargo test -p rustopnsmcp-core fingerprint preimage`).
 
-- [ ] **Step 3: Implement.** `VOLATILE_FIELDS` becomes the ten counters above plus `current_items` and `last_updated`, with the comment "pf evaluation counters and table sizes: re-read on every request (eval_nomatch seen ticking on opnsense-lab within 20 s). Not configuration." Make `canonical` `pub(super)`. In `preimage.rs`:
+- [x] **Step 3: Implement.** `VOLATILE_FIELDS` becomes the ten counters above plus `current_items` and `last_updated`, with the comment "pf evaluation counters and table sizes: re-read on every request (eval_nomatch seen ticking on opnsense-lab within 20 s). Not configuration." Make `canonical` `pub(super)`. In `preimage.rs`:
 
 ```rust
 /// Whether `live` is the configuration `recorded` captured, ignoring live counters.
@@ -9717,11 +9717,11 @@ pub fn same_configuration(recorded: &Value, live: &Value) -> bool {
 
 In `client.rs`, `preimage_matches`: replace `Some(live) if live == recorded => {}` with `Some(live) if crate::changeset::same_configuration(&recorded, &live) => {}`. Re-export in `changeset/mod.rs`.
 
-- [ ] **Step 4: Run the workspace tests.** Expected PASS.
+- [x] **Step 4: Run the workspace tests.** Expected PASS.
 
-- [ ] **Step 5: Sabotage** the second site: change `preimage_matches` back to `live == recorded`. `apply.rs` has no test that notices (its mock controller bypasses `OpnsenseClient`), so add one integration test in `tests/read_tools.rs` using `client_against` with a `getItem` route whose body differs from the recorded pre-image only in `eval_nomatch`, and assert `ControllerOps::preimage_matches` returns `Ok(true)`. Confirm it fails under the sabotage, then restore. (`ControllerOps` must be in scope: `use rustopnsmcp_core::changeset::{ControllerOps, Preimage, ResourceKind, StagedMutation};`.)
+- [x] **Step 5: Sabotage** the second site: change `preimage_matches` back to `live == recorded`. `apply.rs` has no test that notices (its mock controller bypasses `OpnsenseClient`), so add one integration test in `tests/read_tools.rs` using `client_against` with a `getItem` route whose body differs from the recorded pre-image only in `eval_nomatch`, and assert `ControllerOps::preimage_matches` returns `Ok(true)`. Confirm it fails under the sabotage, then restore. (`ControllerOps` must be in scope: `use rustopnsmcp_core::changeset::{ControllerOps, Preimage, ResourceKind, StagedMutation};`.)
 
-- [ ] **Step 6: Commit** (`fix: pf counters are not configuration drift in the fingerprint or the pre-image check (#425)`).
+- [x] **Step 6: Commit** (`fix: pf counters are not configuration drift in the fingerprint or the pre-image check (#425)`).
 
 ---
 
@@ -9754,7 +9754,7 @@ Rules, applied to every string key and value:
 6. `--max-rows N` truncates a top-level `rows` array and rewrites `total` and `rowCount` to match.
 7. `--verify` re-scans the output for anything rules 1-5 would still change and exits 2.
 
-- [ ] **Step 1: Write the test first**, `scripts/tests/sanitize-fixture.test.sh`. Secret-shaped input is assembled at run time so the test file itself contains no secret-shaped literal for the pre-push gate to flag.
+- [x] **Step 1: Write the test first**, `scripts/tests/sanitize-fixture.test.sh`. Secret-shaped input is assembled at run time so the test file itself contains no secret-shaped literal for the pre-push gate to flag.
 
 ```bash
 #!/usr/bin/env bash
@@ -9790,9 +9790,9 @@ if "$san" --verify --deny-file "$work/deny" "$work/d.json" 2>/dev/null; then ech
 echo OK
 ```
 
-- [ ] **Step 2: Run it, expect failure** (the scripts do not exist).
+- [x] **Step 2: Run it, expect failure** (the scripts do not exist).
 
-- [ ] **Step 3: Implement `scripts/sanitize_fixture.py`**
+- [x] **Step 3: Implement `scripts/sanitize_fixture.py`**
 
 ```python
 #!/usr/bin/env python3
@@ -9940,18 +9940,18 @@ exec python3 -I "$(dirname "$0")/sanitize_fixture.py" "$@"
 
 `walk` redacts by key name before the value rules, so a `password` key never reaches them; dict keys are scrubbed as well as values (a `getItem` content map is keyed by the addresses); and `--verify` is a second, independent pass over the output text.
 
-- [ ] **Step 4: Run the test until it passes**, adjusting only the script (not weakening the test). Expected: `OK`.
+- [x] **Step 4: Run the test until it passes**, adjusting only the script (not weakening the test). Expected: `OK`.
 
-- [ ] **Step 5: Add the CI step**
+- [x] **Step 5: Add the CI step**
 
 ```yaml
       - name: Fixture sanitizer self-test
         run: scripts/tests/sanitize-fixture.test.sh
 ```
 
-- [ ] **Step 6: Sabotage once.** Delete the `IPV4.sub(fake_v4, text)` line; the test must fail on the leaked address (and `--verify` on the output must report `ipv4`). Restore.
+- [x] **Step 6: Sabotage once.** Delete the `IPV4.sub(fake_v4, text)` line; the test must fail on the leaked address (and `--verify` on the output must report `ipv4`). Restore.
 
-- [ ] **Step 7: Commit** (`scripts: fixture sanitizer with a verifying second pass (#425)`).
+- [x] **Step 7: Commit** (`scripts: fixture sanitizer with a verifying second pass (#425)`).
 
 ---
 
@@ -9966,7 +9966,7 @@ exec python3 -I "$(dirname "$0")/sanitize_fixture.py" "$@"
 - Modify: `rustopnsmcp-core/src/testing.rs` (header), the assertions in `tests/read_tools.rs`, `src/tools/fleet.rs` and `src/changeset/validate.rs` that name old fixture values
 - Create (dev host only): `$LAB_WORK/deny.txt`, one name per line, the lab's own hostnames and domain
 
-- [ ] **Step 1: Capture raw** (one `lab-get.sh raw` per path, on the dev host)
+- [x] **Step 1: Capture raw** (one `lab-get.sh raw` per path, on the dev host)
 
 | Fixture | Path (`?current=1&rowCount=-1` on search endpoints) | `--max-rows` |
 |---|---|---|
@@ -9982,15 +9982,15 @@ exec python3 -I "$(dirname "$0")/sanitize_fixture.py" "$@"
 
 The two uuids are read from the capture of the matching search on the dev host.
 
-- [ ] **Step 2: Sanitize on the dev host.** For each raw file: `scripts/sanitize-fixture.sh --deny-file $LAB_WORK/deny.txt [--max-rows N] raw > clean/NAME.json`, then `scripts/sanitize-fixture.sh --verify --deny-file $LAB_WORK/deny.txt clean/NAME.json`. Copy `scripts/sanitize*` to the dev host first; they have no host details.
+- [x] **Step 2: Sanitize on the dev host.** For each raw file: `scripts/sanitize-fixture.sh --deny-file $LAB_WORK/deny.txt [--max-rows N] raw > clean/NAME.json`, then `scripts/sanitize-fixture.sh --verify --deny-file $LAB_WORK/deny.txt clean/NAME.json`. Copy `scripts/sanitize*` to the dev host first; they have no host details.
 
-- [ ] **Step 3: Review by eye.** Print each clean file's key names, and read the values of every file in full on the dev host. Stop and report anything that looks like a real name, address, serial, key or hash that the rules did not catch; extend the sanitizer (with a test) rather than hand-editing the output.
+- [x] **Step 3: Review by eye.** Print each clean file's key names, and read the values of every file in full on the dev host. Stop and report anything that looks like a real name, address, serial, key or hash that the rules did not catch; extend the sanitizer (with a test) rather than hand-editing the output.
 
-- [ ] **Step 4: Copy only `clean/` to this repository's fixtures directory** (`scp`). `git diff --stat` shows fixtures only.
+- [x] **Step 4: Copy only `clean/` to this repository's fixtures directory** (`scp`). `git diff --stat` shows fixtures only.
 
-- [ ] **Step 5: Fix the tests to the real values.** Failing tests drive this: run `cargo test --workspace --locked`, and for each failure change the assertion to the sanitized fixture's value (for example `system_status` becomes `status["metadata"]["system"]["status"]`, `interfaces` expects 5 rows and `rows[0].identifier` from the capture, `firewall_rules` expects `coverage: complete` and a `product_version` of `26.7.5`, `rule_listing` tests keep their own inline versions).  Replace `testing.rs`'s header with: "Most fixtures under `tests/fixtures/` are sanitized captures from opnsense-lab on 26.7.5 (see `scripts/sanitize-fixture.sh`). `nat_one_to_one`, `routes` and `dhcp_leases` are synthetic: those collections are empty on the baseline, so there is nothing to capture."
+- [x] **Step 5: Fix the tests to the real values.** Failing tests drive this: run `cargo test --workspace --locked`, and for each failure change the assertion to the sanitized fixture's value (for example `system_status` becomes `status["metadata"]["system"]["status"]`, `interfaces` expects 5 rows and `rows[0].identifier` from the capture, `firewall_rules` expects `coverage: complete` and a `product_version` of `26.7.5`, `rule_listing` tests keep their own inline versions).  Replace `testing.rs`'s header with: "Most fixtures under `tests/fixtures/` are sanitized captures from opnsense-lab on 26.7.5 (see `scripts/sanitize-fixture.sh`). `nat_one_to_one`, `routes` and `dhcp_leases` are synthetic: those collections are empty on the baseline, so there is nothing to capture."
 
-- [ ] **Step 6: Use the real pre-image shapes.** Two new tests in `src/changeset/validate.rs`:
+- [x] **Step 6: Use the real pre-image shapes.** Two new tests in `src/changeset/validate.rs`:
 
 ```rust
 #[test]
@@ -10011,9 +10011,9 @@ fn every_writable_field_exists_in_the_live_bodies() {
 
 The probes confirmed all names are present on 26.7.5. Then replace the "none has been exercised against a live OPNsense" sentence on `RULE_WRITABLE_FIELDS` with "names verified against `getRule` on 26.7.5; write behaviour verified in P3 Tasks 12-14", and rewrite the `endpoints.rs` header the same way (read paths verified on 26.7.5, write verbs not yet).
 
-- [ ] **Step 7: Secret gate before commit.** `gitleaks detect --no-git --source rustopnsmcp-core/tests/fixtures` (or the pinned binary the pre-push hook uses) reports nothing; the pre-push gate is not bypassed. Then the CI gates.
+- [x] **Step 7: Secret gate before commit.** `gitleaks detect --no-git --source rustopnsmcp-core/tests/fixtures` (or the pinned binary the pre-push hook uses) reports nothing; the pre-push gate is not bypassed. Then the CI gates.
 
-- [ ] **Step 8: Commit** (`test: replace synthetic fixtures with sanitized opnsense-lab captures (#425)`).
+- [x] **Step 8: Commit** (`test: replace synthetic fixtures with sanitized opnsense-lab captures (#425)`).
 
 ---
 
@@ -10033,8 +10033,8 @@ The probes confirmed all names are present on 26.7.5. Then replace the "none has
 6. Run a fingerprint call (`pointers: {"/fingerprint": "$baseline"}`, `--vars $P3_WORK/baseline.json`). A mismatch means the device is not at baseline: stop.
 7. After the task, stop the rig (`rig-ctl.sh stop <rig>`; it re-checks the tags).
 
-- [ ] **Step 1: Preflight, read-only.** Run steps 1-2, 4 and 6 with the rig started (skip 3 and 5). Expected: tags as above, snapshot present, API 200, fingerprint equals the baseline.
-- [ ] **Step 2: Ask the user** to approve Tasks 12-15 individually, naming the writes each performs (listed in each task) and the rollback before each, and whether the final credential cleanup in Task 15 Step 5 is wanted.
+- [x] **Step 1: Preflight, read-only.** Run steps 1-2, 4 and 6 with the rig started (skip 3 and 5). Expected: tags as above, snapshot present, API 200, fingerprint equals the baseline.
+- [x] **Step 2: Ask the user** to approve Tasks 12-15 individually, naming the writes each performs (listed in each task) and the rollback before each, and whether the final credential cleanup in Task 15 Step 5 is wanted.
 
 ---
 
@@ -10045,7 +10045,7 @@ The probes confirmed all names are present on 26.7.5. Then replace the "none has
 **Files:**
 - Create: `scripts/live/calls/alias.json`
 
-- [ ] **Step 1: Write `scripts/live/calls/alias.json`.** Run with `--vars $P3_WORK/baseline.json` (Task 8) so the last call can require the baseline fingerprint.
+- [x] **Step 1: Write `scripts/live/calls/alias.json`.** Run with `--vars $P3_WORK/baseline.json` (Task 8) so the last call can require the baseline fingerprint.
 
 ```json
 [
@@ -10075,11 +10075,17 @@ The probes confirmed all names are present on 26.7.5. Then replace the "none has
 
 The waived state may be spelled differently from `approved`; set the pointer to what the first run shows. The refused `confirm_timeout_mins` call must leave the change set unclaimed (Review Focus 2), which is why status is read right after it.
 
-- [ ] **Step 2: Reset to the baseline** (Task 11 procedure, with the user's go-ahead for the rollback).
-- [ ] **Step 3: Run** on the workstation: `python3 -I scripts/live/mcp_call.py scripts/live/calls/alias.json --vars $P3_WORK/baseline.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`. Expected: every line PASS, including the last (the fingerprint after the inverse change set equals the baseline).
-- [ ] **Step 4: Evidence for the gate comment:** the PASS/FAIL lines only (key names, states, counts). Not the alias content or any address.
-- [ ] **Step 5: Record any defect found** as a new task with a failing test before changing code. Candidates the probes cannot settle: whether `reconfigure` answers `status: ok` (required by `interpret_reconfigure_response`); whether `setItem`, replaying a rolled-back alias, accepts the flattened `proto` and the list-valued `categories` that `flatten_field` passes through unchanged; whether `addItem` accepts `\n`-joined `content`.
-- [ ] **Step 6: Commit** the calls file (`scripts: live alias change-set run (#425)`).
+- [x] **Step 2: Reset to the baseline** (Task 11 procedure, with the user's go-ahead for the rollback).
+- [x] **Step 3: Run** on the workstation: `python3 -I scripts/live/mcp_call.py scripts/live/calls/alias.json --vars $P3_WORK/baseline.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`. Expected: every line PASS, including the last (the fingerprint after the inverse change set equals the baseline).
+- [x] **Step 4: Evidence for the gate comment:** the PASS/FAIL lines only (key names, states, counts). Not the alias content or any address.
+- [x] **Step 5: Record any defect found** as a new task with a failing test before changing code. Candidates the probes cannot settle: whether `reconfigure` answers `status: ok` (required by `interpret_reconfigure_response`); whether `setItem`, replaying a rolled-back alias, accepts the flattened `proto` and the list-valued `categories` that `flatten_field` passes through unchanged; whether `addItem` accepts `\n`-joined `content`.
+- [x] **Step 6: Commit** the calls file (`scripts: live alias change-set run (#425)`).
+
+**Live result (2026-10-29).** `test-labmode-opns`: 18/18 PASS on the second run: create-then-cancel (no device write), waiver, `confirm_timeout` and digest refusals, apply create/update/delete, alias gone, back at the baseline fingerprint. The first run stopped at "apply delete" (`applied_unverified`) and exposed defect 12a.
+
+### P3-Task 12a: Alias getItem answers a template for an unknown uuid
+
+On 26.7.5 alias `getItem` for an unknown uuid answers HTTP 200 with the default alias template (not `[]`), so delete verification read "still exists" and the apply ended `applied_unverified`. Fixed by treating a template (empty `name`) as not found (commit 623a20b). `getRule` for an unknown uuid answers `[]` (re-confirmed).
 
 ---
 
@@ -10090,7 +10096,7 @@ The waived state may be spelled differently from `approved`; set the pointer to 
 **Files:**
 - Create: `scripts/live/calls/two-person-owner-create.json`, `two-person-approver.json`, `two-person-owner-apply.json`, `two-person-owner-finish.json`
 
-- [ ] **Step 1: Write the four calls files.**
+- [x] **Step 1: Write the four calls files.**
 
 `two-person-owner-create.json`:
 
@@ -10138,8 +10144,8 @@ The waived state may be spelled differently from `approved`; set the pointer to 
 ]
 ```
 
-- [ ] **Step 2: Reset to the baseline** (Task 11) with `test-twoperson-opns` as the rig.
-- [ ] **Step 3: Mint two tokens on the rig,** capturing each by command substitution so it is never printed:
+- [x] **Step 2: Reset to the baseline** (Task 11) with `test-twoperson-opns` as the rig.
+- [x] **Step 3: Mint two tokens on the rig,** capturing each by command substitution so it is never printed:
 
 ```fish
 set -x P3_OWNER_TOKEN (bash scripts/live/rig-token.sh test-twoperson-opns p3-owner agent)
@@ -10148,7 +10154,7 @@ bash scripts/live/rig-ctl.sh svc test-twoperson-opns restart
 set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-twoperson-opns) -- hostname -I | awk '{print $1}')
 ```
 
-- [ ] **Step 4: Run in this order,** each with `--url http://$RIG_IP:30037/mcp`, `--vars $P3_WORK/baseline.json` for the first and `$P3_WORK/tp.json` after, and `--save-vars $P3_WORK/tp.json` (`tp.json` starts as a copy of `baseline.json`):
+- [x] **Step 4: Run in this order,** each with `--url http://$RIG_IP:30037/mcp`, `--vars $P3_WORK/baseline.json` for the first and `$P3_WORK/tp.json` after, and `--save-vars $P3_WORK/tp.json` (`tp.json` starts as a copy of `baseline.json`):
   1. owner (`--token-env P3_OWNER_TOKEN`): `two-person-owner-create.json`
   2. approver (`--token-env P3_APPROVER_TOKEN`): `two-person-approver.json`
   3. owner: `two-person-owner-apply.json`
@@ -10156,8 +10162,10 @@ set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-two
   5. owner: `two-person-owner-finish.json`
 
   Expected: every line PASS. This is Review Focus 5 live: a stale digest refused with the change set left `planned`, a drifted fingerprint refused with nothing written.
-- [ ] **Step 5: Stop the rig, delete `$P3_WORK/tp.json`, unset the token variables.** The rig's tokens stay on its disk until Task 15's cleanup.
-- [ ] **Step 6: Evidence:** the PASS/FAIL lines and states only. **Step 7: Commit** the four files (`scripts: live two-person change-set run (#425)`).
+- [x] **Step 5: Stop the rig, delete `$P3_WORK/tp.json`, unset the token variables.** The rig's tokens stay on its disk until Task 15's cleanup.
+- [x] **Step 6: Evidence:** the PASS/FAIL lines and states only. **Step 7: Commit** the four files (`scripts: live two-person change-set run (#425)`).
+
+**Live result (2026-10-29).** `test-twoperson-opns`, owner `agent` and approver `human` tokens: 5/5 files PASS. The owner cannot approve; a stale digest is refused and the set left planned; the second principal approves; a fingerprint that does not match the plan is refused with nothing written; apply; the inverse delete is approved by the second principal; back at the baseline.
 
 ---
 
@@ -10170,7 +10178,7 @@ set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-two
 
 `interface: "lan"` is OPNsense's default LAN identifier; confirm it appears in `list_opnsense_interfaces` before running, and substitute the identifier the device shows if not.
 
-- [ ] **Step 1: Write `scripts/live/calls/rule.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
+- [x] **Step 1: Write `scripts/live/calls/rule.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
 
 ```json
 [
@@ -10196,7 +10204,7 @@ set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-two
 ]
 ```
 
-- [ ] **Step 2: Write `scripts/live/calls/rule-legacy.json`.** Legacy and automatic rules cannot be changed; this must be refused at creation and write nothing. The reference is any `legacy: true` row's 32-character `uuid` from the listing; save it by hand into `$P3_WORK/legacy.json` as `{"fp": "<current fingerprint>", "legacy_ref": "<ref>"}` (a rule reference is not sensitive).
+- [x] **Step 2: Write `scripts/live/calls/rule-legacy.json`.** Legacy and automatic rules cannot be changed; this must be refused at creation and write nothing. The reference is any `legacy: true` row's 32-character `uuid` from the listing; save it by hand into `$P3_WORK/legacy.json` as `{"fp": "<current fingerprint>", "legacy_ref": "<ref>"}` (a rule reference is not sensitive).
 
 ```json
 [
@@ -10208,9 +10216,15 @@ set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-two
 
 This step writes nothing to the device (the refusal happens before any claim), and needs `baseline` in the same vars file.
 
-- [ ] **Step 3: Reset to the baseline (Task 11), run `rule.json`, then `rule-legacy.json`.** Expected: every line PASS.
-- [ ] **Step 4: Record any defect** as a new task with a failing test first. Watch in particular: the exact `status` word the filter `apply` returns on 26.7.5 (`interpret_reconfigure_response` accepts only `ok`; with the savepoint feature present a plain `apply` may answer differently, and P5.6 depends on the answer, so write down what the device said), and whether `addRule` accepts `enabled` and `sequence` as the writable list assumes.
-- [ ] **Step 5: Evidence** as Task 12 Step 4. **Step 6: Commit** (`scripts: live filter-rule change-set run (#425)`).
+- [x] **Step 3: Reset to the baseline (Task 11), run `rule.json`, then `rule-legacy.json`.** Expected: every line PASS.
+- [x] **Step 4: Record any defect** as a new task with a failing test first. Watch in particular: the exact `status` word the filter `apply` returns on 26.7.5 (`interpret_reconfigure_response` accepts only `ok`; with the savepoint feature present a plain `apply` may answer differently, and P5.6 depends on the answer, so write down what the device said), and whether `addRule` accepts `enabled` and `sequence` as the writable list assumes.
+- [x] **Step 5: Evidence** as Task 12 Step 4. **Step 6: Commit** (`scripts: live filter-rule change-set run (#425)`).
+
+**Live result (2026-10-29).** `test-labmode-opns`: `rule.json` 13/13 and `rule-legacy.json` 4/4 PASS on the second run: disabled rule created, filter apply, update, `confirm_timeout` refusal, inverse delete, back at the baseline; a legacy rule update refused with nothing written. The first run stopped at "apply create" (`not_loaded`, rolled back cleanly) and exposed defect 14a. `confirm_opnsense_change_set` is not exercisable: this build refuses `confirm_timeout_mins` for rules.
+
+### P3-Task 14a: The filter apply answers configd's raw output
+
+The filter apply returns configd's raw output (`OK` plus newlines; upstream `FilterBaseController::applyAction`), which the server rejected as not-ok, so `apply create` ended `not_loaded`. Fixed by accepting a status that trims to "ok" case-insensitively (commit e76b9d2).
 
 ---
 
@@ -10223,7 +10237,7 @@ This step writes nothing to the device (the refusal happens before any claim), a
 
 The failing second action is deterministic: an alias **name that already exists**. The device validates name uniqueness and answers HTTP 200 with `result: "failed"` (Review Focus 3). The file reads an existing alias name from the device at run time, so no device value is committed.
 
-- [ ] **Step 1: Write `scripts/live/calls/partial.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
+- [x] **Step 1: Write `scripts/live/calls/partial.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
 
 ```json
 [
@@ -10244,11 +10258,13 @@ The failing second action is deterministic: an alias **name that already exists*
 
 The `action_count` key and the `rollback_failures` rendering are as the code builds them (`status_view`, `apply_outcome_response`); adjust a pointer only to what the first run shows. `never_attempted` is a count, not a list (see the checklist note).
 
-- [ ] **Step 2: Reset to the baseline (Task 11), run it.** Expected: every line PASS.
-- [ ] **Step 3: Evidence:** the PASS/FAIL lines and counts only.
-- [ ] **Step 4: If the rollback leaves `p3_part_a` behind** (`partial_rollback_failed`), do not fix the lab by hand. Record it, write a failing test first, and reset to the baseline (Task 11) with the user's go-ahead.
-- [ ] **Step 5: Final reset and cleanup (optional, the user's decision from Task 11 Step 2):** run the reset procedure and confirm the fingerprint equals the baseline. Then, with the user's go-ahead, remove the lab credentials and tokens from each rig (`rig-ctl.sh svc <rig> stop`, then delete `/etc/rustopnsmcp/credentials`, `/etc/rustopnsmcp/devices.json` and `/var/lib/rustopnsmcp/tokens.json` inside it), stop the rigs, and delete the raw captures on the dev host and `$P3_WORK`.
-- [ ] **Step 6: Commit** (`scripts: live partial-apply run (#425)`).
+- [x] **Step 2: Reset to the baseline (Task 11), run it.** Expected: every line PASS.
+- [x] **Step 3: Evidence:** the PASS/FAIL lines and counts only.
+- [x] **Step 4: If the rollback leaves `p3_part_a` behind** (`partial_rollback_failed`), do not fix the lab by hand. Record it, write a failing test first, and reset to the baseline (Task 11) with the user's go-ahead.
+- [x] **Step 5: Final reset and cleanup (optional, the user's decision from Task 11 Step 2):** run the reset procedure and confirm the fingerprint equals the baseline. Then, with the user's go-ahead, remove the lab credentials and tokens from each rig (`rig-ctl.sh svc <rig> stop`, then delete `/etc/rustopnsmcp/credentials`, `/etc/rustopnsmcp/devices.json` and `/var/lib/rustopnsmcp/tokens.json` inside it), stop the rigs, and delete the raw captures on the dev host and `$P3_WORK`.
+- [x] **Step 6: Commit** (`scripts: live partial-apply run (#425)`).
+
+**Live result (2026-10-29).** `test-labmode-opns`: 6/6 PASS. The device refused the second action (duplicate name), the apply reported `partial`, the change set recorded `failed`, best-effort rollback removed the first alias, and the fingerprint is back at the baseline. Last step done: the lab credentials are purged from both rigs.
 
 ---
 
@@ -10279,7 +10295,7 @@ The `action_count` key and the `rollback_failures` rendering are as the code bui
 - [ ] Fixtures: sanitizer self-test green in CI, `--verify` clean on every committed fixture, pre-push secret gate passed unmodified.
 - [ ] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, `scripts/check-mecmcp-pin.sh` and `scripts/parity-check.sh --phase P1` green; CI green on `main` after the last P3 merge.
 - [ ] Banner removed, README status and table accurate.
-- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (port forwards not listed, deferred; three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5), and what's next (P4).
+- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (port forwards not listed, deferred; three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5; `confirm_opnsense_change_set` not exercisable in this build, which refuses `confirm_timeout_mins` for rules; update/delete rollback replay not exercised beyond Task 15's create rollback; D2, `/readyz` 401 versus 403, belongs to the P2 branch and is still to be checked live), and what's next (P4).
 
 ## P4 — Read breadth
 
