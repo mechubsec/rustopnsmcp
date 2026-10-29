@@ -50,6 +50,10 @@ fn init_token_audit() {
 /// construct the journald layer. A server that starts anyway is a server
 /// that runs with no audit trail while believing it has one.
 fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<AuditFileSink>>> {
+    if let Some(path) = args.audit_hmac_key_file.as_deref() {
+        rustopnsmcp::startup::ensure_audit_hmac_key(path)
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    }
     let audit_config =
         rustopnsmcp::startup::audit_config(args).map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
 

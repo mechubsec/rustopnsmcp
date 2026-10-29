@@ -39,6 +39,52 @@ pub fn refuse_unwired_flags(was_supplied: &dyn Fn(&str) -> bool) -> Result<(), S
     Ok(())
 }
 
+/// Create `path` holding 32 random bytes when nothing exists there.
+///
+/// An existing file, including a symlink, is left alone: the hardened reader
+/// in `mecmcp-audit` refuses a bad one, and rotating a good one would break
+/// verification of every record already written under it. Linux only, as are
+/// all mechub MCP servers, so there is no fallback entropy source.
+///
+/// # Errors
+///
+/// Returns a message naming the file when it cannot be created or the
+/// entropy source cannot be read. A half-written key is removed.
+pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "--audit-hmac-key-file {}: cannot create the key: {error}. The LXC installer \
+                 (packaging/lxc/install.sh) creates it; in a container mount a writable state \
+                 directory",
+                path.display()
+            ));
+        }
+    };
+    let mut key = [0u8; 32];
+    let written = std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut key))
+        .and_then(|()| file.write_all(&key));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "--audit-hmac-key-file {}: cannot write a generated key: {error}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The audit subscriber configuration from the shared `--audit-*` and
 /// `--otel-*` flags.
 ///
@@ -195,5 +241,66 @@ mod tests {
     #[test]
     fn nothing_supplied_starts() {
         assert!(refuse_unwired_flags(&|_| false).is_ok());
+    }
+
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_missing_key_is_created_32_bytes_and_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        ensure_audit_hmac_key(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert_ne!(bytes, vec![0u8; 32], "the key must be random, not zeroed");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn two_generated_keys_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.key");
+        let second = dir.path().join("b.key");
+        ensure_audit_hmac_key(&first).unwrap();
+        ensure_audit_hmac_key(&second).unwrap();
+        assert_ne!(
+            std::fs::read(first).unwrap(),
+            std::fs::read(second).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_existing_key_is_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        std::fs::write(&path, b"installer-made-key-0123456789abcdef").unwrap();
+        ensure_audit_hmac_key(&path).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"installer-made-key-0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn a_symlink_is_left_for_the_hardened_reader_to_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        let link = dir.path().join("audit-hmac.key");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        ensure_audit_hmac_key(&link).unwrap();
+        assert!(!target.exists(), "must not create through a symlink");
+    }
+
+    #[test]
+    fn an_uncreatable_key_names_the_installer() {
+        let message = ensure_audit_hmac_key(std::path::Path::new(
+            "/nonexistent-dir-for-test/audit-hmac.key",
+        ))
+        .unwrap_err();
+        assert!(message.contains("audit-hmac.key"), "{message}");
+        assert!(message.contains("install.sh"), "{message}");
     }
 }
