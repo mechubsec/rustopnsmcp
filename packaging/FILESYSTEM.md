@@ -68,7 +68,9 @@ never replaced and the final path never holds a partial key.
 
 An existing key is not trusted blindly. The server refuses to start if the key
 is a symlink, is not a regular file, is readable by group or other, or is not
-owned by the service user (or root). The error names `chmod 600` and `chown`.
+owned by the service user. A root-owned key is refused too: the service runs
+non-root, and the root exception only applies to a process that is itself root.
+The error names `chmod 600` and `chown`.
 Fix it with:
 
 ```sh

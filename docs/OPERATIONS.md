@@ -22,10 +22,18 @@ It does not reload command-line flags, TLS certificate and key
 (`--tls-cert`, `--tls-key`), the HMAC key, or the unit. Those need
 `systemctl restart rustopnsmcp`.
 
-A bad reload keeps the previous snapshot and logs a warning; it never leaves the
-server without an inventory. A reload also builds new device clients, so the
-`/readyz` authentication state returns to healthy until the next call to a
-device (see Health and readiness).
+A reload is not all-or-nothing. If `devices.json` fails to parse or validate, the
+previous inventory is kept and the client rebuild is skipped. But if it parses
+and a client cannot then be built (an unset environment variable, an unreadable
+credential file or `ca_pem_path`), the new inventory is already committed while
+the old clients are kept. In that state `get_device_list` shows the new
+inventory but calls still use the old client map, so a device you removed can
+stay callable, and a changed credential is not in use, until a later reload
+succeeds or the service restarts. The log line `client rebuild failed; retaining
+previous clients` marks this state. Fix the cause and send SIGHUP again, or run
+`systemctl restart rustopnsmcp`. A successful reload also builds new device
+clients, so the `/readyz` authentication state returns to healthy until the next
+call to a device (see Health and readiness).
 
 ```sh
 systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service
@@ -43,12 +51,12 @@ file is configured. Each part that fails keeps its old state and logs one of:
 - `token store reload failed; retaining previous snapshot`;
 - `audit file reopen failed`.
 
-To check one reload on its own, stamp the time before sending the signal, so an
-older failure still in the journal is not mistaken for this one. This is
-`sh` syntax, wrapped so it also pastes into fish:
+To check one reload on its own, capture a journal cursor before sending the
+signal, so an older failure is not mistaken for this one (a timestamp is only
+second-granular). This is `sh` syntax, wrapped so it also pastes into fish:
 
 ```sh
-sh -c 'since=$(date "+%Y-%m-%d %H:%M:%S"); systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service; sleep 2; journalctl -u rustopnsmcp --since "$since" --no-pager | grep -E "reloaded|rebuilt|reopened|reload failed|rebuild failed|reopen failed"'
+sh -c 'cursor=$(journalctl -u rustopnsmcp -n 0 --show-cursor | sed -n "s/^-- cursor: //p"); systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service; sleep 2; journalctl -u rustopnsmcp --after-cursor "$cursor" --no-pager | grep -E "reloaded|rebuilt|reopened|reload failed|rebuild failed|reopen failed"'
 ```
 
 A good reload prints `device inventory reloaded`, `HTTP clients rebuilt from
@@ -158,10 +166,15 @@ test because it does not run as root). The file is also under `/var/lib`, so it
 is covered by the upgrade rules below.
 
 ```sh
-journalctl -u rustopnsmcp -n 5 -o cat
+journalctl -u rustopnsmcp MESSAGE=audit -n 5 -o json
 ```
 
-Each line is one JSON audit record.
+With `--audit-journald`, per-call audit records are native journal entries with
+`MESSAGE=audit` and the record's fields prefixed `AUDIT_` (`AUDIT_TOOL`,
+`AUDIT_RESULT`, `AUDIT_CALLER`, `AUDIT_DEVICES`, and so on). Ordinary logs go to
+the journal as JSON on stderr, so the journal mixes both; `MESSAGE=audit`
+selects only the per-call records. For one JSON record per line in a file, use
+the optional `--audit-log-file` sink described above.
 
 ## Upgrading
 
