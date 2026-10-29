@@ -8726,7 +8726,7 @@ Everything in "Global Constraints" above applies. Restated where P3 can break it
 - **Lab rules.** Reads before writes. No write, apply, reconfigure, savepoint, revert, set, add, del or toggle call against the device outside Tasks 12-15, and none of those without the user's explicit go-ahead for that task in this session. Never start or stop the opnsense-lab VM; a snapshot rollback is a Task 11 step the user approves by name. A test rig is started for a run and stopped after it, only through `scripts/live/rig-ctl.sh`, which first proves the guest is `disposable` and not `protected`.
 - **Credentials only move dev host to rig, by pipe.** Never print, log, commit or copy the API key or secret, the root password, any CA key, or an ssh key. Only the variable names of the credentials env file are ever read by an agent. The key, secret and CA certificate reach a rig as 0600 files owned by the service user, streamed through pipes and never as an argument, an environment variable on a command line, a workstation file, or output. The final step of Task 15 deletes them from the rigs.
 - **Raw captures stay on the dev host.** Only sanitized output crosses to this repository, and it is reviewed by eye before `git add`.
-- **No new tool names.** `scripts/parity-check.sh --phase P1` must still pass and `scripts/parity-allowlist.txt` is untouched.
+- **No new tool names.** `scripts/parity-check.sh --phase P1` must still pass and P3 adds allowlist entries only for its own live-verification/fixture tooling (phase `never`), and no tool, flag or dependency.
 - **CI gates** before every commit: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo fmt --all`, then `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, all with that same `CARGO_TARGET_DIR`.
 
 #### What the probes found
@@ -8792,7 +8792,7 @@ P2 (packaging) is being planned and written at the same time. Files both phases 
 | `packaging/systemd/` | P2.2 reworks the unit; P2.4 adds `install.sh` | read only: Task 2 installs the packaged files and overrides `ExecStart` in a drop-in | No edit. A different unit shape does not break the drop-in. `install.sh` supersedes Task 2's manual install. |
 | `scripts/` | P2.5 adds `package-lxc.sh` | Adds `sanitize-fixture.sh`, `sanitize_fixture.py`, `live/`, `tests/` | Distinct names. `scripts/tests/` is new; if P2 also creates it, keep both. |
 | `CHANGELOG.md` | P2.10 creates it | none | P3 does not create it. Its user-visible changes (DHCP backends, fingerprint stability, facts) are listed in Task 16's commit message for P7 to carry. |
-| `scripts/parity-allowlist.txt`, `packaging/**`, `Cargo.toml`, `Cargo.lock`, `.gitleaks.toml` | edits | untouched | P3 adds no dependency, tool, flag or allowlist entry. |
+| `packaging/**`, `Cargo.toml`, `Cargo.lock`, `.gitleaks.toml` | edits | untouched | P3 adds no dependency, tool or flag; allowlist entries only for its own live-verification tooling. |
 
 #### File structure
 
@@ -10025,9 +10025,9 @@ The probes confirmed all names are present on 26.7.5. Then replace the "none has
 
 **Reset and run procedure (generic):**
 
-1. Resolve the opnsense-lab VM by name and tag, never by a remembered id: tagged `disposable`, `lab` and `rustopnsmcp`, and **not** `protected`. Print its name, node, tags and snapshot list.
+1. Resolve the opnsense-lab VM by name and tag, never by a remembered id. **Hard gate:** refuse and stop unless exactly one guest is named `opnsense-lab` and its tags include `disposable`, `lab` and `rustopnsmcp` and not `protected`. Print its name, node, tags and snapshot list.
 2. Confirm the `baseline-seeded` snapshot exists.
-3. With the user's go-ahead for this rollback, roll opnsense-lab back to `baseline-seeded` through the Proxmox tooling (MCP or the cluster CLI, per the lab guardrails). If the snapshot has no memory state, start the VM afterwards. Do not stop or start the opnsense-lab VM for any other reason.
+3. With the user's go-ahead for this rollback, roll opnsense-lab back to `baseline-seeded` through the Proxmox tooling (MCP or the cluster CLI, per the lab guardrails). **The `baseline-seeded` snapshot predates the `disposable` tag, so a rollback restores a config without it: re-apply the tag immediately after every rollback (e.g. `qm set <id> --tags 'disposable;lab;rustopnsmcp'`), before starting the VM.** This was found live on 2026-10-29: a rollback once proceeded without the tag gate (same guest, approved by name). If the snapshot has no memory state, start the VM afterwards. Do not stop or start the opnsense-lab VM for any other reason.
 4. Wait until `lab-get.sh shape /api/core/firmware/info` (on the dev host) answers `HTTP 200`.
 5. Start the rig for the task (`rig-ctl.sh start <rig>`) and clear its change-set state (`rig-ctl.sh reset-state <rig>`), so a stale change set cannot be applied.
 6. Run a fingerprint call (`pointers: {"/fingerprint": "$baseline"}`, `--vars $P3_WORK/baseline.json`). A mismatch means the device is not at baseline: stop.
@@ -10295,7 +10295,7 @@ The `action_count` key and the `rollback_failures` rendering are as the code bui
 - [ ] Fixtures: sanitizer self-test green in CI, `--verify` clean on every committed fixture, pre-push secret gate passed unmodified.
 - [ ] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, `scripts/check-mecmcp-pin.sh` and `scripts/parity-check.sh --phase P1` green; CI green on `main` after the last P3 merge.
 - [ ] Banner removed, README status and table accurate.
-- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (port forwards not listed, deferred; three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5; `confirm_opnsense_change_set` not exercisable in this build, which refuses `confirm_timeout_mins` for rules; update/delete rollback replay not exercised beyond Task 15's create rollback; D2, `/readyz` 401 versus 403, belongs to the P2 branch and is still to be checked live), and what's next (P4).
+- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (port forwards not listed, deferred; three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5; `confirm_opnsense_change_set` not exercisable in this build, which refuses `confirm_timeout_mins` for rules, so it was never called live, not even as a refusal and no confirm window ever opened; `add_device` and `reload_devices` ran live only as read-only refusals, their success paths not exercised; update/delete rollback replay not exercised beyond Task 15's create rollback; D2, `/readyz` 401 versus 403, belongs to the P2 branch and is still to be checked live), and what's next (P4).
 
 ## P4 — Read breadth
 
