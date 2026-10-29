@@ -41,9 +41,11 @@ RUN touch rustopnsmcp/src/main.rs rustopnsmcp-core/src/lib.rs && \
 
 # Directories the nonroot runtime must own. Distroless has no shell to create
 # them, and a named volume mounted over a missing path would be root-owned and
-# unwritable by uid 65532. COPY keeps the mode, and a named volume seeded from
-# the image inherits it, so set the packaging/FILESYSTEM.md modes here and again on the COPY
-# (the destination directory does not always take the source mode).
+# unwritable by uid 65532. A named volume seeded from the image inherits the
+# directory modes, so set the packaging/FILESYSTEM.md modes here. The COPYs
+# below take the parent directories (holding only rustopnsmcp/): copying an
+# empty directory's contents creates the destination 0755 and drops the mode,
+# whereas a copied entry keeps its own.
 RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp && \
     chmod 0750 /image/etc/rustopnsmcp && \
     chmod 0700 /image/var/lib/rustopnsmcp
@@ -59,8 +61,8 @@ USER 65532:65532
 # process via the container runtime.
 
 COPY --from=builder /build/target/release/rustopnsmcp /usr/local/bin/rustopnsmcp
-COPY --from=builder --chown=65532:65532 --chmod=0750 /image/etc/rustopnsmcp /etc/rustopnsmcp
-COPY --from=builder --chown=65532:65532 --chmod=0700 /image/var/lib/rustopnsmcp /var/lib/rustopnsmcp
+COPY --from=builder --chown=65532:65532 /image/etc/ /etc/
+COPY --from=builder --chown=65532:65532 /image/var/lib/ /var/lib/
 
 VOLUME ["/etc/rustopnsmcp", "/var/lib/rustopnsmcp"]
 
