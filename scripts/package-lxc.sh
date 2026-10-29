@@ -9,6 +9,8 @@
 # OPNSMCP_PACKAGE_OUTPUT_DIR     output directory (default: dist).
 # OPNSMCP_RELEASE_STATUS         public | lab-only (default: lab-only).
 set -euo pipefail
+# Archive modes must not depend on the builder's umask (also pinned via tar --mode).
+umask 022
 
 fail() { echo "package-lxc: $*" >&2; exit 1; }
 repo_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -30,7 +32,17 @@ mapfile -t mecmcp_refs < <(grep -oP 'tag = "\K[^"]+' Cargo.toml | sort -u)
 [[ ${#mecmcp_refs[@]} -eq 1 ]] || fail "expected exactly one mecmcp tag, found: ${mecmcp_refs[*]:-none}"
 mecmcp_ref=${mecmcp_refs[0]}
 
+git_commit=$(git rev-parse HEAD)
+# Units, docs, installer and the binary come from the working tree, not HEAD.
+if [[ -n "$(git status --porcelain)" ]]; then
+    [[ "$release_status" != public ]] || fail "working tree is dirty; a public package must be built from a clean checkout"
+    git_commit=${git_commit}-dirty
+fi
 skip_build=${OPNSMCP_PACKAGE_SKIP_BUILD:-0}
+# A prebuilt binary is unrelated to HEAD by construction, so it cannot be public.
+if [[ "$skip_build" == 1 && "$release_status" == public ]]; then
+    fail "OPNSMCP_RELEASE_STATUS=public cannot be combined with OPNSMCP_PACKAGE_SKIP_BUILD=1"
+fi
 if [[ "$skip_build" != 1 ]]; then
     cargo build --release --locked -p rustopnsmcp --bin rustopnsmcp
 fi
@@ -39,7 +51,6 @@ binary=${CARGO_TARGET_DIR:-target}/release/rustopnsmcp
 
 glibc_floor=$(objdump -T "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -Vu | tail -n 1)
 [[ -n "$glibc_floor" ]] || fail "cannot measure the glibc floor of $binary"
-git_commit=$(git rev-parse HEAD)
 source_date_epoch=$(git log -1 --format=%ct)
 if [[ "$skip_build" == 1 ]]; then
     rustc_line="unknown (binary supplied prebuilt via OPNSMCP_PACKAGE_SKIP_BUILD; not compiled by this script)"
@@ -108,7 +119,7 @@ archive=$dist_dir/$archive_name
 # Reproducible: sorted names, no host uid/gid, commit-time mtimes, no atime/ctime.
 (cd "$work" && find "$pkg" -print0 | LC_ALL=C sort -z \
     | tar --create --gzip --file="$archive" --format=posix --sort=name \
-        --owner=0 --group=0 --numeric-owner --mtime="@$source_date_epoch" \
+        --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' --mtime="@$source_date_epoch" \
         --pax-option=delete=atime,delete=ctime --no-recursion --null --files-from=-)
 # From inside the output directory so the filename field is bare.
 (cd "$dist_dir" && sha256sum "$archive_name" >"$archive_name.sha256" && sha256sum -c "$archive_name.sha256")
