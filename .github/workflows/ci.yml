@@ -122,6 +122,15 @@ jobs:
           argv=$(docker inspect "$container_id" --format '{{join .Args "\n"}}')
           docker rm "$container_id" > /dev/null
 
+          # Distroless has no shell, so inspect the image filesystem from the
+          # outside. A named volume seeded from the image inherits these modes.
+          container_id=$(docker create rustopnsmcp:ci)
+          modes=$(docker export "$container_id" | tar -tvf - etc/rustopnsmcp/ var/lib/rustopnsmcp/ | awk '{print $1, $2, $NF}')
+          docker rm "$container_id" > /dev/null
+          echo "$modes"
+          echo "$modes" | grep -qx 'drwxr-x--- 65532/65532 etc/rustopnsmcp/' || { echo "FAIL: /etc/rustopnsmcp is not 0750 65532"; exit 1; }
+          echo "$modes" | grep -qx 'drwx------ 65532/65532 var/lib/rustopnsmcp/' || { echo "FAIL: /var/lib/rustopnsmcp is not 0700 65532"; exit 1; }
+
           for p in /etc/rustopnsmcp/devices.json /var/lib/rustopnsmcp/tokens.json \
                    /var/lib/rustopnsmcp/changeset-state.json /var/lib/rustopnsmcp/audit-hmac.key; do
             echo "$argv" | grep -q -- "$p" || { echo "FAIL: $p missing from argv with --host override"; exit 1; }
@@ -153,6 +162,21 @@ jobs:
           fi
           test "$(sudo stat -c '%a %u' "$state/audit-hmac.key")" = "600 65532"
           test "$(sudo stat -c %s "$state/audit-hmac.key")" = 32
+
+          # A named volume is seeded from the image, so it must come up 0700
+          # and uid 65532 without any host-side chmod.
+          docker volume create rustopnsmcp-ci-state > /dev/null
+          trap 'docker volume rm -f rustopnsmcp-ci-state > /dev/null' EXIT
+          exit_code=0
+          docker run --rm -i -v "$conf:/etc/rustopnsmcp:ro" -v rustopnsmcp-ci-state:/var/lib/rustopnsmcp \
+            rustopnsmcp:ci --transport stdio </dev/null || exit_code=$?
+          if [ "$exit_code" -eq 0 ] || [ "$exit_code" -ge 126 ]; then
+            echo "FAIL: expected a clean non-zero exit, got $exit_code"; exit 1
+          fi
+          volume_dir=$(docker volume inspect rustopnsmcp-ci-state --format '{{.Mountpoint}}')
+          test "$(sudo stat -c '%a %u' "$volume_dir")" = "700 65532" \
+            || { echo "FAIL: seeded volume is $(sudo stat -c '%a %u' "$volume_dir"), want 700 65532"; exit 1; }
+          test "$(sudo stat -c '%a %u' "$volume_dir/audit-hmac.key")" = "600 65532"
 
       - name: Image reports its version and runs as the non-root user
         run: |

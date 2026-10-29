@@ -41,8 +41,12 @@ RUN touch rustopnsmcp/src/main.rs rustopnsmcp-core/src/lib.rs && \
 
 # Directories the nonroot runtime must own. Distroless has no shell to create
 # them, and a named volume mounted over a missing path would be root-owned and
-# unwritable by uid 65532.
-RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp
+# unwritable by uid 65532. COPY keeps the mode, and a named volume seeded from
+# the image inherits it, so set the packaging/FILESYSTEM.md modes here and again on the COPY
+# (the destination directory does not always take the source mode).
+RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp && \
+    chmod 0750 /image/etc/rustopnsmcp && \
+    chmod 0700 /image/var/lib/rustopnsmcp
 
 # Runtime stage: distroless Debian 13 with nonroot user. Pinned to the
 # multi-arch image index digest (same digest rustunifimcp pins for `nonroot`).
@@ -55,8 +59,8 @@ USER 65532:65532
 # process via the container runtime.
 
 COPY --from=builder /build/target/release/rustopnsmcp /usr/local/bin/rustopnsmcp
-COPY --from=builder --chown=65532:65532 /image/etc/rustopnsmcp /etc/rustopnsmcp
-COPY --from=builder --chown=65532:65532 /image/var/lib/rustopnsmcp /var/lib/rustopnsmcp
+COPY --from=builder --chown=65532:65532 --chmod=0750 /image/etc/rustopnsmcp /etc/rustopnsmcp
+COPY --from=builder --chown=65532:65532 --chmod=0700 /image/var/lib/rustopnsmcp /var/lib/rustopnsmcp
 
 VOLUME ["/etc/rustopnsmcp", "/var/lib/rustopnsmcp"]
 
