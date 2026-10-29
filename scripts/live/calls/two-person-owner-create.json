@@ -3,5 +3,5 @@
  {"name":"create alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
    {"operation":"create","resource":"alias","body":{"name":"p3_live_approved","type":"host","content":"192.0.2.30"}}]},
   "expect":"ok","pointers":{"/state":"^planned$","/approver":"^None$"},"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
- {"name":"owner cannot approve","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"error"}
+ {"name":"owner cannot approve","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"error","error_contains":"the creating principal cannot approve its own change set"}
 ]
