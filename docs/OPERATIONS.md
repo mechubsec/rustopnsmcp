@@ -143,10 +143,19 @@ if the guest itself is compromised.
 The stock unit does not write an audit file. To also keep one, add
 `--audit-log-file /var/lib/rustopnsmcp/audit.jsonl` to the override. It is
 written by the service as JSON lines; rotate it with logrotate, which signals
-the service (SIGHUP) so it reopens the file. The package ships a logrotate
-snippet for this (Task 24; this paragraph is to be corrected if the shipped
-snippet differs). The file is also under `/var/lib`, so it is covered by the
-upgrade rules below.
+the service (SIGHUP) so it reopens the file. The package ships
+`packaging/logrotate/rustopnsmcp-audit`; install it as
+`/etc/logrotate.d/rustopnsmcp-audit` (root:root, 0644). It rotates daily or at
+100M, keeps 14 files, compresses with a one-rotation delay, and is `missingok`,
+so it does nothing while no audit file exists. Rotation renames the file (never
+`copytruncate`, which can lose records) and the `postrotate` sends
+`systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service`; look for
+`audit file reopened` in the journal afterwards. Rename-plus-signal and the
+main-process-only signal are proved by `packaging/tests/logrotate.sh` against
+real logrotate and a stub `systemctl`; the server-side reopen is not exercised
+by that test, nor are the `create`/`su` ownership directives (stripped in the
+test because it does not run as root). The file is also under `/var/lib`, so it
+is covered by the upgrade rules below.
 
 ```sh
 journalctl -u rustopnsmcp -n 5 -o cat

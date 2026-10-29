@@ -1,0 +1,29 @@
+# logrotate fragment for the optional rustopnsmcp JSON audit file.
+#
+# Install as /etc/logrotate.d/rustopnsmcp-audit (root:root, 0644). The stock
+# unit logs to journald only; this file matters once an operator adds
+#   --audit-log-file /var/lib/rustopnsmcp/audit.jsonl
+# to their override. It is harmless otherwise (missingok).
+#
+# Rename-mode rotation: the server holds one O_APPEND descriptor and reopens
+# the path on SIGHUP, so rename + signal loses nothing. copytruncate has a
+# race window in which audit events are lost; do not use it. The postrotate
+# is what delivers the signal; without it the renamed file keeps growing and
+# the new audit.jsonl stays empty. The same SIGHUP also reloads the inventory
+# and token store, which is benign: a failed reload keeps the previous one.
+
+/var/lib/rustopnsmcp/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 rustopnsmcp rustopnsmcp
+    su rustopnsmcp rustopnsmcp
+    sharedscripts
+    postrotate
+        systemctl kill --kill-whom=main --signal=HUP rustopnsmcp.service
+    endscript
+}
