@@ -104,7 +104,7 @@ d /etc/rustopnsmcp 0750 root rustopnsmcp -
 d /var/lib/rustopnsmcp 0700 rustopnsmcp rustopnsmcp -
 ```
 
-The installer applies them with:
+The installer copies them to those paths and applies them with:
 
 ```sh
 systemd-sysusers /usr/lib/sysusers.d/rustopnsmcp.conf
@@ -114,4 +114,7 @@ systemd-tmpfiles --create /usr/lib/tmpfiles.d/rustopnsmcp.conf
 The tmpfiles lines set the directories only. Files are created by the
 installer (`tokens.json` as `{"version":1,"tokens":[]}`, `audit-hmac.key`) and
 by the operator (`devices.json`, `credentials.env`), then given the modes in
-the table above. The installer never overwrites an existing state file.
+the table above. The installer also creates a minimal `devices.json`
+(`{"version":1,"devices":{}}`) and a commented `credentials.env` when absent,
+so the service can start; the operator then edits them. It never overwrites an
+existing state or secret file.

@@ -180,18 +180,31 @@ the optional `--audit-log-file` sink described above.
 
 1. Snapshot the guest first (Proxmox: `pct snapshot <vmid> pre-upgrade`). A
    snapshot is the rollback path; the installer has none of its own.
-2. Run the installer from the new release tarball. It validates the package
-   before changing the host.
+2. Run the installer from the new release tarball
+   (`sudo packaging/lxc/install.sh`). It validates the package before changing
+   the host: required files, `BUILD-INFO` keys, `binary_sha256` against the
+   binary, a CycloneDX SBOM, and the package's glibc floor against the host's.
+   Any failure stops it with nothing written.
 3. `systemctl restart rustopnsmcp`. The installer never starts or enables the
    service.
 
 The installer never overwrites `tokens.json`, `changeset-state.json`,
-`devices.json`, `credentials.env` or `audit-hmac.key`. It replaces the unit file
-and says so if the installed one differed from the packaged one; a site
-`override.conf` is untouched, so re-check it against the new stock unit
-(`packaging/tests/unit-contract.sh` does this for the shipped example).
-This section describes the installer planned in Task 26 and is to be corrected
-if the built installer behaves differently.
+`devices.json`, `credentials.env` or `audit-hmac.key`, and refuses (rather than
+follows) a symlink or non-regular file at any of those paths. It always
+replaces the binary and the unit file. If the installed unit differed from the
+packaged one, the old copy is kept beside it as `rustopnsmcp.service.bak-<timestamp>`
+and the installer says so; a site `override.conf` is untouched, so re-check it
+against the new stock unit (`packaging/tests/unit-contract.sh` does this for
+the shipped example). It writes the journald policy as
+`/etc/systemd/journald.conf.d/20-audit-retention.conf` only when that file does
+not exist.
+
+`packaging/tests/installer-idempotence.sh` and
+`packaging/tests/journald-dropin-ordering.sh` prove the above against a staged
+root, including each refusal. They run the installer in test mode, which skips
+the root and Debian checks, apt, `systemd-sysusers`, `systemd-tmpfiles`,
+`chown` and `systemctl`, so ownership, package installation and service
+behaviour are not covered by them and are verified on a real guest.
 
 ```sh
 rustopnsmcp --version
