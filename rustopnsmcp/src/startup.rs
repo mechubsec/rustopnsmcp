@@ -51,21 +51,63 @@ pub fn refuse_unwired_flags(was_supplied: &dyn Fn(&str) -> bool) -> Result<(), S
 /// # Errors
 ///
 /// Returns a message naming the file when it cannot be created, an existing
-/// file is unsafe, or the entropy source cannot be read. A half-written key
-/// is removed.
+/// file is unsafe, or the entropy source cannot be read. The key is built in
+/// a temp file beside `path` and published by hard link, so `path` never holds
+/// a partial key; the temp file is always removed.
 pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
     use std::io::{Read as _, Write as _};
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let mut file = match std::fs::OpenOptions::new()
+    let cannot_create = |error: std::io::Error| {
+        format!(
+            "--audit-hmac-key-file {}: cannot create the key: {error}. The LXC installer \
+             (packaging/lxc/install.sh) creates it; in a container mount a writable state \
+             directory",
+            path.display()
+        )
+    };
+    // 32 key bytes plus 8 for an unpredictable temp-file suffix.
+    let mut entropy = [0u8; 40];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut entropy))
+        .map_err(|error| {
+            format!(
+                "--audit-hmac-key-file {}: cannot read entropy for a generated key: {error}",
+                path.display()
+            )
+        })?;
+    let (key, suffix) = entropy.split_at(32);
+    let suffix: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
+    let file_name = path.file_name().map_or_else(
+        || "audit-hmac.key".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temp = path.with_file_name(format!(".{file_name}.tmp-{}-{suffix}", std::process::id()));
+
+    // The final path must never exist half-written, because an existing key is
+    // never rewritten: build it under a temp name, then publish it with
+    // `hard_link`, which fails rather than replacing whatever is there.
+    let published = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(path)
-    {
-        Ok(file) => file,
+        .open(&temp)
+        .and_then(|mut file| {
+            file.write_all(key)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::hard_link(&temp, path));
+    let _ = std::fs::remove_file(&temp);
+    match published {
+        Ok(()) => {
+            // Best effort: make the new directory entry durable.
+            if let Some(Ok(directory)) = path.parent().map(std::fs::File::open) {
+                let _ = directory.sync_all();
+            }
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return mecmcp_secret::read_hardened_file(path, mecmcp_secret::FileLimits::default())
+            mecmcp_secret::read_hardened_file(path, mecmcp_secret::FileLimits::default())
                 .map(drop)
                 .map_err(|error| {
                     format!(
@@ -73,29 +115,10 @@ pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
                          regular file with `chmod 600` owned by the service user (`chown`)",
                         path.display()
                     )
-                });
+                })
         }
-        Err(error) => {
-            return Err(format!(
-                "--audit-hmac-key-file {}: cannot create the key: {error}. The LXC installer \
-                 (packaging/lxc/install.sh) creates it; in a container mount a writable state \
-                 directory",
-                path.display()
-            ));
-        }
-    };
-    let mut key = [0u8; 32];
-    let written = std::fs::File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut key))
-        .and_then(|()| file.write_all(&key));
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(path);
-        return Err(format!(
-            "--audit-hmac-key-file {}: cannot write a generated key: {error}",
-            path.display()
-        ));
+        Err(error) => Err(cannot_create(error)),
     }
-    Ok(())
 }
 
 /// The audit subscriber configuration from the shared `--audit-*` and
@@ -317,6 +340,26 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let message = ensure_audit_hmac_key(&path).unwrap_err();
         assert!(message.contains("chmod 600"), "{message}");
+    }
+
+    #[test]
+    fn an_empty_temp_named_file_does_not_block_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".audit-hmac.key.tmp-1-0000"), b"").unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        ensure_audit_hmac_key(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn no_temp_file_remains_after_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_audit_hmac_key(&dir.path().join("audit-hmac.key")).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("audit-hmac.key")]);
     }
 
     #[test]
