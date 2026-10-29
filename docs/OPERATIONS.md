@@ -200,7 +200,10 @@ Set up mecfeed-serve first, or OPNsense is refused. Follow the
    to give the firewall, stderr is `basic_sha256: <hex>` for the file. Add the
    client to `clients.json` with `"feeds": ["opnsense-url-table/<kind>"]`, then
    `systemctl restart mecfeed-serve`. A client asking for a feed not in its
-   `feeds` list gets 403.
+   `feeds` list gets 403. The shape of `clients.json` is documented in the
+   linked mecfeedmcp operations guide, which also describes
+   `--allow-anonymous-feeds`, the explicit opt-out to CIDR-only access without
+   authentication.
 
 Then on the firewall:
 

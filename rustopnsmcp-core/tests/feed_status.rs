@@ -142,6 +142,12 @@ fn serve_recording(
                 seen.lock()
                     .expect("seen lock")
                     .push((path.clone(), String::from_utf8_lossy(&body).into_owned()));
+                if routes
+                    .get(&path)
+                    .is_some_and(|fixture| fixture.get("__drop").is_some())
+                {
+                    return; // close without answering: a transport failure
+                }
                 let (status, body) = match routes.get(&path) {
                     Some(fixture) => (
                         fixture
@@ -359,4 +365,48 @@ async fn a_partial_alias_search_is_an_error() {
     );
     let (result, _) = run(map, 50_000).await;
     assert!(matches!(result, Err(OpnsenseError::Malformed(_))));
+}
+
+#[tokio::test]
+async fn an_alias_missing_from_table_size_has_no_count_and_no_etag() {
+    let (row, count, entries) = good_address();
+    let mut map = routes(&[(row, count, entries)]);
+    map.get_mut(ep::ALIASES_TABLE_SIZE).unwrap()["details"]
+        .as_object_mut()
+        .unwrap()
+        .remove("feed_a");
+    let (result, seen) = run(map, 50_000).await;
+    let status = result.unwrap();
+    assert!(status["feeds"][0]["table_count"].is_null());
+    assert!(etag_of(&status, 0).is_null());
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| !path.contains("alias_util"))
+    );
+}
+
+#[tokio::test]
+async fn a_table_listing_short_of_its_total_has_no_etag_and_says_why() {
+    let (row, count, _) = good_address();
+    // total says 5, only the 3 rows the count expects arrive.
+    let mut listing = table(&["2001:db8::1/128", "192.0.2.9", "192.0.2.1/32"]);
+    listing["total"] = json!(5);
+    let (result, _) = run(routes(&[(row, count, listing)]), 50_000).await;
+    let status = result.unwrap();
+    assert!(etag_of(&status, 0).is_null());
+    assert_eq!(
+        status["feeds"][0]["etag_unavailable"],
+        "pf table listing incomplete"
+    );
+}
+
+#[tokio::test]
+async fn a_transport_failure_on_a_table_listing_fails_the_call() {
+    let (row, count, entries) = good_address();
+    let mut map = routes(&[(row, count, entries)]);
+    map.insert(ep::alias_util_list("feed_a"), json!({ "__drop": true }));
+    let (result, _) = run(map, 50_000).await;
+    assert!(matches!(result, Err(OpnsenseError::Http(_))), "{result:?}");
 }

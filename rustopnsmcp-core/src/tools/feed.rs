@@ -76,6 +76,9 @@ impl FeedKind {
 }
 
 /// One subscription: a URL-table alias and one mecfeed URL in its content.
+///
+/// An alias with several URLs yields one entry per matching URL; each entry
+/// carries the whole alias's counts and update times, and a `null` ETag.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FeedSubscription {
     /// Alias name.
@@ -410,7 +413,10 @@ pub async fn feed_status_with_limit(
                             subscription.content_etag =
                                 render_body(subscription.kind, &entries).map(|body| etag_of(&body));
                         }
-                        Ok(_) => {}
+                        Ok(None) => {
+                            subscription.etag_unavailable = Some("pf table listing incomplete");
+                        }
+                        Ok(Some(_)) => {}
                         Err(error) if is_degradable(&error) => {
                             subscription.etag_unavailable = Some("pf table listing failed");
                         }
