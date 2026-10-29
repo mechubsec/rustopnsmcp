@@ -1,16 +1,309 @@
 {
-  "rows": {
-    "wan": {
+  "current": 1,
+  "rowCount": 5,
+  "rows": [
+    {
+      "addr4": "198.51.100.88/24",
+      "addr6": "2001:db8::620:9b4/64",
+      "capabilities": [
+        "vlan_mtu",
+        "vlan_hwfilter",
+        "linkstate",
+        "netmap",
+        "hwstats"
+      ],
+      "config": {
+        "dhcp6-ia-pd-len": "0",
+        "dhcphostname": "",
+        "enable": "1",
+        "gateway": "",
+        "identifier": "wan",
+        "if": "vtnet0",
+        "ipaddr": "dhcp",
+        "ipaddrv6": "dhcp6",
+        "media": "",
+        "mediaopt": "",
+        "mtu": "",
+        "subnet": ""
+      },
+      "description": "desc-571002",
       "device": "vtnet0",
-      "descr": "WAN",
+      "enabled": true,
+      "flags": [
+        "up",
+        "broadcast",
+        "running",
+        "simplex",
+        "multicast",
+        "lower_up"
+      ],
+      "gateways": [
+        "192.0.2.139",
+        "2001:db8::deea:adcd"
+      ],
+      "host-205850.example.org": [
+        "host-576038.example.org"
+      ],
+      "host-208225.example.org": [
+        "192.0.2.139",
+        "2001:db8::deea:adcd"
+      ],
+      "host-867329.example.org": [
+        "192.0.2.139"
+      ],
+      "identifier": "wan",
+      "ipv4": [
+        {
+          "ipaddr": "198.51.100.88/24"
+        }
+      ],
+      "ipv6": [
+        {
+          "ipaddr": "2001:db8::620:9b4/64"
+        },
+        {
+          "ipaddr": "2001:db8::ad2a:4e/64"
+        }
+      ],
+      "is_physical": true,
+      "link_type": "dhcp",
+      "link_typev6": "dhcp6",
+      "macaddr": "02:00:00:00:10:0f",
+      "macaddr_hw": "02:00:00:00:10:0f",
+      "media": "10Gbase-T <full-duplex>",
+      "media_raw": "Ethernet autoselect (10Gbase-T <full-duplex>)",
+      "mtu": "1500",
+      "nd6": {
+        "flags": [
+          "performnud",
+          "accept_rtadv",
+          "auto_linklocal"
+        ]
+      },
+      "options": [
+        "vlan_mtu",
+        "linkstate",
+        "hwstats"
+      ],
+      "routes": [
+        "default",
+        "198.51.100.103/24",
+        "default",
+        "2001:db8::126f:1dc6/64",
+        "2001:db8::f42:2159",
+        "2001:db8::d14d:51c",
+        "2001:db8::2f92:7c63%vtnet0/64"
+      ],
       "status": "up",
-      "ipv4": [{ "ipaddr": "203.0.113.10", "subnetbits": "24" }]
+      "supported_media": [
+        "autoselect"
+      ],
+      "vlan_tag": null
     },
-    "lan": {
+    {
+      "addr4": "203.0.113.182/24",
+      "addr6": "",
+      "capabilities": [
+        "vlan_mtu",
+        "vlan_hwfilter",
+        "linkstate",
+        "netmap",
+        "hwstats"
+      ],
+      "config": {
+        "enable": "1",
+        "gateway": "",
+        "gatewayv6": "",
+        "identifier": "lan",
+        "if": "vtnet1",
+        "ipaddr": "203.0.113.182",
+        "ipaddrv6": "",
+        "media": "",
+        "mediaopt": "",
+        "subnet": "24",
+        "subnetv6": ""
+      },
+      "description": "desc-120073",
       "device": "vtnet1",
-      "descr": "LAN",
+      "enabled": true,
+      "flags": [
+        "up",
+        "broadcast",
+        "running",
+        "simplex",
+        "multicast",
+        "lower_up"
+      ],
+      "gateways": [],
+      "identifier": "lan",
+      "ipv4": [
+        {
+          "ipaddr": "203.0.113.182/24"
+        }
+      ],
+      "is_physical": true,
+      "link_type": "static",
+      "link_typev6": "none",
+      "macaddr": "02:00:00:00:2c:5c",
+      "macaddr_hw": "02:00:00:00:2c:5c",
+      "media": "10Gbase-T <full-duplex>",
+      "media_raw": "Ethernet autoselect (10Gbase-T <full-duplex>)",
+      "mtu": "1500",
+      "nd6": {
+        "flags": [
+          "performnud",
+          "ifdisabled",
+          "auto_linklocal"
+        ]
+      },
+      "options": [
+        "vlan_mtu",
+        "linkstate",
+        "hwstats"
+      ],
+      "routes": [
+        "192.0.2.72/24"
+      ],
       "status": "up",
-      "ipv4": [{ "ipaddr": "198.51.100.1", "subnetbits": "24" }]
+      "supported_media": [
+        "autoselect"
+      ],
+      "vlan_tag": null
+    },
+    {
+      "addr4": "127.0.0.1/8",
+      "addr6": "::1/128",
+      "capabilities": [
+        "rxcsum",
+        "txcsum",
+        "linkstate",
+        "rxcsum_ipv6",
+        "txcsum_ipv6"
+      ],
+      "config": {
+        "descr": "desc-445013",
+        "enable": "1",
+        "identifier": "lo0",
+        "if": "lo0",
+        "internal_dynamic": "1",
+        "ipaddr": "127.0.0.1",
+        "ipaddrv6": "::1",
+        "subnet": "8",
+        "subnetv6": "128",
+        "type": "none",
+        "virtual": "1"
+      },
+      "description": "desc-545841",
+      "device": "lo0",
+      "enabled": true,
+      "flags": [
+        "up",
+        "loopback",
+        "running",
+        "multicast",
+        "lower_up"
+      ],
+      "gateways": [],
+      "groups": [
+        "lo"
+      ],
+      "identifier": "lo0",
+      "ipv4": [
+        {
+          "ipaddr": "127.0.0.1/8"
+        }
+      ],
+      "ipv6": [
+        {
+          "ipaddr": "::1/128"
+        },
+        {
+          "ipaddr": "2001:db8::efdc:3b69/64"
+        }
+      ],
+      "is_physical": false,
+      "link_type": "static",
+      "link_typev6": "static",
+      "macaddr": "02:00:00:00:f5:cc",
+      "mtu": "16384",
+      "nd6": {
+        "flags": [
+          "performnud",
+          "auto_linklocal"
+        ]
+      },
+      "options": [
+        "rxcsum",
+        "txcsum",
+        "linkstate",
+        "rxcsum_ipv6",
+        "txcsum_ipv6"
+      ],
+      "routes": [
+        "203.0.113.182",
+        "127.0.0.1",
+        "198.51.100.88",
+        "::1",
+        "2001:db8::620:9b4",
+        "2001:db8::ad2a:4e%lo0",
+        "2001:db8::2f92:7c63%lo0/64",
+        "2001:db8::efdc:3b69%lo0"
+      ],
+      "status": "up",
+      "supported_media": [],
+      "vlan_tag": null
+    },
+    {
+      "capabilities": [
+        "capabilities="
+      ],
+      "description": "desc-319389",
+      "device": "enc0",
+      "flags": [],
+      "groups": [
+        "enc"
+      ],
+      "identifier": "",
+      "ipv4": [],
+      "ipv6": [],
+      "is_physical": false,
+      "macaddr": "02:00:00:00:f5:cc",
+      "mtu": "1536",
+      "nd6": {
+        "flags": [
+          "performnud",
+          "ifdisabled",
+          "auto_linklocal"
+        ]
+      },
+      "options": [
+        "options="
+      ],
+      "status": "down",
+      "supported_media": []
+    },
+    {
+      "capabilities": [
+        "capabilities="
+      ],
+      "description": "desc-319389",
+      "device": "pflog0",
+      "flags": [],
+      "groups": [
+        "pflog"
+      ],
+      "identifier": "",
+      "ipv4": [],
+      "ipv6": [],
+      "is_physical": false,
+      "macaddr": "02:00:00:00:f5:cc",
+      "mtu": "33152",
+      "options": [
+        "options="
+      ],
+      "status": "down",
+      "supported_media": []
     }
-  }
+  ],
+  "total": 5
 }

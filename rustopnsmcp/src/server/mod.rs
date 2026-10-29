@@ -480,8 +480,8 @@ impl OpnsenseServer {
     #[tool(
         name = "gather_device_facts",
         description = "Fact sheet for one OPNsense device: product name and version, latest \
-                       available version, series, whether an upgrade needs a reboot, uptime, \
-                       CPU and load. Read-only; never probes the update mirror. \
+                       available version, series, whether an upgrade needs a reboot \
+                       (null when the device does not report it), uptime and load. Read-only; never probes the update mirror. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -497,11 +497,7 @@ impl OpnsenseServer {
             &context,
             "gather_device_facts",
             &device,
-            move |client| async move {
-                let system = read::system_status(&client).await?;
-                let firmware = read::firmware_status(&client).await?;
-                Ok::<_, OpnsenseError>(fleet::facts_from(&args.device, &system, &firmware))
-            },
+            move |client| async move { read::device_facts(&client, &args.device).await },
         )
         .await
     }
@@ -619,7 +615,8 @@ impl OpnsenseServer {
 
     #[tool(
         name = "get_opnsense_system_status",
-        description = "OPNsense system status: product version, uptime, CPU and load. \
+        description = "OPNsense system health summary: an overall status code, a message, and any \
+                       subsystem notices. For version and uptime use gather_device_facts. \
                        Output is redacted: values matching known secret patterns (API keys \
                        and secrets, pre-shared keys, private keys, certificates, password \
                        hashes) are replaced before being returned, and device-sourced \
@@ -824,8 +821,11 @@ impl OpnsenseServer {
 
     #[tool(
         name = "list_opnsense_dhcp_leases",
-        description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. ISC \
-                       DHCPv4 only; Kea and Dnsmasq leases are NOT covered. \
+        description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. From the \
+                       enabled DHCPv4 backend (Dnsmasq or Kea; legacy ISC when neither is \
+                       enabled); the result's backend field names it. When both Dnsmasq and \
+                       Kea are enabled, backend is dnsmasq+kea and each backend's page is \
+                       under its own key. DHCPv6 leases are NOT covered. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
                        limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \
@@ -1560,6 +1560,32 @@ mod tests {
             served_names, registered_names,
             "TOOL_NAMES and the tool router must list exactly the same tools"
         );
+    }
+
+    /// The descriptions must not promise what 26.7 does not report.
+    #[test]
+    fn status_and_facts_descriptions_match_what_the_device_reports() {
+        let router = OpnsenseServer::opns_tool_router();
+        let description_of = |name: &str| {
+            let tool = router.list_all().into_iter().find(|t| t.name == name);
+            tool.and_then(|t| t.description.map(|d| d.to_string()))
+                .unwrap_or_default()
+        };
+        let status = description_of("get_opnsense_system_status");
+        for promise in ["uptime, CPU", "product version"] {
+            assert!(!status.contains(promise), "status promises {promise}");
+        }
+        // `load` as a whole word, in any case: "load average" and "load and CPU" must fail too.
+        assert!(
+            !status
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word.eq_ignore_ascii_case("load")),
+            "status promises load: {status}"
+        );
+        assert!(status.contains("health summary"), "{status}");
+        let facts = description_of("gather_device_facts");
+        assert!(!facts.contains("CPU"), "facts still promise CPU");
+        assert!(facts.contains("null when the device does not report it"));
     }
 
     #[test]
