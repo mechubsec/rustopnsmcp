@@ -490,13 +490,17 @@ async fn capturing_a_preimage_of_a_missing_alias_is_refused_as_not_found() {
     )]);
     let client = client_against(routes).await;
 
-    for mutation in [
-        StagedMutation::update(
-            ResourceKind::Alias,
-            uuid,
-            serde_json::json!({"description": "x"}),
+    // Static labels: CodeQL rust/cleartext-logging flags uuid-derived assert messages.
+    for (label, mutation) in [
+        (
+            "update",
+            StagedMutation::update(
+                ResourceKind::Alias,
+                uuid,
+                serde_json::json!({"description": "x"}),
+            ),
         ),
-        StagedMutation::delete(ResourceKind::Alias, uuid),
+        ("delete", StagedMutation::delete(ResourceKind::Alias, uuid)),
     ] {
         let error = Preimage::capture(&client, std::slice::from_ref(&mutation))
             .await
@@ -506,8 +510,7 @@ async fn capturing_a_preimage_of_a_missing_alias_is_refused_as_not_found() {
                 &error,
                 OpnsenseError::Upstream { status: 404, detail } if detail == "not found"
             ),
-            "{}: {error:?}",
-            mutation.preview()
+            "{label}: a missing alias must be refused as 404 not found"
         );
     }
 }
