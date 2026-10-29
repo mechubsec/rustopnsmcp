@@ -70,9 +70,11 @@ real=$({
 # --certificate-identity-regexp --certificate-github-workflow-repository. docker: --rm --restart --read-only --cap-drop
 # --security-opt --tmpfs --env-file --platform (--name is also a real token flag).
 # cargo: --all --all-features --all-targets --check --locked --no-deps
-# --workspace. scripts/parity-check.sh: --junos-src.
+# --workspace. scripts/parity-check.sh: --junos-src. mecfeed-serve:
+# --allow-anonymous-feeds --allow-cidr --clients-file --generate-basic-password --listen.
 foreign=" \
     --kill-whom --signal --now \
+    --allow-anonymous-feeds --allow-cidr --clients-file --generate-basic-password --listen \
     --after-cursor --show-cursor --no-pager \
     --create \
     --cacert \

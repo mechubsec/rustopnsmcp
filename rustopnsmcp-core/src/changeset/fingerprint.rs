@@ -48,7 +48,7 @@ pub async fn config_fingerprint(client: &OpnsenseClient) -> Result<String, Opnse
 /// `total`, so a device that ignores `-1` is caught and not trusted. A
 /// response with no `total` at all is refused rather than treated as
 /// complete, since a partial read could otherwise look complete.
-async fn whole_collection(
+pub(crate) async fn whole_collection(
     client: &OpnsenseClient,
     path: &str,
 ) -> Result<Vec<Value>, OpnsenseError> {
@@ -61,13 +61,13 @@ async fn whole_collection(
     let parsed = SearchResponse::parse(&raw)?;
     let total = parsed.total.ok_or_else(|| {
         OpnsenseError::Malformed(format!(
-            "{path} did not report a total; refusing to fingerprint a listing that cannot be \
+            "{path} did not report a total; refusing to use a listing that cannot be \
              shown complete"
         ))
     })?;
     if usize::try_from(total).ok() != Some(parsed.rows.len()) {
         return Err(OpnsenseError::Malformed(format!(
-            "{path} returned {} of {total} rows; refusing to fingerprint a partial listing",
+            "{path} returned {} of {total} rows; refusing to use a partial listing",
             parsed.rows.len()
         )));
     }

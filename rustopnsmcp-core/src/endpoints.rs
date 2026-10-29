@@ -34,6 +34,19 @@ pub const FIREWALL_RULES_SEARCH: &str = "/api/firewall/filter/search_rule";
 /// Firewall aliases, paginated search. Module `firewall`, controller `alias`.
 pub const ALIASES_SEARCH: &str = "/api/firewall/alias/search_item";
 
+/// Per-alias `pf` table size and last-update time, keyed by alias name under
+/// `details`. Module `firewall`, controller `alias`. Read-only.
+pub const ALIASES_TABLE_SIZE: &str = "/api/firewall/alias/getTableSize";
+
+/// The live `pf` table entries of one alias. Module `firewall`, controller
+/// `alias_util`; `listAction($alias)` pages like `search_*` and treats
+/// `rowCount: -1` as "all rows". `alias` must already have passed
+/// `crate::tools::feed::validate_alias_name`, since it is interpolated.
+#[must_use]
+pub fn alias_util_list(alias: &str) -> String {
+    format!("/api/firewall/alias_util/list/{alias}")
+}
+
 /// Create a firewall alias. Module `firewall`, controller `alias`.
 ///
 /// Persists to `config.xml` immediately but does not take effect in the live

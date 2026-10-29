@@ -179,6 +179,66 @@ the journal as JSON on stderr, so the journal mixes both; `MESSAGE=audit`
 selects only the per-call records. For one JSON record per line in a file, use
 the optional `--audit-log-file` sink described above.
 
+## Subscribing to a mecfeedmcp feed
+
+A subscription is a one-time URL-table alias that a human creates in the
+OPNsense web UI. It is not created through this server:
+`rustopnsmcp-core/src/changeset/validate.rs` refuses `url` and `urltable` alias
+types by design, because such an alias makes the firewall fetch a remote list
+"because a model chose this type, not because a human approved a specific URL".
+Issue #51 tracks whether change sets should govern it.
+
+Set up mecfeed-serve first, or OPNsense is refused. Follow the
+[mecfeedmcp operations guide](https://github.com/mechubsec/mecfeedmcp/blob/main/docs/operations.md):
+
+1. Let the firewall reach serve. `mecfeed-serve` matches its client allowlist
+   against the TCP peer address, and the default is loopback only, so pass
+   `--allow-cidr` with the firewall's address (and `--listen 0.0.0.0:8443`).
+2. Add a Basic client. Authentication is required with the stock packaging:
+   serve needs `--clients-file`, and a request without valid credentials gets
+   401. Run `mecfeed-serve --generate-basic-password`: stdout is the password
+   to give the firewall, stderr is `basic_sha256: <hex>` for the file. Add the
+   client to `clients.json` with `"feeds": ["opnsense-url-table/<kind>"]`, then
+   `systemctl restart mecfeed-serve`. A client asking for a feed not in its
+   `feeds` list gets 403. The shape of `clients.json` is documented in the
+   linked mecfeedmcp operations guide, which also describes
+   `--allow-anonymous-feeds`, the explicit opt-out to CIDR-only access without
+   authentication.
+
+Then on the firewall:
+
+3. If serve's certificate is from a private CA, first import that CA in
+   System > Trust > Authorities. Otherwise the URL-table download fails.
+4. In Firewall > Aliases, add an alias of type "URL Table (IPs)".
+5. Set the URL to `https://<serve host>:8443/feeds/opnsense-url-table/<kind>`,
+   where `<kind>` is `address`, `prefix` or `domain`.
+6. Set the refresh frequency and Basic authentication with the mecfeed-serve
+   client's name (the `clients.json` `name`) and the generated password.
+
+Observe it with `get_opnsense_feed_status`. It is read-only and lists each
+URL-table alias whose URL path is exactly one of those three:
+
+```json
+{"feeds": [{"alias": "mecfeed_blocklist", "enabled": true,
+  "url": "https://feeds.example.org:8443/feeds/opnsense-url-table/address",
+  "kind": "address", "update_frequency_days": 1, "auth": "Basic",
+  "current_items": 3, "last_updated": "2026-10-29 01:02:03",
+  "table_count": 3, "content_etag": "\"sha256-...\""}]}
+```
+
+`content_etag` is mecfeed-serve's ETag rebuilt from the alias's live pf table;
+equal to the ETag serve sends means the firewall holds the whole document. It is
+`null` when that cannot be known exactly: a `domain` feed (pf holds resolved
+addresses), a table that is not loaded, an entry count that differs from
+`table_count`, more than 50,000 entries, or several URLs in one alias. Username
+and password are never returned. The reported `url` is normalised as the `url`
+crate renders it, so it can differ textually from the configured string. For an
+alias with several URLs, each URL is its own entry carrying the whole alias's
+counts and a `null` `content_etag`. If one alias's pf table cannot be listed,
+only that entry's `content_etag` is `null` and it carries `etag_unavailable`.
+OPNsense logs a failed download to syslog only,
+so no fetch error is reported.
+
 ## Upgrading
 
 1. Snapshot the guest first (Proxmox: `pct snapshot <vmid> pre-upgrade`). A

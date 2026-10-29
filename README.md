@@ -51,7 +51,7 @@ Limits, stated plainly:
 | Group | Tools |
 |---|---|
 | Fleet | `get_device_list`, `gather_device_facts`, `opnsmcp_status`, `add_device`, `reload_devices` |
-| Reads | `get_opnsense_system_status`, `get_opnsense_firmware_status`, `list_opnsense_interfaces`, `list_opnsense_firewall_rules`, `list_opnsense_aliases`, `list_opnsense_nat_rules`, `list_opnsense_routes`, `list_opnsense_gateways`, `list_opnsense_dhcp_leases` |
+| Reads | `get_opnsense_system_status`, `get_opnsense_firmware_status`, `list_opnsense_interfaces`, `list_opnsense_firewall_rules`, `list_opnsense_aliases`, `get_opnsense_feed_status`, `list_opnsense_nat_rules`, `list_opnsense_routes`, `list_opnsense_gateways`, `list_opnsense_dhcp_leases` |
 | Change control | `get_opnsense_config_fingerprint`, `create_opnsense_change_set`, `approve_opnsense_change_set`, `apply_opnsense_change_set`, `confirm_opnsense_change_set`, `cancel_opnsense_change_set`, `get_opnsense_change_set_status`, `list_opnsense_change_sets` |
 
 Design and scope: [mecmcp#425](https://github.com/mechubsec/mecmcp/issues/425).
