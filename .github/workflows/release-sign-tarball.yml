@@ -4,8 +4,8 @@ name: Sign release tarball
 # checksum, and signs it keyless via mecmcp's reusable workflow. Triggered by
 # `release: published` (only a maintainer publishes a release, so this never
 # fires from a PR or an unreviewed tag). workflow_dispatch backfills a release
-# whose own run did not attach the tarball; it refuses a tag that already has
-# a signature bundle, so signed assets are never replaced.
+# whose own run did not attach the tarball. Every run refuses a tag that
+# already has a signature bundle, so signed assets are never replaced.
 on:
   release:
     types: [published]
@@ -16,6 +16,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: release-sign-tarball-${{ github.event.inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
 jobs:
   resolve-tag:
     name: Verify signed published tag
@@ -25,6 +29,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       tag: ${{ steps.verify.outputs.tag }}
+      commit: ${{ steps.verify.outputs.commit }}
     steps:
       - name: Verify tag is annotated, GitHub-verified, and published
         id: verify
@@ -52,13 +57,21 @@ jobs:
           if [[ "$(jq -r '.draft' <<<"$release_json")" != "false" ]]; then
             echo "::error::$TAG has a draft release; only a published release is built and signed."; exit 1
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            bundles=$(jq -r '[.assets[].name | select(endswith(".tar.gz.cosign.bundle"))] | length' <<<"$release_json")
-            if [[ "$bundles" != "0" ]]; then
-              echo "::error::$TAG already has a signed tarball; backfill does not replace signed assets."; exit 1
-            fi
+          # Every run, release-triggered reruns included: a rerun would replace
+          # the tarball while the old bundle stays, leaving an invalid signature
+          # on new bytes.
+          bundles=$(jq -r '[.assets[].name | select(endswith(".tar.gz.cosign.bundle"))] | length' <<<"$release_json")
+          if [[ "$bundles" != "0" ]]; then
+            echo "::error::$TAG already has a signed tarball; signed assets are never replaced."; exit 1
+          fi
+          # Peel the verified tag object to the commit it signs; build that
+          # SHA, not the movable tag name.
+          commit=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq 'select(.object.type == "commit") | .object.sha')
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::$TAG does not point directly at a commit."; exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
   build-tarball:
     name: Build release tarball
@@ -71,7 +84,7 @@ jobs:
       - name: Check out tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.resolve-tag.outputs.tag }}
+          ref: ${{ needs.resolve-tag.outputs.commit }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master

@@ -43,7 +43,7 @@ jobs:
           sudo install -m 0755 "${trivy_dir}/trivy" /usr/local/bin/trivy
 
       - name: trivy fs (dependency and config scan)
-        run: trivy fs --config trivy.yaml --exit-code 1 --severity HIGH,CRITICAL .
+        run: trivy fs --config trivy.yaml --scanners vuln,misconfig --exit-code 1 --severity HIGH,CRITICAL .
 
       - name: Build image for scanning
         run: docker build -t rustopnsmcp:ci .
