@@ -10,6 +10,10 @@ set -euo pipefail
 action="${1:?check|start|stop|svc|reset-state|purge-credentials|vmid}"; name="${2:?rig name}"
 case "$name" in test-twoperson-opns|test-labmode-opns) ;; *) echo "not a P3 rig: $name" >&2; exit 2 ;; esac
 : "${RIG_PVE:?}"
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/live/rig-lib.sh
+. "$here/rig-lib.sh"
+require_match RIG_PVE "$RIG_PVE" "$alias_re"
 # Resolve the name to a guest and its tags every time; ids get recycled.
 info=$(ssh "$RIG_PVE" pvesh get /cluster/resources --type vm --output-format json | NAME="$name" python3 -I -c '
 import json, os, sys
@@ -22,6 +26,7 @@ if guest.get("type") != "lxc" or "protected" in tags or "disposable" not in tags
     sys.exit("refusing: %s must be a disposable, unprotected LXC (tags: %s)" % (guest["name"], ";".join(tags)))
 print(guest["vmid"], guest["node"], guest["status"])')
 read -r vmid node status <<<"$info"
+require_match "guest id" "$vmid" '^[0-9]{1,10}$'
 [ "$node" = "$(ssh "$RIG_PVE" hostname -s)" ] || { echo "$name is on $node, not on the node $RIG_PVE reaches" >&2; exit 1; }
 echo "$name: node $node, $status, tags include disposable and not protected" >&2
 inrig() { ssh "$RIG_PVE" pct exec "$vmid" -- "$@"; }

@@ -2,6 +2,8 @@
 # Replaces the packaged ExecStart: plain HTTP for a throwaway test rig, no TLS, the inventory read-only.
 # An off-loopback bind needs --allowed-host and --allowed-origin (mecmcp-runtime refuses startup without
 # them); an origin is scheme://authority with no path.
+# The audit flags are deliberately restated: resetting ExecStart drops every flag of the packaged unit. The HMAC
+# redaction flags are left out on purpose (no key on a rig; P2's dry run covers the full packaged baseline).
 [Service]
 ExecStart=
 ExecStart=/usr/local/bin/rustopnsmcp \
@@ -12,5 +14,6 @@ ExecStart=/usr/local/bin/rustopnsmcp \
     --allowed-host @RIG_IP@ --allowed-host @RIG_IP@:30037 \
     --allowed-host @RIG_NAME@ --allowed-host @RIG_NAME@:30037 \
     --allowed-origin http://@RIG_IP@:30037 --allowed-origin http://@RIG_NAME@:30037 \
+    --audit-format json --audit-log-file /var/lib/rustopnsmcp/audit.jsonl --audit-journald \
     --inventory-readonly @LAB_MODE@
 EnvironmentFile=

@@ -22,4 +22,9 @@ case "$json" in *CANARY*) echo "FAIL: credential in devices.json"; exit 1 ;; esa
 [ "$(printf '%s' "$json" | python3 -I -c 'import json,sys; d=json.load(sys.stdin)["devices"]["opnsense-lab"]; print(d["endpoint"], d["api_key_file"])')" \
   = "https://192.0.2.1 /etc/rustopnsmcp/credentials/api-key" ] || { echo "FAIL: devices.json shape"; exit 1; }
 if printf 'http://192.0.2.1' | python3 -I "$devices" 2>/dev/null; then echo "FAIL: http endpoint accepted"; exit 1; fi
+# A syntax error in the env file must not echo any fragment of it, and must emit nothing.
+printf 'OPNSENSE_API_KEY=CANARY-KEY )\n' > "$work/broken"
+if LAB_ENV_FILE="$work/broken" bash "$emit" key >"$work/out" 2>"$work/err"; then echo "FAIL: broken env file accepted"; exit 1; fi
+if grep -q CANARY "$work/out" "$work/err"; then echo "FAIL: broken env file leaked a fragment"; exit 1; fi
+[ ! -s "$work/out" ] || { echo "FAIL: output despite a broken env file"; exit 1; }
 echo "emit-credential env isolation: PASS"
