@@ -70,3 +70,5 @@ Licensed under [MIT](LICENSE).
 - [Audit records](docs/AUDIT.md): fields, device pseudonyms, key custody, evidence pipeline flags.
 - [Metrics](docs/METRICS.md): the `/metrics` endpoint and the series it returns.
 - [Threat model](docs/THREAT-MODEL.md): assets, trust boundaries, controls and limits.
+- [Changelog](CHANGELOG.md): what has changed, under Unreleased until the first release.
+- [Contributing](CONTRIBUTING.md): the gates a change must pass and the public-repo rules.

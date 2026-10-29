@@ -69,6 +69,8 @@ real=$({
 # pct: --features. cosign: --bundle --certificate-oidc-issuer
 # --certificate-identity-regexp. docker: --rm --restart --read-only --cap-drop
 # --security-opt --tmpfs --env-file --platform (--name is also a real token flag).
+# cargo: --all --all-features --all-targets --check --locked --no-deps
+# --workspace. scripts/parity-check.sh: --junos-src.
 foreign=" \
     --kill-whom --signal --now \
     --after-cursor --show-cursor --no-pager \
@@ -77,6 +79,8 @@ foreign=" \
     --features \
     --bundle --certificate-oidc-issuer --certificate-identity-regexp \
     --rm --restart --read-only --cap-drop --security-opt --tmpfs --env-file --platform \
+    --all --all-features --all-targets --check --locked --no-deps --workspace \
+    --junos-src \
 "
 while IFS= read -r flag; do
     if [[ "$flag" == *'*' ]]; then
