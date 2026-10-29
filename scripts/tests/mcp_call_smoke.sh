@@ -18,7 +18,7 @@ import http.server, json, ssl
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # the entity-escaped characters in "note" are what the client must unescape
         failing = "firmware" not in self.path  # every other path is a device error carrying a canary
-        body = b"DEVICE-ERROR-CANARY" if failing else json.dumps({"product_version": "26.7", "note": "a<b & c>d"}).encode()
+        body = b"DEVICE-ERROR-CANARY" if failing else json.dumps({"product_version": "26.7", "note": "a<b & c>d", "rows": [{"uuid": "ROWUUID"}]}).encode()
         self.send_response(500 if failing else 200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -48,6 +48,24 @@ cat > mismatch.json <<'JSON'
 [{"name":"saved-value mismatch","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},
   "expect":"ok","pointers":{"/note":"$canary"}}]
 JSON
+cat > guard.json <<'JSON'
+[{"name":"guard fails","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"error"},
+ {"name":"later call","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok"}]
+JSON
+cat > saves.json <<'JSON'
+[{"name":"save through array","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "save":{"uuid":"/rows/0/uuid"}},
+ {"name":"saved value used","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/rows/0/uuid":"$uuid"}}]
+JSON
+cat > unresolved.json <<'JSON'
+[{"name":"unresolved save","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "save":{"gone":"/rows/9/uuid"}}]
+JSON
+cat > undefined.json <<'JSON'
+[{"name":"undefined variable","tool":"get_opnsense_firmware_status","arguments":{"device":"stub"},"expect":"ok",
+  "pointers":{"/nothing":"$never_saved"}}]
+JSON
 printf '{"canary":"SAVEDVALUECANARY"}' > vars.json
 cd - >/dev/null
 client=(python3 -I scripts/live/mcp_call.py)
@@ -61,3 +79,20 @@ mismatch=$("${client[@]}" "$work/mismatch.json" --vars "$work/vars.json" "${serv
 printf '%s\n' "$mismatch"
 printf '%s' "$mismatch" | grep -q '^FAIL'
 if printf '%s' "$mismatch" | grep -q 'SAVEDVALUECANARY'; then echo 'saved value leaked'; exit 1; fi
+# Stop at the first FAIL by default; --keep-going runs on.
+guard=$("${client[@]}" "$work/guard.json" "${server[@]}") || true
+printf '%s\n' "$guard"
+printf '%s' "$guard" | grep -q '^ABORT: stopping after guard fails; 1 later call(s) not run'
+if printf '%s' "$guard" | grep -q 'later call  '; then echo 'a call ran after a FAIL'; exit 1; fi
+going=$("${client[@]}" --keep-going "$work/guard.json" "${server[@]}") || true
+printf '%s' "$going" | grep -q '^PASS later call'
+# save and pointers traverse array indexes; an unresolved save or an undefined variable is a FAIL.
+saves=$("${client[@]}" "$work/saves.json" "${server[@]}")
+printf '%s\n' "$saves"
+[ "$(printf '%s\n' "$saves" | grep -c '^PASS')" = 2 ]
+unresolved=$("${client[@]}" "$work/unresolved.json" "${server[@]}") || true
+printf '%s' "$unresolved" | grep -q '^FAIL unresolved save.*save gone: pointer /rows/9/uuid unresolved'
+undefined=$("${client[@]}" "$work/undefined.json" "${server[@]}") || true
+# shellcheck disable=SC2016  # the $ is literal
+printf '%s' "$undefined" | grep -q '^FAIL undefined variable.*unknown variable \$never_saved'
+if printf '%s' "$saves$unresolved$undefined" | grep -q 'ROWUUID'; then echo 'device value leaked'; exit 1; fi

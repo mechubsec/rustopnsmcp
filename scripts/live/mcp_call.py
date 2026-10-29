@@ -3,6 +3,7 @@
 
   mcp_call.py CALLS.json --stdio -- /path/to/rustopnsmcp [server flags]
   mcp_call.py CALLS.json --url http://127.0.0.1:PORT/mcp --token-env VAR
+  stops at the first FAIL unless --keep-going is given
   add  --vars FILE  to preload saved variables and  --save-vars FILE  to keep them for the next run
 
 Never prints values, only key names, types and counts, so output can be pasted
@@ -104,6 +105,19 @@ class Http:
         pass
 
 
+def resolve(payload, pointer):
+    """Follow a /json/pointer through dicts and list indexes; return (found, node)."""
+    node = payload
+    for part in [p for p in pointer.split("/") if p]:
+        if isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        elif isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return False, None
+    return True, node
+
+
 def substitute(value, saved):
     if isinstance(value, str) and value.startswith("$") and value[1:] in saved:
         return saved[value[1:]]
@@ -121,6 +135,7 @@ def main():
     parser.add_argument("--url")
     parser.add_argument("--token-env")
     parser.add_argument("--stderr", help="file for the server's stderr (stdio only); default discards it")
+    parser.add_argument("--keep-going", action="store_true", help="run every call even after a FAIL (read-only runs)")
     parser.add_argument("--vars")
     parser.add_argument("--save-vars")
     parser.add_argument("server", nargs="*")
@@ -131,7 +146,8 @@ def main():
     client.rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, want_reply=False)
     saved = json.load(open(args.vars)) if args.vars else {}
     failures = 0
-    for index, call in enumerate(json.load(open(args.calls)), start=1):
+    calls = json.load(open(args.calls))
+    for index, call in enumerate(calls, start=1):
         reply = client.rpc({"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {
             "name": call["tool"], "arguments": substitute(call.get("arguments", {}), saved)}})
         result = reply.get("result") or {}
@@ -145,21 +161,22 @@ def main():
             if not isinstance(payload, dict) or key not in payload:
                 problems.append("missing key " + key)
         for pointer, pattern in call.get("pointers", {}).items():
-            node = payload
-            for part in [p for p in pointer.split("/") if p]:
-                node = node[int(part)] if isinstance(node, list) and part.isdigit() and int(part) < len(node) else (
-                    node.get(part) if isinstance(node, dict) else None)
+            _, node = resolve(payload, pointer)
             shown_pattern = pattern  # never echo a saved value: it may come from the device
             if pattern.startswith("$"):  # "$name": must equal a saved variable exactly
-                pattern = "^" + re.escape(str(saved.get(pattern[1:]))) + "$"
+                if pattern[1:] not in saved:
+                    problems.append("unknown variable " + pattern)
+                    continue
+                pattern = "^" + re.escape(str(saved[pattern[1:]])) + "$"
             if not re.search(pattern, str(node)):
                 problems.append("pointer %s does not match %s" % (pointer, shown_pattern))
         if "error_contains" in call and call["error_contains"] not in text:
             problems.append("error text lacks %r" % call["error_contains"])
         for variable, pointer in call.get("save", {}).items():
-            node = payload
-            for part in [p for p in pointer.split("/") if p]:
-                node = node.get(part) if isinstance(node, dict) else None
+            found, node = resolve(payload, pointer)
+            if not found:
+                problems.append("save %s: pointer %s unresolved" % (variable, pointer))
+                continue
             saved[variable] = node
         failures += bool(problems)
         shown = {name: saved.get(name) for name in call.get("show", [])}  # only for non-secret ids and fingerprints
@@ -167,6 +184,9 @@ def main():
         print("%s %-34s %s%s" % ("FAIL" if problems else "PASS", call["name"],
                                  "[error] " if is_error else "", detail), *("<- " + p for p in problems),
               *(["shown " + json.dumps(shown)] if shown else []))
+        if problems and not args.keep_going:  # later calls may act on state this one was guarding
+            print("ABORT: stopping after %s; %d later call(s) not run" % (call["name"], len(calls) - index))
+            break
     if args.save_vars:
         fd = os.open(args.save_vars, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as handle:
