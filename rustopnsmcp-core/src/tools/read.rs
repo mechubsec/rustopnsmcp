@@ -474,49 +474,67 @@ async fn backend_enabled(
     }
 }
 
-/// Pick the enabled backend: Dnsmasq or Kea by their settings, else legacy ISC.
-async fn dhcp_backend(client: &OpnsenseClient) -> Result<DhcpBackend, OpnsenseError> {
+/// The enabled backends: Dnsmasq and/or Kea by their settings, else legacy ISC.
+///
+/// Both can run at once (on different interfaces), so both are returned.
+async fn dhcp_backends(client: &OpnsenseClient) -> Result<Vec<DhcpBackend>, OpnsenseError> {
     let dnsmasq =
         backend_enabled(client, endpoints::DNSMASQ_SETTINGS_GET, "/dnsmasq/enable").await?;
     let kea = backend_enabled(client, endpoints::KEA_DHCPV4_GET, "/dhcpv4/general/enabled").await?;
-    match (dnsmasq, kea) {
-        (true, true) => Err(OpnsenseError::Config(
-            "both Dnsmasq and Kea DHCPv4 are enabled; listing one would hide the other's leases"
-                .to_owned(),
-        )),
-        (true, false) => Ok(DhcpBackend::Dnsmasq),
-        (false, true) => Ok(DhcpBackend::Kea),
-        (false, false) => Ok(DhcpBackend::Isc),
+    let mut enabled = Vec::new();
+    if dnsmasq {
+        enabled.push(DhcpBackend::Dnsmasq);
     }
+    if kea {
+        enabled.push(DhcpBackend::Kea);
+    }
+    if enabled.is_empty() {
+        enabled.push(DhcpBackend::Isc);
+    }
+    Ok(enabled)
 }
 
-/// `list_opnsense_dhcp_leases`: DHCPv4 leases from the enabled backend, one page.
+/// `list_opnsense_dhcp_leases`: DHCPv4 leases from the enabled backend(s), one page each.
 ///
-/// The result's `backend` field says which service answered.
+/// The result's `backend` field says which service answered. When Dnsmasq and
+/// Kea are both enabled, `backend` is `"dnsmasq+kea"` and each backend's page
+/// sits under its own key.
 ///
 /// # Errors
-/// As [`list_firewall_rules`], and [`OpnsenseError::Config`] when two backends are
-/// enabled or none is (Dnsmasq and Kea off and the legacy ISC endpoint absent).
+/// As [`list_firewall_rules`], and [`OpnsenseError::Config`] when no backend is
+/// enabled (Dnsmasq and Kea off and the legacy ISC endpoint absent).
 pub async fn list_dhcp_leases(
     client: &OpnsenseClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, OpnsenseError> {
     let page = page_request(args)?;
-    let backend = dhcp_backend(client).await?;
-    let found = match search_page(client, backend.leases_path(), args, &page).await {
-        Err(OpnsenseError::Upstream { status: 404, .. }) if backend == DhcpBackend::Isc => {
-            return Err(OpnsenseError::Config(
-                "no supported DHCP backend is enabled (checked Dnsmasq, Kea and legacy ISC)"
-                    .to_owned(),
-            ));
-        }
-        other => other?,
-    };
-    let mut result = to_json(&found)?;
-    if let Some(object) = result.as_object_mut() {
-        object.insert("backend".to_owned(), backend.label().into());
+    let backends = dhcp_backends(client).await?;
+    let mut pages = Vec::new();
+    for backend in &backends {
+        let found = match search_page(client, backend.leases_path(), args, &page).await {
+            Err(OpnsenseError::Upstream { status: 404, .. }) if *backend == DhcpBackend::Isc => {
+                return Err(OpnsenseError::Config(
+                    "no supported DHCP backend is enabled (checked Dnsmasq, Kea and legacy ISC)"
+                        .to_owned(),
+                ));
+            }
+            other => other?,
+        };
+        pages.push(to_json(&found)?);
     }
-    Ok(result)
+    if let [only] = backends.as_slice() {
+        let mut result = pages.remove(0);
+        if let Some(object) = result.as_object_mut() {
+            object.insert("backend".to_owned(), only.label().into());
+        }
+        return Ok(result);
+    }
+    let mut result = serde_json::Map::new();
+    result.insert("backend".to_owned(), "dnsmasq+kea".into());
+    for (backend, found) in backends.iter().zip(pages) {
+        result.insert(backend.label().to_owned(), found);
+    }
+    Ok(serde_json::Value::Object(result))
 }
 
 /// `list_opnsense_nat_rules`: outbound and 1:1 NAT rules, one page each.

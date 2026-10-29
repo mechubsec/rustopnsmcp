@@ -825,9 +825,10 @@ impl OpnsenseServer {
     #[tool(
         name = "list_opnsense_dhcp_leases",
         description = "OPNsense DHCPv4 leases, optionally filtered by search_phrase. From the \
-                       enabled DHCPv4 backend (Dnsmasq or Kea; legacy ISC only on devices that \
-                       have neither); the result's backend field names it. DHCPv6 leases are \
-                       NOT covered. \
+                       enabled DHCPv4 backend (Dnsmasq or Kea; legacy ISC when neither is \
+                       enabled); the result's backend field names it. When both Dnsmasq and \
+                       Kea are enabled, backend is dnsmasq+kea and each backend's page is \
+                       under its own key. DHCPv6 leases are NOT covered. \
                        One page per call: limit (1-1000, default 200), offset (a multiple of \
                        limit), and max_bytes (1024-507904) bound the result; next_offset is \
                        null on the last page. \

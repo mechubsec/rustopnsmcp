@@ -98,8 +98,13 @@ fn serve_fixtures(
                 let response = match routes.get(&path) {
                     Some(fixture) => {
                         let body = fixture.to_string();
+                        // A fixture of {"__status": N} makes the mock answer with that status.
+                        let status = fixture
+                            .get("__status")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(200);
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
                             body
                         )
@@ -511,11 +516,33 @@ async fn dhcp_leases_come_from_kea_when_it_is_the_enabled_backend() {
 }
 
 #[tokio::test]
-async fn two_enabled_dhcp_backends_are_refused_not_silently_narrowed() {
-    let error = dhcp_backend_for(Some("1"), Some("1"), true)
+async fn two_enabled_dhcp_backends_both_return_their_pages() {
+    let leases = dhcp_backend_for(Some("1"), Some("1"), true)
         .await
-        .expect_err("both enabled");
-    assert!(error.to_string().contains("both"), "{error}");
+        .expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq+kea");
+    assert_eq!(leases["dnsmasq"]["rows"][0]["address"], "192.0.2.50");
+    assert_eq!(leases["kea"]["rows"].as_array().expect("kea rows").len(), 0);
+    assert_eq!(leases["dnsmasq"]["total"], 1);
+}
+
+#[tokio::test]
+async fn a_failing_settings_probe_is_an_error_not_a_fallthrough_to_isc() {
+    use rustopnsmcp_core::endpoints as ep;
+    for status in [401, 500] {
+        for path in [ep::DNSMASQ_SETTINGS_GET, ep::KEA_DHCPV4_GET] {
+            let mut routes = dhcp_routes(None, None, true);
+            routes.insert(path.to_owned(), serde_json::json!({ "__status": status }));
+            let client = client_against(routes).await;
+            let error = read::list_dhcp_leases(&client, &no_filter())
+                .await
+                .expect_err("probe failure must surface");
+            assert!(
+                error.to_string().contains(&status.to_string()),
+                "{path} {error}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
