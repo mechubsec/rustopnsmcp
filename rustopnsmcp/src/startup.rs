@@ -66,6 +66,23 @@ pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
             path.display()
         )
     };
+    let validate_existing = || {
+        mecmcp_secret::read_hardened_file(path, mecmcp_secret::FileLimits::default())
+            .map(drop)
+            .map_err(|error| {
+                format!(
+                    "--audit-hmac-key-file {}: existing key is unsafe: {error}. Make it a \
+                     regular file with `chmod 600` owned by the service user (`chown`)",
+                    path.display()
+                )
+            })
+    };
+    // Check first: the packaged unit has a read-only /etc, where even the
+    // temp file below could not be created for a valid installer-made key.
+    // A dangling symlink counts as present, and the validation refuses it.
+    if std::fs::symlink_metadata(path).is_ok() {
+        return validate_existing();
+    }
     // 32 key bytes plus 8 for an unpredictable temp-file suffix.
     let mut entropy = [0u8; 40];
     std::fs::File::open("/dev/urandom")
@@ -106,17 +123,7 @@ pub fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), String> {
             }
             Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            mecmcp_secret::read_hardened_file(path, mecmcp_secret::FileLimits::default())
-                .map(drop)
-                .map_err(|error| {
-                    format!(
-                        "--audit-hmac-key-file {}: existing key is unsafe: {error}. Make it a \
-                         regular file with `chmod 600` owned by the service user (`chown`)",
-                        path.display()
-                    )
-                })
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => validate_existing(),
         Err(error) => Err(cannot_create(error)),
     }
 }
@@ -360,6 +367,30 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from("audit-hmac.key")]);
+    }
+
+    #[test]
+    fn an_existing_key_in_a_read_only_directory_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        std::fs::write(&path, [7u8; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let probe = std::fs::File::create(dir.path().join("probe"));
+        let outcome = if probe.is_ok() {
+            eprintln!("skipped: directory mode does not bind (running as root)");
+            None
+        } else {
+            Some(ensure_audit_hmac_key(&path))
+        };
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(outcome) = outcome else { return };
+        outcome.unwrap();
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "temp file left"
+        );
     }
 
     #[test]
