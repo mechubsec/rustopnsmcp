@@ -176,6 +176,26 @@ impl OpnsenseServer {
         Ok(count)
     }
 
+    /// `/readyz` probe: `Err` while any device's most recent reply was a 401.
+    ///
+    /// The reason is a fixed string because `/readyz` is unauthenticated: no
+    /// device name or endpoint may reach a caller. A SIGHUP that rebuilds the
+    /// clients resets the state to healthy until the next call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the static reason when a device refuses the key or the client
+    /// table is unavailable.
+    pub fn auth_health_check(&self) -> Result<(), &'static str> {
+        let Ok(clients) = self.clients.read() else {
+            return Err("OPNsense client table unavailable");
+        };
+        if clients.values().all(OpnsenseClient::is_auth_healthy) {
+            return Ok(());
+        }
+        Err("OPNsense authentication failed for one or more devices")
+    }
+
     /// Get a reference to the client for a device.
     fn client_for(&self, device: &str) -> Result<OpnsenseClient, Box<CallToolResult>> {
         let clients = self

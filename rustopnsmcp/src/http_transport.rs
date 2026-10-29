@@ -9,8 +9,8 @@ use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant, TokenStoreFile};
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, HostOriginPolicy,
     HttpTransportBuildError, HttpTransportConfig, InsecureBindAcknowledgement, LimitsConfig,
-    MalformedArgumentsPolicy, NoAuthAcknowledgement, ServePlan, TargetField, ToolScopePreflight,
-    TransportIdentity, build_streamable_http_router,
+    MalformedArgumentsPolicy, NoAuthAcknowledgement, ReadinessCheck, ServePlan, TargetField,
+    ToolScopePreflight, TransportIdentity, build_streamable_http_router,
 };
 use rustopnsmcp_core::tools::WRITE_TOOLS;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ pub fn build_http_router(
     allow_insecure_bind: bool,
     shutdown: CancellationToken,
 ) -> Result<ServePlan, HttpTransportBuildError> {
+    let readiness_handler = handler.clone();
     let identity = TransportIdentity::new("rustopnsmcp", "opnsense", "rustopnsmcp", ["device"]);
     let host_origin = HostOriginPolicy::enforced(allowed_hosts, allowed_origins);
 
@@ -81,6 +82,10 @@ pub fn build_http_router(
         }
         config
     };
+
+    let config = config.with_readiness_check(ReadinessCheck::new("opnsense_auth", move || {
+        readiness_handler.auth_health_check()
+    }));
 
     build_streamable_http_router(move || Ok::<_, std::io::Error>(handler.clone()), config)
 }
