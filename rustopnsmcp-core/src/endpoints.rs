@@ -3,11 +3,8 @@
 //! OPNsense's core API follows a `/api/<module>/<controller>/<command>`
 //! convention (<https://docs.opnsense.org/development/api.html>). The paths
 //! below follow that documented convention and the module/controller names
-//! OPNsense's own core plugins use, but **none has been exercised against a
-//! live OPNsense instance** — this phase has no lab device to verify against,
-//! and every test here runs against a synthetic fixture instead. Treat these
-//! as the best-effort starting point for phase 2's live-device verification
-//! pass, not as a confirmed contract.
+//! OPNsense's own core plugins use. Read paths are verified against a live
+//! OPNsense 26.7.5 (opnsense-lab); write verbs are not yet.
 //!
 //! Search-style endpoints (`search_*`) are OPNsense's paginated list
 //! convention: a `POST` with a JSON body (`current`, `rowCount`, `searchPhrase`)

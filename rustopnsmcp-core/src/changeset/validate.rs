@@ -32,9 +32,8 @@ pub(crate) const ALIAS_WRITABLE_FIELDS: &[&str] = &[
 /// Body fields a staged filter-rule create or update may set.
 ///
 /// `uuid` is deliberately absent, as with [`ALIAS_WRITABLE_FIELDS`]. Field
-/// names follow OPNsense's documented `Firewall/Filter` MVC model; **none has
-/// been exercised against a live OPNsense instance** — see the disclaimer on
-/// [`crate::endpoints`].
+/// names verified against `getRule` on 26.7.5; write behaviour verified in P3
+/// Tasks 12-14.
 pub(crate) const RULE_WRITABLE_FIELDS: &[&str] = &[
     "sequence",
     "action",
@@ -480,6 +479,26 @@ mod tests {
 
     /// A field this function does not recognise as either shape is passed
     /// through unchanged rather than dropped or mangled.
+    #[test]
+    fn flatten_for_write_accepts_a_live_alias_get_item() {
+        let live = crate::testing::fixture("alias_get_item");
+        let flat = flatten_for_write(ResourceKind::Alias, &live["alias"]);
+        assert!(flat["type"].is_string() && flat["content"].is_string());
+    }
+
+    #[test]
+    fn every_writable_field_exists_in_the_live_bodies() {
+        use super::{ALIAS_WRITABLE_FIELDS, RULE_WRITABLE_FIELDS};
+        let alias = crate::testing::fixture("alias_get_item");
+        let rule = crate::testing::fixture("rule_get_item");
+        for field in ALIAS_WRITABLE_FIELDS {
+            assert!(alias["alias"].get(*field).is_some(), "alias {field}");
+        }
+        for field in RULE_WRITABLE_FIELDS {
+            assert!(rule["rule"].get(*field).is_some(), "rule {field}");
+        }
+    }
+
     #[test]
     fn flatten_for_write_passes_through_unrecognised_shapes() {
         let get_item = json!({"name": "x", "counters": 42});

@@ -353,7 +353,7 @@ fn no_filter() -> ListArgs {
 async fn system_status_reads_the_fixture() {
     let client = client_against(default_routes()).await;
     let status = read::system_status(&client).await.expect("system status");
-    assert_eq!(status["product_version"], "24.7");
+    assert_eq!(status["metadata"]["system"]["status"], 2);
 }
 
 /// The rewiring behind `gather_device_facts`: the three 26.7 shapes in, a fact
@@ -386,7 +386,8 @@ async fn firmware_status_reads_the_fixture() {
     let status = read::firmware_status(&client)
         .await
         .expect("firmware status");
-    assert_eq!(status["status"], "ok");
+    assert_eq!(status["status"], "none");
+    assert_eq!(status["product"]["product_version"], "26.7.5");
 }
 
 #[tokio::test]
@@ -395,9 +396,11 @@ async fn list_interfaces_pages_the_overview_by_identifier() {
     let interfaces = read::list_interfaces(&client, &no_filter())
         .await
         .expect("list interfaces");
-    assert_eq!(interfaces["total"], 2);
-    assert_eq!(interfaces["rows"][0]["identifier"], "lan");
-    assert_eq!(interfaces["rows"][1]["identifier"], "wan");
+    assert_eq!(interfaces["total"], 5);
+    // Sorted by identifier; enc0 and pflog0 carry none, so they sort first.
+    assert_eq!(interfaces["rows"][0]["identifier"], "");
+    assert_eq!(interfaces["rows"][2]["identifier"], "lan");
+    assert_eq!(interfaces["rows"][4]["identifier"], "wan");
     assert_eq!(interfaces["next_offset"], serde_json::Value::Null);
 }
 
@@ -407,7 +410,7 @@ async fn list_gateways_pages_the_status_items() {
     let gateways = read::list_gateways(&client, &no_filter())
         .await
         .expect("list gateways");
-    assert_eq!(gateways["rows"][0]["name"], "WAN_DHCP");
+    assert_eq!(gateways["rows"][0]["name"], "WAN_DHCP6");
     assert_eq!(gateways["offset"], 0);
 }
 
@@ -427,11 +430,11 @@ async fn list_firewall_rules_parses_the_search_envelope() {
     let rules = read::list_firewall_rules(&client, &no_filter())
         .await
         .expect("list firewall rules");
-    assert_eq!(rules["total"], 2);
-    assert_eq!(rules["rows"].as_array().expect("rows array").len(), 2);
-    // The firmware fixture reports 24.7, which predates legacy-rule merging.
-    assert_eq!(rules["coverage"], "mvc_only");
-    assert_eq!(rules["product_version"], "24.7");
+    assert_eq!(rules["total"], 8);
+    assert_eq!(rules["rows"].as_array().expect("rows array").len(), 8);
+    // The firmware fixture reports 26.7.5, which merges legacy rules.
+    assert_eq!(rules["coverage"], "complete");
+    assert_eq!(rules["product_version"], "26.7.5");
 }
 
 #[tokio::test]
@@ -440,7 +443,7 @@ async fn list_aliases_parses_the_search_envelope() {
     let aliases = read::list_aliases(&client, &no_filter())
         .await
         .expect("list aliases");
-    assert_eq!(aliases["rows"][0]["name"], "rfc1918");
+    assert_eq!(aliases["rows"][0]["name"], "bogons");
 }
 
 #[tokio::test]
@@ -458,7 +461,7 @@ async fn list_dhcp_leases_parses_the_search_envelope() {
     let leases = read::list_dhcp_leases(&client, &no_filter())
         .await
         .expect("list dhcp leases");
-    assert_eq!(leases["rows"][0]["hostname"], "example-host");
+    assert_eq!(leases["rows"][0]["hostname"], "host-1");
 }
 
 /// Routes for a device; `None` leaves that backend's settings endpoint absent (404).
@@ -613,7 +616,7 @@ async fn neither_backend_enabled_falls_back_to_isc_when_it_answers() {
     ] {
         let leases = dhcp_backend_for(dnsmasq, kea, true).await.expect("leases");
         assert_eq!(leases["backend"], "isc", "{dnsmasq:?} {kea:?}");
-        assert_eq!(leases["rows"][0]["hostname"], "example-host");
+        assert_eq!(leases["rows"][0]["hostname"], "host-1");
     }
 }
 

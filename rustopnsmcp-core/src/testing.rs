@@ -1,11 +1,9 @@
-//! Test helper for loading synthetic OPNsense API responses.
+//! Test helper for loading OPNsense API responses.
 //!
-//! There is no live OPNsense lab device behind this crate's tests. Every
-//! fixture under `tests/fixtures/` is hand-written, matching the documented
-//! `search_*` envelope shape and plausible status-endpoint payloads, not a
-//! capture from a real device. Treat a passing test as evidence the parser
-//! accepts the documented shape, not as evidence about a specific OPNsense
-//! release.
+//! Most fixtures under `tests/fixtures/` are sanitized captures from
+//! opnsense-lab on 26.7.5 (see `scripts/sanitize-fixture.sh`). `nat_one_to_one`,
+//! `routes` and `dhcp_leases` are synthetic: those collections are empty on the
+//! baseline, so there is nothing to capture.
 
 use std::path::PathBuf;
 
