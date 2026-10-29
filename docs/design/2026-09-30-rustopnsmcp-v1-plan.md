@@ -5974,7 +5974,7 @@ Each phase below is an outline. Its first task writes the phase's detailed plan 
 **Owner:** engineer (endpoint corrections, change-set runs). The second engineer records and sanitizes fixtures.
 **Gate (spec §4):** all tools pass live on 26.7.x. The under-construction banner is removed here.
 
-- [ ] P3.1 Write the detailed plan for this phase (writing-plans format) against the code as it stands after the previous gate, append it to this file, and get the reviewer's approval.
+- [x] P3.1 Write the detailed plan for this phase (writing-plans format) against the code as it stands after the previous gate, append it to this file, and get the reviewer's approval.
 - [ ] P3.2 Lab access: a devices.json entry for "opnsense-lab" that references the owner-only lab credentials on the dev host by env var or file path. The file lives outside the repository, is mode 0600 and is never committed. Document the `baseline-seeded` snapshot reset procedure in the phase plan, not with host details.
 - [ ] P3.3 Run every P1 tool against opnsense-lab on 26.7.x and record a pass/fail table in the phase plan: all nine reads, the fingerprint, the fleet-meta tools, and the lifecycle refusals.
 - [ ] P3.4 Correct endpoint paths and response shapes found wrong live: `rustopnsmcp-core/src/endpoints.rs`, `tools/read.rs` (interfaces `rows` shape, gateway `items`), `changeset/fingerprint.rs` (`VOLATILE_FIELDS`, the `rowCount: -1` behaviour), and ISC versus Kea/Dnsmasq DHCP on 26.7. Version-detect any path that differs between supported versions (spec §3.4).
@@ -5985,7 +5985,7 @@ Each phase below is an outline. Its first task writes the phase's detailed plan 
 
 ### P3 — Detailed plan
 
-> **Status: awaiting the reviewer's approval (P3.1).** Written against `origin/main` at `1556ce2` (mecmcp pin v0.28.1), with read-only probes of opnsense-lab on 2026-10-28. P3 runs in parallel with P2 by the user's choice; see "Overlap with P2" below.
+> **Status: approved by the user on 2026-10-29 (P3.1).** Written against `origin/main` at `1556ce2` (mecmcp pin v0.28.1), with read-only probes of opnsense-lab on 2026-10-28. P3 runs in parallel with P2 by the user's choice; see "Overlap with P2" below.
 
 **Goal:** Prove every existing rustopnsmcp tool against opnsense-lab on 26.7.x, correct what the device shows to be wrong, replace the synthetic fixtures with sanitized live captures, apply and roll back an alias and a rule change set, force a partial apply, and drop the under-construction banner.
 
