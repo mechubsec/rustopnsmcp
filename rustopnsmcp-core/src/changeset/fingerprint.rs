@@ -8,8 +8,25 @@ use serde_json::Value;
 
 /// Fields OPNsense recomputes on its own schedule. They say nothing about
 /// what an operator configured, and would make every plan read as stale.
-/// Checked against opnsense-lab in P3.
-pub const VOLATILE_FIELDS: &[&str] = &["current_items", "last_updated"];
+///
+/// pf evaluation counters and table sizes: re-read on every request
+/// (`eval_nomatch` seen ticking on opnsense-lab within 20 s). Not
+/// configuration; the alias `counters` option that enables them is, and is
+/// deliberately absent.
+pub const VOLATILE_FIELDS: &[&str] = &[
+    "current_items",
+    "last_updated",
+    "eval_nomatch",
+    "eval_match",
+    "in_block_p",
+    "in_block_b",
+    "in_pass_p",
+    "in_pass_b",
+    "out_block_p",
+    "out_block_b",
+    "out_pass_p",
+    "out_pass_b",
+];
 
 /// The fingerprint of the governed configuration on `client`'s device: every
 /// alias and every filter rule.
@@ -91,7 +108,7 @@ fn uuid_of(row: &Value) -> &str {
 }
 
 /// Keys sorted at every depth, volatile fields removed.
-fn canonical(value: &Value) -> Value {
+pub(super) fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -159,5 +176,47 @@ mod tests {
             fingerprint_collections(&[alias("1", "192.0.2.1")], &[json!({ "uuid": "r" })]).unwrap();
         assert_ne!(base, edited);
         assert_ne!(base, with_rule);
+    }
+
+    #[test]
+    fn pf_counters_do_not_change_the_fingerprint() {
+        for field in [
+            "eval_nomatch",
+            "eval_match",
+            "in_block_p",
+            "in_block_b",
+            "in_pass_p",
+            "in_pass_b",
+            "out_block_p",
+            "out_block_b",
+            "out_pass_p",
+            "out_pass_b",
+        ] {
+            let mut ticked = alias("1", "192.0.2.1");
+            ticked[field] = json!("17");
+            assert_eq!(
+                fingerprint_collections(&[alias("1", "192.0.2.1")], &[]).unwrap(),
+                fingerprint_collections(&[ticked], &[]).unwrap(),
+                "{field} is a live counter"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_fields_including_counters_option_change_the_fingerprint() {
+        let base = fingerprint_collections(&[alias("1", "192.0.2.1")], &[]).unwrap();
+        for (field, value) in [
+            ("counters", "1"),
+            ("enabled", "0"),
+            ("content", "192.0.2.9"),
+        ] {
+            let mut changed = alias("1", "192.0.2.1");
+            changed[field] = json!(value);
+            assert_ne!(
+                base,
+                fingerprint_collections(&[changed], &[]).unwrap(),
+                "{field}"
+            );
+        }
     }
 }

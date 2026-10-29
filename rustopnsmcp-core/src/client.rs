@@ -701,7 +701,7 @@ impl crate::changeset::ControllerOps for OpnsenseClient {
 
             let current = self.fetch_resource(mutation.kind(), uuid).await?;
             match current {
-                Some(live) if live == recorded => {}
+                Some(live) if crate::changeset::same_configuration(&recorded, &live) => {}
                 _ => return Ok(false),
             }
         }

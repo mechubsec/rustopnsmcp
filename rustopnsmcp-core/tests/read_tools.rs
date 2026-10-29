@@ -766,3 +766,40 @@ async fn a_listing_with_no_total_is_refused_rather_than_fingerprinted() {
         "{error}"
     );
 }
+
+/// A live pf counter ticking between staging and apply is not drift, but a
+/// configuration change still is.
+#[tokio::test]
+async fn preimage_matches_ignores_live_counters_but_not_configuration() {
+    use rustopnsmcp_core::changeset::{ControllerOps, Preimage, ResourceKind, StagedMutation};
+    let recorded = serde_json::json!({ "uuid": "11111111-1111-4111-8111-111111111111", "name": "a", "enabled": "1", "eval_nomatch": "3" });
+    let preimage = Preimage::from_resources(vec![recorded]);
+    let mutations = [StagedMutation::Delete {
+        kind: ResourceKind::Alias,
+        uuid: "11111111-1111-4111-8111-111111111111".to_owned(),
+    }];
+    let live_with = |enabled: &str, eval_nomatch: &str| {
+        let mut routes = default_routes();
+        routes.insert(
+            rustopnsmcp_core::endpoints::aliases_get_item("11111111-1111-4111-8111-111111111111"),
+            serde_json::json!({ "alias": { "name": "a", "enabled": enabled, "eval_nomatch": eval_nomatch } }),
+        );
+        routes
+    };
+
+    let ticked = client_against(live_with("1", "9")).await;
+    assert!(
+        ticked
+            .preimage_matches(&preimage, &mutations)
+            .await
+            .expect("preimage_matches")
+    );
+
+    let edited = client_against(live_with("0", "3")).await;
+    assert!(
+        !edited
+            .preimage_matches(&preimage, &mutations)
+            .await
+            .expect("preimage_matches")
+    );
+}
