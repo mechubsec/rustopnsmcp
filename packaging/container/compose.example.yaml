@@ -1,0 +1,59 @@
+# Example Compose deployment for rustopnsmcp (mecmcp docs/DOCKER-STANDARD.md).
+# Copy it, set the image tag (pin by digest in production), and adjust paths.
+#
+# Prepare the host directories FIRST. The container runs as uid 65532 and a
+# bind mount carries the host uid straight through:
+#   mkdir -p config state
+#   printf '{"version":1,"devices":{}}\n' > config/devices.json     # then edit it
+#   printf '{"version":1,"tokens":[]}\n'  > state/tokens.json
+#   sudo chown -R 65532:65532 config state
+#   sudo chmod 0750 config; sudo chmod 0700 state
+#   sudo chmod 0600 config/devices.json state/tokens.json
+# tokens.json must exist before the first HTTP start (the server exits with
+# "token file ...: No such file or directory" otherwise); stdio does not need
+# it. The DIRECTORIES must be writable by 65532 as well: state files are
+# written atomically through a temp file in the same directory.
+services:
+  rustopnsmcp:
+    image: ghcr.io/mechubsec/rustopnsmcp:latest
+    # image: ghcr.io/mechubsec/rustopnsmcp@sha256:...   # a digest is what you reviewed
+    # Docker Hub equivalent: docker.io/mechub/rustopnsmcp:<version>
+    container_name: rustopnsmcp
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:30037:30037"
+    volumes:
+      - ./config:/etc/rustopnsmcp:ro
+      - ./state:/var/lib/rustopnsmcp
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # The OPNsense API key and secret reach the container as environment
+    # variables named by devices.json (api_key_env / api_secret_env). Keep the
+    # env file out of the repository and mode 0600.
+    env_file:
+      - ./credentials.env
+    # ENTRYPOINT already carries the config paths, --state-file, --inventory-readonly
+    # and the audit baseline. Only the bind address and port are replaceable.
+    # Binding 0.0.0.0 inside the container is required to publish the port;
+    # the host side above stays on loopback. A non-loopback bind needs both
+    # --allowed-host and --allowed-origin or the server refuses to start; the
+    # values must match what clients dial. For a LAN-facing listener put TLS
+    # in front of it.
+    command:
+      - --transport
+      - streamable-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30037"
+      - --allow-insecure-bind
+      - --allowed-host
+      - localhost:30037
+      - --allowed-origin
+      - http://localhost:30037
+    restart: unless-stopped
