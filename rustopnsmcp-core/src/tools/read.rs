@@ -523,9 +523,18 @@ pub async fn list_dhcp_leases(
 ) -> Result<serde_json::Value, OpnsenseError> {
     let page = page_request(args)?;
     let backends = dhcp_backends(client).await?;
+    // Two collections share one result, so each gets half the byte budget.
+    let share = if backends.len() > 1 {
+        PageRequest {
+            max_bytes: page.max_bytes / 2,
+            ..page
+        }
+    } else {
+        page
+    };
     let mut pages = Vec::new();
     for backend in &backends {
-        let found = match search_page(client, backend.leases_path(), args, &page).await {
+        let found = match search_page(client, backend.leases_path(), args, &share).await {
             Err(OpnsenseError::Upstream { status: 404, .. }) if *backend == DhcpBackend::Isc => {
                 return Err(OpnsenseError::Config(
                     "no supported DHCP backend is enabled (checked Dnsmasq, Kea and legacy ISC)"

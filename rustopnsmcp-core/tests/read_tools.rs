@@ -551,6 +551,40 @@ async fn two_enabled_dhcp_backends_both_return_their_pages() {
 }
 
 #[tokio::test]
+async fn two_enabled_dhcp_backends_share_the_max_bytes_budget() {
+    use rustopnsmcp_core::endpoints as ep;
+    const BUDGET: usize = 1024;
+    // Each backend's 6 rows (about 700 bytes) fit the budget alone; together they do not.
+    let rows: Vec<_> = (0..6)
+        .map(|index| serde_json::json!({ "address": format!("192.0.2.{index}"), "pad": "x".repeat(90) }))
+        .collect();
+    let envelope = serde_json::json!({ "rows": rows, "rowCount": 6, "total": 6, "current": 1 });
+    let mut routes = dhcp_routes(Some("1"), Some("1"), false);
+    routes.insert(ep::DNSMASQ_LEASES_SEARCH.to_owned(), envelope.clone());
+    routes.insert(ep::KEA_LEASES4_SEARCH.to_owned(), envelope);
+    let client = client_against(routes).await;
+    let args = ListArgs {
+        max_bytes: Some(BUDGET),
+        ..no_filter()
+    };
+    let leases = read::list_dhcp_leases(&client, &args)
+        .await
+        .expect("leases");
+
+    let mut combined = 0;
+    for backend in ["dnsmasq", "kea"] {
+        let page = &leases[backend];
+        assert_eq!(page["truncated_to_fit_max_bytes"], true, "{backend}");
+        let bytes = serde_json::to_vec(&page["rows"])
+            .expect("rows serialize")
+            .len();
+        assert!(bytes <= BUDGET / 2, "{backend} rows are {bytes} bytes");
+        combined += bytes;
+    }
+    assert!(combined <= BUDGET, "combined rows are {combined} bytes");
+}
+
+#[tokio::test]
 async fn a_failing_settings_probe_is_an_error_not_a_fallthrough_to_isc() {
     use rustopnsmcp_core::endpoints as ep;
     for status in [401, 500] {
