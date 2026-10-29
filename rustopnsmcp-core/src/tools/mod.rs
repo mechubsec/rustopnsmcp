@@ -5,6 +5,7 @@
 //! §3.1). Change-set tools govern writes to firewall aliases and filter rules.
 
 pub mod changeset;
+pub mod feed;
 pub mod fleet;
 pub mod read;
 
