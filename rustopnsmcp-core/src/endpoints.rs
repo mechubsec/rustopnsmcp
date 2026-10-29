@@ -3,11 +3,8 @@
 //! OPNsense's core API follows a `/api/<module>/<controller>/<command>`
 //! convention (<https://docs.opnsense.org/development/api.html>). The paths
 //! below follow that documented convention and the module/controller names
-//! OPNsense's own core plugins use, but **none has been exercised against a
-//! live OPNsense instance** — this phase has no lab device to verify against,
-//! and every test here runs against a synthetic fixture instead. Treat these
-//! as the best-effort starting point for phase 2's live-device verification
-//! pass, not as a confirmed contract.
+//! OPNsense's own core plugins use. Read paths are verified against a live
+//! OPNsense 26.7.5 (opnsense-lab); write verbs are not yet.
 //!
 //! Search-style endpoints (`search_*`) are OPNsense's paginated list
 //! convention: a `POST` with a JSON body (`current`, `rowCount`, `searchPhrase`)
@@ -15,6 +12,10 @@
 
 /// System status. Module `core`, controller `system`.
 pub const SYSTEM_STATUS: &str = "/api/core/system/status";
+
+/// System time: uptime, load average, boot time. Module `diagnostics`,
+/// controller `system`.
+pub const SYSTEM_TIME: &str = "/api/diagnostics/system/systemTime";
 
 /// Firmware and installed-version status. Module `core`, controller `firmware`.
 pub const FIRMWARE_STATUS: &str = "/api/core/firmware/status";
@@ -132,11 +133,18 @@ pub const ROUTES_SEARCH: &str = "/api/routes/routes/search_route";
 /// Gateway status. Module `routes`, controller `gateway`.
 pub const GATEWAYS_STATUS: &str = "/api/routes/gateway/status";
 
-/// DHCPv4 leases, paginated search. Module `dhcpv4`, controller `leases`.
-///
-/// ISC DHCPv4 only. Kea and Dnsmasq leases are not covered; new 25.x installs
-/// default to Dnsmasq, and ISC DHCPv4 is gone from core master.
+/// Legacy ISC DHCPv4 leases. **Absent on 26.7.5** (404 seen on opnsense-lab);
+/// used only when neither Dnsmasq nor Kea is enabled.
 pub const DHCP_LEASES_SEARCH: &str = "/api/dhcpv4/leases/search_lease";
+
+/// Dnsmasq settings. `dnsmasq.enable` is `"1"` when the Dnsmasq service is on. Seen on 26.7.5.
+pub const DNSMASQ_SETTINGS_GET: &str = "/api/dnsmasq/settings/get";
+/// Dnsmasq DHCP leases, paginated search. Seen on 26.7.5 (envelope with `rows`, `total`, `interfaces`).
+pub const DNSMASQ_LEASES_SEARCH: &str = "/api/dnsmasq/leases/search";
+/// Kea DHCPv4 settings. `dhcpv4.general.enabled` is `"1"` when Kea DHCPv4 is on. Seen on 26.7.5.
+pub const KEA_DHCPV4_GET: &str = "/api/kea/dhcpv4/get";
+/// Kea DHCPv4 leases, paginated search. Seen on 26.7.5 (envelope plus `stats` and `interfaces`).
+pub const KEA_LEASES4_SEARCH: &str = "/api/kea/leases4/search";
 
 /// Default page size for `search_*` endpoints when a tool call omits one.
 pub const DEFAULT_ROW_COUNT: u32 = 200;

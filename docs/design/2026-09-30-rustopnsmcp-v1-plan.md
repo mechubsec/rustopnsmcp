@@ -8697,14 +8697,1605 @@ These are the input classes most likely to hurt a user in this phase. Each has a
 **Owner:** engineer (endpoint corrections, change-set runs). The second engineer records and sanitizes fixtures.
 **Gate (spec §4):** all tools pass live on 26.7.x. The under-construction banner is removed here.
 
-- [ ] P3.1 Write the detailed plan for this phase (writing-plans format) against the code as it stands after the previous gate, append it to this file, and get the reviewer's approval.
-- [ ] P3.2 Lab access: a devices.json entry for "opnsense-lab" that references the owner-only lab credentials on the dev host by env var or file path. The file lives outside the repository, is mode 0600 and is never committed. Document the `baseline-seeded` snapshot reset procedure in the phase plan, not with host details.
-- [ ] P3.3 Run every P1 tool against opnsense-lab on 26.7.x and record a pass/fail table in the phase plan: all nine reads, the fingerprint, the fleet-meta tools, and the lifecycle refusals.
-- [ ] P3.4 Correct endpoint paths and response shapes found wrong live: `rustopnsmcp-core/src/endpoints.rs`, `tools/read.rs` (interfaces `rows` shape, gateway `items`), `changeset/fingerprint.rs` (`VOLATILE_FIELDS`, the `rowCount: -1` behaviour), and ISC versus Kea/Dnsmasq DHCP on 26.7. Version-detect any path that differs between supported versions (spec §3.4).
-- [ ] P3.5 Record sanitized fixtures from the live device into `rustopnsmcp-core/tests/fixtures/`, replacing the synthetic ones. Sanitize with a committed `scripts/sanitize-fixture.sh` (RFC 5737/1918 addresses, `example.org` names, no keys, certificates or hashes). The pre-push secret gate must pass unmodified.
-- [ ] P3.6 Alias change set live: fingerprint → create → approve (second principal) → apply → verify → roll back with the inverse change set; same for filter rules. Evidence goes in the gate comment.
-- [ ] P3.7 A partial apply live: a three-action alias change set whose second action fails device validation. Confirm `state: "partial"`, `never_attempted`, the change set recorded `Failed`, and the best-effort rollback.
+- [x] P3.1 Write the detailed plan for this phase (writing-plans format) against the code as it stands after the previous gate, append it to this file, and get the reviewer's approval.
+- [x] P3.2 Lab access: a devices.json entry for "opnsense-lab" that references the owner-only lab credentials on the dev host by env var or file path. The file lives outside the repository, is mode 0600 and is never committed. Document the `baseline-seeded` snapshot reset procedure in the phase plan, not with host details.
+- [x] P3.3 Run every P1 tool against opnsense-lab on 26.7.x and record a pass/fail table in the phase plan: all nine reads, the fingerprint, the fleet-meta tools, and the lifecycle refusals.
+- [x] P3.4 Correct endpoint paths and response shapes found wrong live: `rustopnsmcp-core/src/endpoints.rs`, `tools/read.rs` (interfaces `rows` shape, gateway `items`), `changeset/fingerprint.rs` (`VOLATILE_FIELDS`, the `rowCount: -1` behaviour), and ISC versus Kea/Dnsmasq DHCP on 26.7. Version-detect any path that differs between supported versions (spec §3.4).
+- [x] P3.5 Record sanitized fixtures from the live device into `rustopnsmcp-core/tests/fixtures/`, replacing the synthetic ones. Sanitize with a committed `scripts/sanitize-fixture.sh` (RFC 5737/1918 addresses, `example.org` names, no keys, certificates or hashes). The pre-push secret gate must pass unmodified.
+- [x] P3.6 Alias change set live: fingerprint → create → approve (second principal) → apply → verify → roll back with the inverse change set; same for filter rules. Evidence goes in the gate comment.
+- [x] P3.7 A partial apply live: a three-action alias change set whose second action fails device validation. Confirm `state: "partial"`, `never_attempted`, the change set recorded `Failed`, and the best-effort rollback.
 - [ ] P3.8 Remove the under-construction banner from `README.md`, and update the README's tool table to the P1 names.
+
+### P3 — Detailed plan
+
+> **Status: approved by the user on 2026-10-29 (P3.1).** Written against `origin/main` at `1556ce2` (mecmcp pin v0.28.1), with read-only probes of opnsense-lab on 2026-10-28. P3 runs in parallel with P2 by the user's choice; see "Overlap with P2" below.
+
+**Goal:** Prove every existing rustopnsmcp tool against opnsense-lab on 26.7.x, correct what the device shows to be wrong, replace the synthetic fixtures with sanitized live captures, apply and roll back an alias and a rule change set, force a partial apply, and drop the under-construction banner.
+
+**Architecture:** Nothing in P3 adds a tool. Rust changes are corrections to `rustopnsmcp-core` (endpoints, read shapes, fingerprint, pre-image comparison), each written test-first against a mock that serves the shape the device was seen to return. The live run is driven by a small stdlib-Python MCP client (`scripts/live/mcp_call.py`) that prints key names and pass/fail only, so its output can go into a public gate comment. The server runs on a disposable test rig (`test-labmode-opns`, or `test-twoperson-opns` for the two-person run) that receives the owner-only lab credentials from the dev host as owner-only files; the client runs on the workstation over HTTP with a token minted on the rig. The binary is built in a Debian 13 container, because the workstation's glibc is newer than the rigs'. Lab writes happen only in Tasks 12-15, each gated on the user.
+
+**Tech Stack:** Rust (workspace as in P1), bash and Python 3 stdlib for `scripts/live/` and `scripts/sanitize-fixture.sh`, `jq`, the pinned `gitleaks` pre-push gate.
+
+**Spec:** `docs/design/2026-09-30-rustopnsmcp-v1-design.md` §4 (P3 row) and §5 (lab device).
+
+#### Global Constraints for P3
+
+Everything in "Global Constraints" above applies. Restated where P3 can break it:
+
+- **Public-repo hygiene.** The plan, the scripts and the fixtures name the device only as "opnsense-lab" and its credentials only as "the owner-only lab credentials on the dev host". No IPs, hostnames, credential file paths, or secrets. Scripts take the host, credential file and CA file from environment variables (`LAB_HOST`, `LAB_ENV_FILE`, `LAB_CA_FILE`, `LAB_WORK`, `RIG_PVE`, `P3_WORK`) whose values are never committed; the rigs are named only `test-twoperson-opns` and `test-labmode-opns`, and their addresses, guest ids and node names are looked up at run time and appear in no committed file. Evidence pasted into a gate comment is key names, types, counts and pass/fail only.
+- **Lab rules.** Reads before writes. No write, apply, reconfigure, savepoint, revert, set, add, del or toggle call against the device outside Tasks 12-15, and none of those without the user's explicit go-ahead for that task in this session. Never start or stop the opnsense-lab VM; a snapshot rollback is a Task 11 step the user approves by name. A test rig is started for a run and stopped after it, only through `scripts/live/rig-ctl.sh`, which first proves the guest is `disposable` and not `protected`.
+- **Credentials only move dev host to rig, by pipe.** Never print, log, commit or copy the API key or secret, the root password, any CA key, or an ssh key. Only the variable names of the credentials env file are ever read by an agent. The key, secret and CA certificate reach a rig as 0600 files owned by the service user, streamed through pipes and never as an argument, an environment variable on a command line, a workstation file, or output. The final step of Task 15 deletes them from the rigs.
+- **Raw captures stay on the dev host.** Only sanitized output crosses to this repository, and it is reviewed by eye before `git add`.
+- **No new tool names.** `scripts/parity-check.sh --phase P1` must still pass and P3 adds allowlist entries only for its own live-verification/fixture tooling (phase `never`), and no tool, flag or dependency.
+- **CI gates** before every commit: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo fmt --all`, then `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, all with that same `CARGO_TARGET_DIR`.
+
+#### What the probes found
+
+All probes were `GET` requests with the lab API user, 2026-10-28, device on firmware 26.7.5. Shapes are key names and types only. `search_*` endpoints answer `GET` as well as `POST`, so `rowCount=-1` was exercised with `GET ...?current=1&rowCount=-1`; the server's `POST` bodies are first exercised in Task 3.
+
+| Endpoint (in `endpoints.rs` unless noted) | Status | Shape seen | Matches code / fixture? |
+|---|---|---|---|
+| `/api/core/system/status` (`SYSTEM_STATUS`) | 200 | `{metadata:{system:{status:int,message,title}, translations, subsystems:[]}}` | Endpoint exists. **Shape mismatch:** a health summary, not product, uptime, CPU or load. Fixture `system_status.json` is flat and invented. Tool description promises "product version, uptime, CPU and load". |
+| `/api/core/firmware/status` (`FIRMWARE_STATUS`) | 200 | `{status, status_msg, product:{product_version, product_latest, product_series, product_name, ... ~45 keys}}` | Match for `/product/product_version`, `product_latest`, `product_series` (series is `26.7`). `upgrade_needs_reboot` is **absent** at top level. |
+| `/api/core/firmware/info` (not used) | 200 | `{product_id, product_version, package[~940], plugin[~105], changelog[~155], product:{...}}` | Large; not needed. |
+| `/api/interfaces/overview/interfacesInfo` | 200 | `{total:5, rowCount:5, current:1, rows:[{identifier, description, device, status, addr4, addr6, ipv4:[{ipaddr}], ipv6, config:{...}, ...}]}` | **`rows` is an array** that already carries `identifier`. The code's object-keyed branch is dead on 26.7.5 (the array branch handles it). Fixture is object-keyed and uses `descr`; live uses `description`. |
+| `/api/routes/gateway/status` | 200 | `{items:[{name,address,status,loss,delay,stddev,monitor,status_translated}], status}` | Match (`items`). |
+| `/api/firewall/alias/search_item` | 200 | `{rows:[~31 keys], rowCount, total, current}`; `searchItem` also 200 | Path matches. 10 rows. Rows carry pf counters (see below). |
+| `/api/firewall/filter/search_rule` | 200 | `{total,rowCount,current,rows:[...]}`; `searchRule` also 200 | Path matches. 38 rows: **31 are `legacy`+`is_automatic`** (32-char refs, not UUIDs), 7 are MVC (36-char UUIDs, no `legacy` key). `coverage` will read `complete` (26.7.5 is >= 25.1). |
+| `/api/firewall/source_nat/search_rule` | 200 | same envelope, 3 rows | Match. |
+| `/api/firewall/one_to_one/search_rule` | 200 | same envelope, 0 rows | Match. No live rows to capture. |
+| `/api/firewall/d_nat/search_rule` (**not in `endpoints.rs`**) | 200 | same envelope, 4 rows (`source.network`, `destination.port`, `local-port`, `descr`, `is_automatic`, ...) | **Code comment is wrong:** "DNatController exists only on core master". Port forwards are listable on 26.7.5. `list_opnsense_nat_rules` omits them. **Deferred to P4/P5.2 (Task 6).** |
+| `/api/routes/routes/search_route` | 200 | same envelope, 0 rows | Match. No live rows to capture. |
+| `/api/dhcpv4/leases/search_lease` (`DHCP_LEASES_SEARCH`) | **404** | `{errorMessage}` | **Wrong on 26.7.5: ISC DHCPv4 is gone.** `list_opnsense_dhcp_leases` fails. |
+| `/api/dnsmasq/settings/get` | 200 | `{dnsmasq:{enable:"1", interface:{...}, ...}}` | New. Dnsmasq is the **enabled** DHCP backend on the lab; service `dnsmasq` running. |
+| `/api/dnsmasq/leases/search` | 200 | `{total,rowCount,current,rows:[],interfaces:[]}` | New. 0 rows, so the lease row shape is unobserved. |
+| `/api/kea/dhcpv4/get` | 200 | `{dhcpv4:{general:{enabled:"0", ...}, ...}}` | New. Kea present but disabled. |
+| `/api/kea/leases4/search` | 200 | `{total,rowCount,current,rows:[],stats:{active,inactive,total},interfaces:[]}` | New. 0 rows. |
+| `/api/diagnostics/system/systemTime` | 200 | `{uptime,datetime,boottime,config,loadavg}` | New source for the facts `gather_device_facts` reads from `system_status` and cannot find. |
+| `/api/diagnostics/system/systemResources`, `systemInformation` | 200 | `{memory:{...}}`, `{name,versions[],updates}` | Not used. No CPU-type source found; `cpu_type` has none. |
+| `/api/firewall/alias/getItem/{uuid}` | 200 | `{alias:{27 fields}}`; `type`, `proto`, `content`, `interface`, `authtype` are `{key:{value,selected}}` maps; `categories` is a **list**; unknown uuid answers HTTP 200 with the default alias template (empty `name`), not `[]` (found live in Task 12, defect 12a) | Envelope and choice-map match `interpret_get_item_response` and `flatten_for_write`. `categories` as a list is **not handled** by `flatten_field`. |
+| `/api/firewall/filter/getRule/{uuid}` | 200 for an MVC rule; **`[]` (HTTP 200) for a legacy/automatic rule** | `{rule:{62 fields}}`; every name in `RULE_WRITABLE_FIELDS` is present | Match. Legacy rules read as "not found", so they cannot be updated or deleted (correct and wanted). |
+
+**Volatile fields (probe, 20-25 s apart, no writes):**
+
+- `search_item` rows: only `eval_nomatch` changed (3 of 10 aliases carry a non-zero value). `current_items` and `last_updated` held still. The other pf counters (`eval_match`, `in_*_p/b`, `out_*_p/b`) were zero but are traffic-driven by the same mechanism.
+- `search_rule` rows: nothing changed across 38 rows.
+- `getItem` bodies: `eval_nomatch` changed on 2 of 10 aliases.
+- `rowCount=-1` returns every row (`len(rows) == total`, response `rowCount` is the count returned, not -1). `rowCount=3` returns 3 of `total` 10.
+
+**Consequence the checklist did not predict.** `VOLATILE_FIELDS` is only `current_items` and `last_updated`, so the configuration fingerprint changes whenever an alias's `eval_nomatch` ticks, and `apply` (which checks the live fingerprint) would intermittently be refused as drifted. Separately, `OpnsenseClient::preimage_matches` compares the full live `getItem` body to the recorded one with `==`, so an update or delete of any alias with live pf counters is intermittently refused `refused_stale`. Task 7 fixes both.
+
+#### Checklist items the probes show are wrong or incomplete
+
+| Item | Finding |
+|---|---|
+| P3.3 "all nine reads" | Eight of the nine can pass. `list_opnsense_dhcp_leases` fails with a 404 on 26.7.5 until Task 4. `get_opnsense_system_status` returns 200 but not what its description says (Task 5). |
+| P3.4 "interfaces `rows` shape" | The live shape is already handled by the array branch. The fix is the fixture and a test, not the parser. |
+| P3.4 "gateway `items`" | Confirmed correct. No change. |
+| P3.4 "`rowCount: -1` behaviour" | Works as the code assumes. No code change. The real fingerprint hazard is the volatile counters, not `-1`. |
+| P3.4 "ISC versus Kea/Dnsmasq" | ISC is absent (404), Dnsmasq is the enabled backend, Kea is installed but disabled. |
+| P3.4 NAT | Port forwards are listable (`d_nat`); the `endpoints.rs` comment and the tool description say they are not. Not fixed in P3 (Task 6 is deferred). |
+| P3.5 "replacing the synthetic ones" | Three collections are **empty** on the baseline (one-to-one NAT, static routes, DHCP leases), so there is nothing to capture. Those fixtures stay synthetic and are labelled so. |
+| P3.7 "`never_attempted` must be listed" | The apply result carries `never_attempted` as a **count**, not a list. The pass condition is the count (and `action_count` from status). Listing the actions is a code change the plan does not make. |
+| P3.8 "the README's tool table" | `README.md` has no tool table; it has a Status section. Task 16 adds a short table of the P1 tool names. |
+| P3.6 "second principal" | A single principal cannot approve its own plan. The two-person run needs two tokens on `test-twoperson-opns` (Task 13); the lab-mode waiver runs use `test-labmode-opns`. |
+
+#### Overlap with P2
+
+P2 (packaging) is being planned and written at the same time. Files both phases could touch, and how P3 avoids a conflict:
+
+| File | P2 | P3 | Handling |
+|---|---|---|---|
+| `README.md` | P2.10 may link the new docs | Task 16 removes the banner and rewrites Status | Land Task 16 last; rebase onto P2's README change. The edits are in different sections (top banner and `## Status`). |
+| `.github/workflows/ci.yml` | P2.8 adds the conformance job | Task 9 adds one step running the sanitizer test | Append the step after "One mecmcp pin"; a trivial textual merge. |
+| `rustopnsmcp-core/src/endpoints.rs` | P2.7 (`/readyz` auth check) needs a cheap authenticated endpoint | Tasks 4-5 add and change constants | P2.7 should use `FIRMWARE_STATUS` or `SYSTEM_STATUS`: both answered 200 with the lab API user. P3 does not rename or remove either. |
+| `packaging/systemd/` | P2.2 reworks the unit; P2.4 adds `install.sh` | read only: Task 2 installs the packaged files and overrides `ExecStart` in a drop-in | No edit. A different unit shape does not break the drop-in. `install.sh` supersedes Task 2's manual install. |
+| `scripts/` | P2.5 adds `package-lxc.sh` | Adds `sanitize-fixture.sh`, `sanitize_fixture.py`, `live/`, `tests/` | Distinct names. `scripts/tests/` is new; if P2 also creates it, keep both. |
+| `CHANGELOG.md` | P2.10 creates it | none | P3 does not create it. Its user-visible changes (DHCP backends, fingerprint stability, facts) are listed in Task 16's commit message for P7 to carry. |
+| `packaging/**`, `Cargo.toml`, `Cargo.lock`, `.gitleaks.toml` | edits | untouched | P3 adds no dependency, tool or flag; allowlist entries only for its own live-verification tooling. |
+
+#### File structure
+
+| Path | Task | Responsibility |
+|---|---|---|
+| `scripts/live/lab-get.sh` | 1 | Read-only `GET` against the lab: shape mode (key names only) or raw mode (to a file on the dev host). Refuses any other method. |
+| `scripts/live/mcp_call.py` | 1 | Stdlib MCP client: stdio or HTTP, one PASS/FAIL line per call, shapes only. Runs on the workstation. |
+| `scripts/live/build-trixie.sh` | 2 | Builds the binary in a Debian 13 Rust container and checks its glibc floor. |
+| `scripts/live/rig-ctl.sh` | 2 | Evidence-checked start, stop, service control and state reset for a test rig. |
+| `scripts/live/emit-credential.sh`, `make-devices-json.py` | 2 | Stream one lab credential, or build `devices.json`, for a rig without it touching an argument, a variable or a file. |
+| `scripts/live/rig-install.sh`, `rig-override.conf.in`, `rig-token.sh` | 2 | Minimal manual install into a rig (superseded by P2's `install.sh`) and token minting. |
+| `scripts/tests/mcp_call_smoke.sh` | 1 | Local check of the client against the built server with no device. |
+| `rustopnsmcp-core/src/endpoints.rs` | 4, 5 | DHCP backend and system time paths; corrected comments. |
+| `rustopnsmcp-core/src/tools/read.rs` | 4 | DHCP backend selection. |
+| `rustopnsmcp-core/src/tools/fleet.rs` | 5 | Facts from firmware status and system time. |
+| `rustopnsmcp/src/server/mod.rs` | 4, 5 | Tool descriptions and the facts call. |
+| `rustopnsmcp-core/src/changeset/fingerprint.rs`, `preimage.rs` | 7 | Wider `VOLATILE_FIELDS`; `same_configuration`. |
+| `rustopnsmcp-core/src/client.rs` | 7 | `preimage_matches` through `same_configuration`. |
+| `scripts/sanitize-fixture.sh`, `scripts/sanitize_fixture.py` | 9 | Fixture sanitizer and its self-check. |
+| `scripts/tests/sanitize-fixture.test.sh` | 9 | Sanitizer test with synthetic secret-shaped input. |
+| `rustopnsmcp-core/tests/fixtures/*.json`, `src/testing.rs` | 10 | Live-derived fixtures. |
+| `README.md` | 16 | Banner removed, Status rewritten, tool table. |
+
+---
+
+### P3-Task 1: Lab read helper and MCP client
+
+**Files:**
+- Create: `scripts/live/lab-get.sh`, `scripts/live/mcp_call.py`, `scripts/tests/mcp_call_smoke.sh`
+
+**Interfaces:**
+- Produces: `lab-get.sh shape|raw <path-and-query> [out-file]`; `mcp_call.py` as below, whose calls-file format Tasks 3, 8, 12-15 reuse.
+
+- [x] **Step 1: Write `scripts/live/lab-get.sh`**
+
+It runs on the dev host (`bash -s` over ssh) and reads `LAB_ENV_FILE` and `LAB_CA_FILE` from its environment. The key and secret reach curl through a config on stdin, never through argv or output.
+
+```bash
+#!/usr/bin/env bash
+# Read-only GET against opnsense-lab. Runs on the dev host that holds the owner-only lab credentials.
+#   lab-get.sh shape <path[?query]>            HTTP status and JSON key names/types only
+#   lab-get.sh raw   <path[?query]> <out-file> raw body to a 0600 file (never printed)
+# Needs: LAB_ENV_FILE (defines OPNSENSE_URL, OPNSENSE_API_KEY, OPNSENSE_API_SECRET), LAB_CA_FILE.
+set -euo pipefail
+mode="${1:?shape|raw}"; path="${2:?path}"; out="${3:-}"
+case "$path" in /api/*) ;; *) echo "path must start with /api/" >&2; exit 2 ;; esac
+set -a; . "$LAB_ENV_FILE"; set +a
+host=$(printf '%s' "$OPNSENSE_URL" | sed -E 's#^https?://##; s#[:/].*$##')
+body=$(mktemp); trap 'rm -f "$body"' EXIT; umask 077
+code=$(printf 'user = "%s:%s"\n' "$OPNSENSE_API_KEY" "$OPNSENSE_API_SECRET" \
+  | curl -s -X GET -o "$body" -w '%{http_code}' -K - --cacert "$LAB_CA_FILE" \
+      --resolve "opnsense-lab:443:$host" "https://opnsense-lab$path")
+if [ "$mode" = raw ]; then install -m 600 "$body" "${out:?out-file}"; echo "HTTP $code -> raw saved"; exit 0; fi
+echo "HTTP $code"
+python3 -I - "$body" <<'PY'
+import json, sys
+def shape(v, depth=0):
+    if isinstance(v, dict):
+        return "{...%d keys}" % len(v) if depth >= 3 else {k: shape(x, depth + 1) for k, x in list(v.items())[:40]}
+    if isinstance(v, list):
+        return ["list[%d]" % len(v)] + ([shape(v[0], depth + 1)] if v and depth < 3 else [])
+    return type(v).__name__
+try:
+    print(json.dumps(shape(json.load(open(sys.argv[1])))))
+except ValueError:
+    print("non-json body")
+PY
+```
+
+- [x] **Step 2: Write `scripts/live/mcp_call.py`**
+
+Calls file: a JSON list of `{"name", "tool", "arguments", "expect": "ok"|"error", "error_contains"?, "keys"?, "pointers"?, "save"?, "show"?}`. `"$var"` strings in `arguments` are replaced by values saved from earlier calls (`"save": {"var": "/json/pointer"}`); a pointer pattern of `"$var"` requires equality with a saved value; `show` prints the named saved values and is for fingerprints and change-set ids only, never for anything from the device. The tagged untrusted wrapper is stripped before parsing. Output is key names, types and counts, plus error text with IPv4 addresses masked.
+
+```python
+#!/usr/bin/env python3
+"""Call tools on a rustopnsmcp server; print one PASS/FAIL line per call, shapes only.
+
+  mcp_call.py CALLS.json --stdio -- /path/to/rustopnsmcp [server flags]
+  mcp_call.py CALLS.json --url http://127.0.0.1:PORT/mcp --token-env VAR
+  add  --vars FILE  to preload saved variables and  --save-vars FILE  to keep them for the next run
+
+Never prints values, only key names, types and counts, so output can be pasted
+into a gate comment. Exit 0 when every call met its expectation, else 1.
+"""
+import argparse, http.client, json, os, re, subprocess, sys, urllib.parse
+
+TAG = re.compile(r"(?s)\s*<untrusted-device-content[^>]*>(.*)</untrusted-device-content>\s*$")
+IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+
+
+def payload_of(text):
+    """Parse a tool result's text, stripping the untrusted-content tag."""
+    match = TAG.match(text)
+    try:
+        return json.loads(match.group(1) if match else text)
+    except ValueError:
+        return None
+
+
+def shape(value, depth=0):
+    if isinstance(value, dict):
+        return "{...}" if depth >= 2 else {k: shape(v, depth + 1) for k, v in list(value.items())[:30]}
+    if isinstance(value, list):
+        return "list[%d]" % len(value)
+    return type(value).__name__
+
+
+class Stdio:
+    def __init__(self, argv, stderr_path):
+        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                     stderr=open(stderr_path or os.devnull, "a"))  # server audit lines stay out of the output
+
+    def rpc(self, message, want_reply=True):
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+        while want_reply:
+            line = self.proc.stdout.readline()
+            if not line:
+                raise SystemExit("server closed stdout")
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                continue
+            if reply.get("id") == message["id"]:
+                return reply
+
+    def close(self):
+        self.proc.kill()
+
+
+class Http:
+    def __init__(self, url, token):
+        self.url, self.token, self.session = urllib.parse.urlparse(url), token, None
+
+    def rpc(self, message, want_reply=True):
+        conn = http.client.HTTPConnection(self.url.hostname, self.url.port, timeout=120)
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                   "Authorization": "Bearer " + self.token}
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        conn.request("POST", self.url.path or "/", json.dumps(message), headers)
+        response = conn.getresponse()
+        self.session = response.getheader("Mcp-Session-Id") or self.session
+        raw = response.read().decode()
+        if not want_reply:
+            return None
+        if response.status >= 300:
+            raise SystemExit("HTTP %d from server" % response.status)
+        for chunk in raw.splitlines() if "data:" in raw else [raw]:
+            chunk = chunk[5:].strip() if chunk.startswith("data:") else chunk.strip()
+            try:
+                reply = json.loads(chunk)
+            except ValueError:
+                continue
+            if reply.get("id") == message["id"]:
+                return reply
+        raise SystemExit("no reply with id %s" % message["id"])
+
+    def close(self):
+        pass
+
+
+def substitute(value, saved):
+    if isinstance(value, str) and value.startswith("$") and value[1:] in saved:
+        return saved[value[1:]]
+    if isinstance(value, dict):
+        return {k: substitute(v, saved) for k, v in value.items()}
+    if isinstance(value, list):
+        return [substitute(v, saved) for v in value]
+    return value
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("calls")
+    parser.add_argument("--stdio", action="store_true")
+    parser.add_argument("--url")
+    parser.add_argument("--token-env")
+    parser.add_argument("--stderr", help="file for the server's stderr (stdio only); default discards it")
+    parser.add_argument("--vars")
+    parser.add_argument("--save-vars")
+    parser.add_argument("server", nargs="*")
+    args = parser.parse_args()
+    client = Stdio(args.server, args.stderr) if args.stdio else Http(args.url, os.environ[args.token_env])
+    client.rpc({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "mcp_call", "version": "0"}}})
+    client.rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, want_reply=False)
+    saved = json.load(open(args.vars)) if args.vars else {}
+    failures = 0
+    for index, call in enumerate(json.load(open(args.calls)), start=1):
+        reply = client.rpc({"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {
+            "name": call["tool"], "arguments": substitute(call.get("arguments", {}), saved)}})
+        result = reply.get("result") or {}
+        text = "".join(block.get("text", "") for block in result.get("content", []))
+        is_error = bool(result.get("isError")) or "error" in reply
+        payload = payload_of(text)
+        problems = []
+        if is_error != (call.get("expect", "ok") == "error"):
+            problems.append("expected %s" % call.get("expect", "ok"))
+        for key in call.get("keys", []):
+            if not isinstance(payload, dict) or key not in payload:
+                problems.append("missing key " + key)
+        for pointer, pattern in call.get("pointers", {}).items():
+            node = payload
+            for part in [p for p in pointer.split("/") if p]:
+                node = node[int(part)] if isinstance(node, list) and part.isdigit() and int(part) < len(node) else (
+                    node.get(part) if isinstance(node, dict) else None)
+            if pattern.startswith("$"):  # "$name": must equal a saved variable exactly
+                pattern = "^" + re.escape(str(saved.get(pattern[1:]))) + "$"
+            if not re.search(pattern, str(node)):
+                problems.append("pointer %s does not match %s" % (pointer, pattern))
+        if "error_contains" in call and call["error_contains"] not in text:
+            problems.append("error text lacks %r" % call["error_contains"])
+        for variable, pointer in call.get("save", {}).items():
+            node = payload
+            for part in [p for p in pointer.split("/") if p]:
+                node = node.get(part) if isinstance(node, dict) else None
+            saved[variable] = node
+        failures += bool(problems)
+        shown = {name: saved.get(name) for name in call.get("show", [])}  # only for non-secret ids and fingerprints
+        detail = json.dumps(shape(payload)) if payload is not None else IPV4.sub("x.x.x.x", text)[:160]
+        print("%s %-34s %s%s" % ("FAIL" if problems else "PASS", call["name"],
+                                 "[error] " if is_error else "", detail), *("<- " + p for p in problems),
+              *(["shown " + json.dumps(shown)] if shown else []))
+    if args.save_vars:
+        fd = os.open(args.save_vars, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(saved, handle)
+    client.close()
+    sys.exit(1 if failures else 0)
+
+
+main()
+```
+
+- [x] **Step 3: Write the local smoke test, `scripts/tests/mcp_call_smoke.sh`**
+
+It proves the client against the built server with a throwaway inventory that points nowhere (no device contact).
+
+```bash
+#!/usr/bin/env bash
+# The MCP client completes a stdio handshake and a tool call against the real server binary.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+bin="${RUSTOPNSMCP_BIN:-${CARGO_TARGET_DIR:-target}/debug/rustopnsmcp}"
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+printf '{"version":1,"devices":{}}\n' > "$work/devices.json"; chmod 600 "$work/devices.json"
+cat > "$work/calls.json" <<'JSON'
+[{"name":"status","tool":"opnsmcp_status","arguments":{},"expect":"ok","keys":["version"]},
+ {"name":"unknown device refused","tool":"get_opnsense_firmware_status","arguments":{"device":"nope"},"expect":"error"}]
+JSON
+out=$(python3 -I scripts/live/mcp_call.py "$work/calls.json" --stdio -- "$bin" --device-mapping "$work/devices.json" --inventory-readonly)
+printf '%s\n' "$out"
+[ "$(printf '%s\n' "$out" | grep -c '^PASS')" = 2 ]
+```
+
+- [x] **Step 4: Run it**
+
+Run: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo build -p rustopnsmcp && env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target bash scripts/tests/mcp_call_smoke.sh`
+Expected: two `PASS` lines (verified while writing this plan: an empty inventory starts, `opnsmcp_status` returns `version`, `endpoint` and `uptime_seconds`, and the client's HTTP path authenticated against a local server too). Sabotage once: change `"expect":"error"` to `"ok"` and confirm the run exits non-zero, then restore.
+
+- [x] **Step 5: Commit**
+
+```bash
+chmod +x scripts/live/lab-get.sh scripts/live/mcp_call.py scripts/tests/mcp_call_smoke.sh
+git add scripts/live scripts/tests/mcp_call_smoke.sh
+git commit -m "scripts: lab read helper and shapes-only MCP client for live verification (#425)"
+```
+
+---
+
+### P3-Task 2: Test rigs and where the server runs (P3.2)
+
+**Decision: the server runs on a disposable test rig, not on the dev host.** Two stopped-by-default test LXCs follow the fleet's test-tier pattern (Debian 13, unprivileged, `nesting=1`, 1 core, 512 MB, no Rust toolchain):
+
+- `test-twoperson-opns`: the server in two-person mode. Task 13 runs here.
+- `test-labmode-opns`: the server with `--lab-mode`. Tasks 3, 8, 12, 14 and 15 run here.
+
+The production-tier pair waits for a release and is out of P3 scope. Each rig is started for a run and stopped afterwards; every start and stop first resolves the rig by name and checks its tags (`disposable`, never `protected`). The client, `mcp_call.py`, runs on the workstation over plain HTTP with a bearer token minted on the rig. The `test-*` names make the target obvious in every command.
+
+- **Binary.** The workstation's glibc (2.44) is newer than Debian 13's (2.41), and no release image exists yet, so the binary is built in the official Rust image on trixie at the toolchain in `rust-toolchain.toml`, and its glibc requirement is checked.
+- **Install.** A minimal manual install: service user and directories from the packaged `sysusers`/`tmpfiles`, the packaged unit with a drop-in that replaces `ExecStart`, `devices.json`, `tokens.json`. **Superseded by `packaging/lxc/install.sh` once P2 lands**; the drop-in leaves the packaged unit untouched, so P2's rework of it does not conflict. Plain HTTP with `--allow-insecure-bind` and `--allowed-host` naming the rig's address and short name, as the sibling test rigs do. No TLS.
+- **Credentials.** The lab API key, secret and CA certificate go from the dev host into each rig as owner-only files (0600, owned by the service user) under `/etc/rustopnsmcp/credentials/`, next to `devices.json`, which names them with `api_key_file`, `api_secret_file` and `ca_pem_path`. They stream dev host to rig through pipes: never a command-line argument, an environment variable, a file on the workstation, or output. `devices.json` is built from the endpoint the same way. The rig reaches opnsense-lab by IP literal, and the web certificate's SANs include that address, so whether the HTTP client accepts an IP-literal endpoint is answered by Step 6.
+- **Hygiene.** The scripts take the node, the dev host and the credentials file from `RIG_PVE`, `LAB_HOST` and `LAB_ENV_FILE` (never committed). Rig addresses and guest ids are looked up at run time and appear in no committed file.
+
+**Files:**
+- Create: `scripts/live/build-trixie.sh`, `scripts/live/rig-ctl.sh`, `scripts/live/emit-credential.sh`, `scripts/live/make-devices-json.py`, `scripts/live/rig-override.conf.in`, `scripts/live/rig-install.sh`, `scripts/live/rig-token.sh`, `scripts/live/calls/smoke.json`
+- Runtime only, never committed: the rig's `devices.json`, tokens, credentials, state file. On the workstation, a scratch directory `$P3_WORK` (mode 0700, outside every repository) holds the vars files, including `baseline.json`.
+
+**Interfaces:**
+- Consumes: the lab credentials env file on the dev host defines `OPNSENSE_URL`, `OPNSENSE_API_KEY`, `OPNSENSE_API_SECRET` and `OPNSENSE_CA` (a certificate file path).
+- Produces: a running `rustopnsmcp` on each rig on port 30037, and `rig-token.sh <rig> <name> agent|human`, which prints a token alone for command substitution. Later tasks reach a rig at `http://$RIG_IP:30037/mcp`, with `RIG_IP` looked up by `ssh $RIG_PVE pct exec <id> -- hostname -I`.
+
+- [x] **Step 1: Write the build script, `scripts/live/build-trixie.sh`.** (Checked while writing this plan: the image tag exists, the build takes about a minute warm, and the result needed `GLIBC_2.38`.)
+
+```bash
+#!/usr/bin/env bash
+# Build rustopnsmcp for Debian 13 in the official Rust image, at the toolchain in rust-toolchain.toml.
+# The workstation's glibc is newer than Debian 13's, so a host-built binary does not start on a rig.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+version=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$root/rust-toolchain.toml")
+cache="${P3_BUILD_CACHE:-$HOME/.cache/rustopnsmcp-p3-trixie}"; mkdir -p "$cache/target" "$cache/cargo"
+docker run --rm --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp -e RUSTUP_HOME=/usr/local/rustup -e RUSTUP_TOOLCHAIN="$version" \
+  -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
+  -v "$root":/src:ro -v "$cache":/cache -w /src "rust:${version}-trixie" \
+  cargo build --release --locked -p rustopnsmcp
+bin="$cache/target/release/rustopnsmcp"
+glibc=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+echo "$bin needs $glibc"
+[ "$(printf '%s\nGLIBC_2.41\n' "$glibc" | sort -V | tail -1)" = GLIBC_2.41 ] \
+  || { echo "needs glibc newer than Debian 13's 2.41" >&2; exit 1; }
+```
+
+- [x] **Step 2: Write `scripts/live/rig-ctl.sh`.** It is the only thing that starts, stops or runs a command inside a rig.
+
+```bash
+#!/usr/bin/env bash
+# Control a P3 test rig (a disposable LXC) from the workstation.
+#   rig-ctl.sh check|start|stop <rig>      evidence check, then start or stop the guest
+#   rig-ctl.sh svc <rig> <systemctl verb>  systemctl <verb> rustopnsmcp inside the rig
+#   rig-ctl.sh reset-state <rig>           stop the service, delete its change-set state, start it
+#   rig-ctl.sh vmid <rig>                  print the guest id on stdout (for other scripts)
+# <rig> is test-twoperson-opns or test-labmode-opns. Needs RIG_PVE: the ssh alias of the node hosting them.
+set -euo pipefail
+action="${1:?check|start|stop|svc|vmid}"; name="${2:?rig name}"
+case "$name" in test-twoperson-opns|test-labmode-opns) ;; *) echo "not a P3 rig: $name" >&2; exit 2 ;; esac
+: "${RIG_PVE:?}"
+# Resolve the name to a guest and its tags every time; ids get recycled.
+info=$(ssh "$RIG_PVE" pvesh get /cluster/resources --type vm --output-format json | NAME="$name" python3 -I -c '
+import json, os, sys
+rows = [r for r in json.load(sys.stdin) if r.get("name") == os.environ["NAME"]]
+if len(rows) != 1:
+    sys.exit("expected exactly one guest named %s, found %d" % (os.environ["NAME"], len(rows)))
+guest = rows[0]
+tags = (guest.get("tags") or "").replace(",", ";").split(";")
+if guest.get("type") != "lxc" or "protected" in tags or "disposable" not in tags:
+    sys.exit("refusing: %s must be a disposable, unprotected LXC (tags: %s)" % (guest["name"], ";".join(tags)))
+print(guest["vmid"], guest["node"], guest["status"])')
+read -r vmid node status <<<"$info"
+[ "$node" = "$(ssh "$RIG_PVE" hostname -s)" ] || { echo "$name is on $node, not on the node $RIG_PVE reaches" >&2; exit 1; }
+echo "$name: node $node, $status, tags include disposable and not protected" >&2
+case "$action" in
+  vmid) echo "$vmid" ;;
+  check) ;;
+  start)
+    [ "$status" = running ] || ssh "$RIG_PVE" pct start "$vmid"
+    for _ in $(seq 30); do
+      [ -n "$(ssh "$RIG_PVE" pct exec "$vmid" -- hostname -I 2>/dev/null | tr -d ' \n')" ] && exit 0
+      sleep 2
+    done
+    echo "$name has no address after 60 s" >&2; exit 1 ;;
+  stop) [ "$status" = stopped ] || ssh "$RIG_PVE" pct shutdown "$vmid" --timeout 30 ;;
+  svc) ssh "$RIG_PVE" pct exec "$vmid" -- systemctl "${3:?verb}" rustopnsmcp ;;
+  reset-state)
+    ssh "$RIG_PVE" pct exec "$vmid" -- systemctl stop rustopnsmcp
+    ssh "$RIG_PVE" pct exec "$vmid" -- rm -f /var/lib/rustopnsmcp/changeset-state.json
+    ssh "$RIG_PVE" pct exec "$vmid" -- systemctl start rustopnsmcp ;;
+  *) echo "unknown action $action" >&2; exit 2 ;;
+esac
+```
+
+- [x] **Step 3: Write the install scripts.** `emit-credential.sh` runs on the dev host. The three small files and `rig-install.sh` run on the workstation.
+
+```bash
+#!/usr/bin/env bash
+# Runs on the dev host (ssh ... bash -s -- <what> < emit-credential.sh). Writes one lab credential to
+# stdout and nothing else, for piping straight into a rig. Never run it with its output on a terminal.
+set -euo pipefail
+: "${LAB_ENV_FILE:?}"
+set -a; . "$LAB_ENV_FILE"; set +a
+case "${1:?key|secret|ca|endpoint}" in
+  key) printf '%s' "$OPNSENSE_API_KEY" ;;
+  secret) printf '%s' "$OPNSENSE_API_SECRET" ;;
+  ca) cat "$OPNSENSE_CA" ;;
+  endpoint) printf '%s' "$OPNSENSE_URL" ;;
+  *) exit 2 ;;
+esac
+```
+
+```python
+#!/usr/bin/env python3
+"""Read the lab endpoint on stdin, write the rig's devices.json on stdout. The endpoint is never printed elsewhere."""
+import json, sys
+endpoint = sys.stdin.read().strip()
+if not endpoint.startswith("https://"):
+    sys.exit("endpoint must be https://")
+base = "/etc/rustopnsmcp/credentials/"
+json.dump({"version": 1, "devices": {"opnsense-lab": {
+    "endpoint": endpoint, "api_key_file": base + "api-key", "api_secret_file": base + "api-secret",
+    "ca_pem_path": base + "ca.pem"}}}, sys.stdout)
+```
+
+`scripts/live/rig-override.conf.in`:
+
+```ini
+# P3 manual install. Superseded by packaging/lxc/install.sh once P2 lands.
+# Replaces the packaged ExecStart: plain HTTP for a throwaway test rig, no TLS, the inventory read-only.
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rustopnsmcp \
+    --device-mapping /etc/rustopnsmcp/devices.json \
+    --tokens-file /var/lib/rustopnsmcp/tokens.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --transport streamable-http --host @RIG_IP@ --port 30037 --allow-insecure-bind \
+    --allowed-host @RIG_IP@ --allowed-host @RIG_IP@:30037 \
+    --allowed-host @RIG_NAME@ --allowed-host @RIG_NAME@:30037 \
+    --inventory-readonly @LAB_MODE@
+EnvironmentFile=
+```
+
+```bash
+#!/usr/bin/env bash
+# Minimal manual install of rustopnsmcp into a P3 test rig. Superseded by packaging/lxc/install.sh once P2 lands.
+#   rig-install.sh <rig> <binary>
+# Needs RIG_PVE (node ssh alias), LAB_HOST (dev host ssh alias), LAB_ENV_FILE (path on the dev host).
+# Credentials stream dev host -> rig through pipes: never an argument, a variable, a file here, or output.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd); root=$(git -C "$here" rev-parse --show-toplevel)
+rig="${1:?rig}"; binary="${2:?binary}"
+vmid=$("$here/rig-ctl.sh" vmid "$rig")
+inrig() { ssh "$RIG_PVE" pct exec "$vmid" -- "$@"; }
+ip=$(inrig hostname -I | awk '{print $1}')
+mode=""; [ "$rig" = test-labmode-opns ] && mode="--lab-mode"
+emit() { ssh "$LAB_HOST" env "LAB_ENV_FILE=$LAB_ENV_FILE" bash -s -- "$1" < "$here/emit-credential.sh"; }
+tmp=$(ssh "$RIG_PVE" mktemp -d); local_tmp=$(mktemp -d)
+trap 'ssh "$RIG_PVE" rm -rf "$tmp"; rm -rf "$local_tmp"' EXIT
+sed -e "s/@RIG_IP@/$ip/g" -e "s/@RIG_NAME@/$rig/g" -e "s/@LAB_MODE@/$mode/" "$here/rig-override.conf.in" > "$local_tmp/override.conf"
+scp -q "$binary" "$root/packaging/systemd/rustopnsmcp.service" "$root/packaging/systemd/rustopnsmcp.sysusers" \
+  "$root/packaging/systemd/rustopnsmcp.tmpfiles" "$local_tmp/override.conf" "$RIG_PVE:$tmp/"
+push() { ssh "$RIG_PVE" pct push "$vmid" "$tmp/$1" "$2" --perms "$3"; }
+inrig mkdir -p /etc/systemd/system/rustopnsmcp.service.d
+push rustopnsmcp /usr/local/bin/rustopnsmcp 0755
+push rustopnsmcp.service /etc/systemd/system/rustopnsmcp.service 0644
+push override.conf /etc/systemd/system/rustopnsmcp.service.d/override.conf 0644
+push rustopnsmcp.sysusers /usr/lib/sysusers.d/rustopnsmcp.conf 0644
+push rustopnsmcp.tmpfiles /usr/lib/tmpfiles.d/rustopnsmcp.conf 0644
+inrig systemd-sysusers
+inrig systemd-tmpfiles --create
+inrig install -d -m 0700 -o rustopnsmcp -g rustopnsmcp /etc/rustopnsmcp/credentials
+# umask 077 and the stream: the file is created 0600; ownership is fixed afterwards.
+put() { ssh "$RIG_PVE" "pct exec $vmid -- sh -c 'umask 077; cat > $1'"; inrig chown rustopnsmcp:rustopnsmcp "$1"; }
+emit key    | put /etc/rustopnsmcp/credentials/api-key
+emit secret | put /etc/rustopnsmcp/credentials/api-secret
+emit ca     | put /etc/rustopnsmcp/credentials/ca.pem
+emit endpoint | python3 -I "$here/make-devices-json.py" | put /etc/rustopnsmcp/devices.json
+inrig systemctl daemon-reload
+# Sizes and modes only; a zero size means the rig did not forward stdin (see the plan's fallback).
+inrig stat -c '%a %U %s %n' /etc/rustopnsmcp/devices.json /etc/rustopnsmcp/credentials/api-key \
+  /etc/rustopnsmcp/credentials/api-secret /etc/rustopnsmcp/credentials/ca.pem | sed 's#/etc/rustopnsmcp/##'
+```
+
+```bash
+#!/usr/bin/env bash
+# Mint a bearer token on a rig for opnsense-lab and print it alone on stdout, for command substitution.
+#   rig-token.sh <rig> <token-name> agent|human
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+rig="${1:?rig}"; name="${2:?name}"; actor="${3:?agent|human}"
+vmid=$("$here/rig-ctl.sh" vmid "$rig")
+ssh "$RIG_PVE" pct exec "$vmid" -- runuser -u rustopnsmcp -- /usr/local/bin/rustopnsmcp token add \
+  --tokens-file /var/lib/rustopnsmcp/tokens.json --name "$name" --devices opnsense-lab --tools '\*' --actor-type "$actor"
+```
+
+- [x] **Step 4: Build and check, no rig contact.**
+
+```fish
+bash scripts/live/build-trixie.sh
+```
+
+Expected: the last line reads `... needs GLIBC_2.38` (anything up to `GLIBC_2.41` is acceptable). The binary is at `$HOME/.cache/rustopnsmcp-p3-trixie/target/release/rustopnsmcp`. Run `for f in scripts/live/*.sh; bash -n $f; end` and expect no output.
+
+- [x] **Step 5: Evidence check and first install. Needs the user's go-ahead (starts a rig and puts the lab credentials on it).** The user sets `RIG_PVE`, `LAB_HOST` and `LAB_ENV_FILE` in their shell.
+
+```fish
+bash scripts/live/rig-ctl.sh check test-labmode-opns
+bash scripts/live/rig-ctl.sh start test-labmode-opns
+bash scripts/live/rig-install.sh test-labmode-opns $HOME/.cache/rustopnsmcp-p3-trixie/target/release/rustopnsmcp
+```
+
+Expected: the check prints the rig's tag evidence; the install ends by printing `600 rustopnsmcp <size> ...` for `devices.json` and the three credential files, all sizes non-zero. A zero size means `pct exec` did not forward stdin; stop, and fall back to staging each secret in a 0700 directory on the node with `umask 077`, `pct push` it with `--perms 0600`, then delete the staging directory and report. Repeat the same three commands for `test-twoperson-opns`.
+
+- [x] **Step 6: Mint a token and smoke the first device contact (read-only).** The calls file `scripts/live/calls/smoke.json`:
+
+```json
+[
+ {"name":"status","tool":"opnsmcp_status","arguments":{},"expect":"ok"},
+ {"name":"firmware status","tool":"get_opnsense_firmware_status","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["product"]}
+]
+```
+
+```fish
+set -x P3_LAB_TOKEN (bash scripts/live/rig-token.sh test-labmode-opns p3-lab agent)
+bash scripts/live/rig-ctl.sh svc test-labmode-opns restart
+set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-labmode-opns) -- hostname -I | awk '{print $1}')
+python3 -I scripts/live/mcp_call.py scripts/live/calls/smoke.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN
+```
+
+Expected: two `PASS`. If `opnsmcp_status` is refused with a Host-header error, adjust the `--allowed-host` entries in the rig's `override.conf` (the template lists the address and name with and without the port). **If the rig cannot reach opnsense-lab, or the HTTP client refuses an IP-literal or private-address endpoint, stop and report**; the fallback is a host-file entry naming `opnsense-lab` on the rig, which needs the user's go-ahead. The token is never printed; the rig keeps its audit lines in the journal, not in any output pasted into a gate comment.
+
+- [x] **Step 7: Stop the rigs when the run ends:** `bash scripts/live/rig-ctl.sh stop test-labmode-opns` (and the other). Each stop repeats the tag evidence check. The credentials remain on the rig's disk until Task 15's final step removes them.
+
+- [x] **Step 8: Commit**
+
+```bash
+chmod +x scripts/live/*.sh
+git add scripts/live/build-trixie.sh scripts/live/rig-ctl.sh scripts/live/emit-credential.sh scripts/live/make-devices-json.py scripts/live/rig-override.conf.in scripts/live/rig-install.sh scripts/live/rig-token.sh scripts/live/calls/smoke.json
+git commit -m "scripts: test-rig build, install and control for the live run (#425)"
+```
+
+---
+
+### P3-Task 3: First live read run and the pass/fail table (P3.3)
+
+**Needs user acknowledgement (read-only, but not `GET`):** the server queries `search_*` endpoints with `POST` bodies (`current`, `rowCount`, `searchPhrase`). That is a read on OPNsense, and the probes above used the `GET` form, so the `POST` form is first seen here. No call in this task writes to the device. Creating a change set stores a record in the server's own state file and reads pre-images; it writes nothing to the device until `apply`.
+
+**Files:**
+- Create: `scripts/live/calls/reads.json`, `scripts/live/calls/refusals.json`
+- The table below is filled in this plan file in Step 4 and again in Task 8.
+
+**Interfaces:**
+- Consumes: Task 1 and 2 outputs.
+
+- [x] **Step 1: Write `scripts/live/calls/reads.json`**
+
+Fleet-meta and the nine reads, each with the key or pointer that shows the right shape and that redaction did not eat identifiers (a UUID must survive the redaction pass):
+
+```json
+[
+ {"name":"get_device_list","tool":"get_device_list","arguments":{},"expect":"ok"},
+ {"name":"gather_device_facts","tool":"gather_device_facts","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["product_version"],"pointers":{"/product_version":"^26\\.7"}},
+ {"name":"opnsmcp_status","tool":"opnsmcp_status","arguments":{},"expect":"ok"},
+ {"name":"system_status","tool":"get_opnsense_system_status","arguments":{"device":"opnsense-lab"},"expect":"ok"},
+ {"name":"firmware_status","tool":"get_opnsense_firmware_status","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/product/product_version":"^26\\.7"}},
+ {"name":"interfaces","tool":"list_opnsense_interfaces","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/total":"^5$","/rows/0/identifier":"."}},
+ {"name":"gateways","tool":"list_opnsense_gateways","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["rows"]},
+ {"name":"firewall_rules","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/coverage":"^complete$","/total":"^38$"}},
+ {"name":"firewall_rules page 2","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab","limit":10,"offset":10},"expect":"ok","pointers":{"/offset":"^10$","/next_offset":"^20$"}},
+ {"name":"aliases","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/total":"^10$","/rows/0/uuid":"^[0-9a-f-]{36}$"}},
+ {"name":"aliases search_phrase","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"a","limit":3},"expect":"ok","keys":["rows"]},
+ {"name":"aliases max_bytes","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","max_bytes":1024},"expect":"ok","pointers":{"/truncated_to_fit_max_bytes":"^True$"}},
+ {"name":"nat_rules","tool":"list_opnsense_nat_rules","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["outbound","one_to_one"]},
+ {"name":"routes","tool":"list_opnsense_routes","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["rows"]},
+ {"name":"dhcp_leases","tool":"list_opnsense_dhcp_leases","arguments":{"device":"opnsense-lab"},"expect":"ok","keys":["rows"]},
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"^sha256:[0-9a-f]{64}$"},"save":{"fp":"/fingerprint"}}
+]
+```
+
+- [x] **Step 2: Write `scripts/live/calls/refusals.json`** (no device write)
+
+```json
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp":"/fingerprint"}},
+ {"name":"create with a wrong fingerprint","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","actions":[{"operation":"create","resource":"alias","body":{"name":"p3_refusal","type":"host","content":"192.0.2.1"}}]},"expect":"error"},
+ {"name":"create with an unknown field","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[],"surprise":1},"expect":"error"},
+ {"name":"create with a non-writable field","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[{"operation":"create","resource":"alias","body":{"name":"p3_refusal","type":"host","uuid":"x"}}]},"expect":"error"},
+ {"name":"create a url alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[{"operation":"create","resource":"alias","body":{"name":"p3_refusal","type":"urltable","content":"https://example.org/x"}}]},"expect":"error"},
+ {"name":"approve an unknown id","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"nope","expected_digest":"sha256:00"},"expect":"error"},
+ {"name":"list change sets","tool":"list_opnsense_change_sets","arguments":{"device":"opnsense-lab"},"expect":"ok"},
+ {"name":"add_device refused read-only","tool":"add_device","arguments":{"device":"x","endpoint":"https://x.example.org","api_key_file":"/nope","api_secret_file":"/nope","ca_pem_path":"/nope"},"expect":"error","error_contains":"readonly"},
+ {"name":"reload_devices refused read-only","tool":"reload_devices","arguments":{},"expect":"error"}
+]
+```
+
+The `confirm_timeout_mins` refusal needs an existing change set and is exercised in Task 12 (Step 6), before its apply.
+
+- [x] **Step 3: Run both against the lab**
+
+Start `test-labmode-opns` (Task 2 Step 5), then on the workstation `python3 -I scripts/live/mcp_call.py scripts/live/calls/reads.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`, then the same with `refusals.json`. Both rigs run with `--inventory-readonly`, which the `add_device` and `reload_devices` rows rely on. Stop the rig afterwards.
+
+If `error_contains` for `add_device` does not match the server's real wording, set it to what the run shows; the wording is not part of the contract, the refusal is.
+
+- [x] **Step 4: Fill in the pass/fail table** (this is the P3.3 deliverable). Predictions come from the probes; the Result column is filled from the run.
+
+| # | Tool / call | Predicted before fixes | Result | Notes |
+|---|---|---|---|---|
+| 1 | `get_device_list` | PASS | PASS (1 device) | |
+| 2 | `gather_device_facts` | PASS with `product_name`, `uptime`, `cpu_type`, `load_average` all null | PASS; name, uptime, load non-null, no `cpu_type` | Fixed in Task 5 |
+| 3 | `opnsmcp_status` | PASS | PASS | |
+| 4 | `get_opnsense_system_status` | PASS (health summary only) | PASS | Description fixed in Task 5 |
+| 5 | `get_opnsense_firmware_status` | PASS | PASS | |
+| 6 | `list_opnsense_interfaces` | PASS (array branch) | PASS (5 rows) | |
+| 7 | `list_opnsense_gateways` | PASS | PASS (2 rows) | |
+| 8 | `list_opnsense_firewall_rules` (+ page 2) | PASS, `coverage: complete`, total 38 | PASS, `coverage: complete`, total 38; page 2 PASS | 31 rows are legacy/automatic |
+| 9 | `list_opnsense_aliases` (+ search, max_bytes) | PASS; UUIDs survive redaction | PASS (10 rows); `password` redacted on all rows, identifiers kept | Verify no row is over-redacted |
+| 10 | `list_opnsense_nat_rules` | PASS (outbound 3, one-to-one 0; port forwards not listed) | PASS (outbound 3) | port forwards deferred to P4/P5.2 |
+| 11 | `list_opnsense_routes` | PASS (0 rows) | PASS (0 rows) | |
+| 12 | `list_opnsense_dhcp_leases` | **FAIL** (upstream 404) | PASS, `backend: dnsmasq`, 0 rows | Fixed in Task 4 |
+| 13 | `get_opnsense_config_fingerprint` | PASS | PASS; identical across 3 runs | Stability checked in Task 8 |
+| 14 | create with a wrong fingerprint | refused | refused | |
+| 15 | create with an unknown field | refused | refused | |
+| 16 | create with a non-writable field | refused | refused | |
+| 17 | create a `urltable` alias | refused | refused | |
+| 18 | approve an unknown id | refused | refused (unknown change set) | |
+| 19 | `list_opnsense_change_sets` | PASS | PASS (0 rows) | |
+| 20 | `add_device` under `--inventory-readonly` | refused | refused (`inventory is read-only`) | |
+| 21 | `reload_devices` under `--inventory-readonly` | refused | refused (`inventory is read-only`) | |
+
+Record key names, counts and pass/fail only. A row whose Result differs from its prediction gets a note and, if it is a code defect, a task.
+
+Results are from the live run after the Task 4, 5 and 7 fixes (Tasks 3 and 8 ran as one session); the Predicted column is the before. Final run: every read PASS and every refusal refused. Notes:
+
+- The first run had two FAILs, both calls-file pointers and not server defects: internal interfaces carry an empty `identifier`, and built-in aliases are keyed by name rather than UUID. The pointers were corrected in the calls file.
+- The configuration fingerprint was identical across three runs several minutes apart (Task 8 Step 3).
+- The refusal rows ran with a token scoped to named tools (a wildcard tool scope excludes write tools by design), and all passed. `add_device` targets the in-scope device `opnsense-lab`, because a scope preflight rejects an unscoped device name before the read-only check.
+- Rig check: `test-twoperson-opns` runs without `--lab-mode` and `test-labmode-opns` with it.
+
+- [x] **Step 5: Commit the calls files and the filled table**
+
+```bash
+git add scripts/live/calls/reads.json scripts/live/calls/refusals.json docs/design/2026-09-30-rustopnsmcp-v1-plan.md
+git commit -m "scripts: live read and refusal runs, with first results (#425)"
+```
+
+---
+
+### P3-Task 4: DHCP leases for the backend that is actually enabled (P3.4)
+
+**Files:**
+- Modify: `rustopnsmcp-core/src/endpoints.rs` (constants; replace the ISC-only comment), `rustopnsmcp-core/src/tools/read.rs` (`list_dhcp_leases`), `rustopnsmcp/src/server/mod.rs` (tool description at the `list_opnsense_dhcp_leases` attribute)
+- Test: `rustopnsmcp-core/tests/read_tools.rs`
+- Create: `rustopnsmcp-core/tests/fixtures/dnsmasq_settings.json`, `kea_dhcpv4_settings.json`
+
+**Interfaces:**
+- Produces: `endpoints::DNSMASQ_SETTINGS_GET`, `DNSMASQ_LEASES_SEARCH`, `KEA_DHCPV4_GET`, `KEA_LEASES4_SEARCH`; `list_dhcp_leases` result gains `"backend": "dnsmasq" | "kea" | "isc"`. P4.5 extends this (DHCPv6, static mappings) rather than replacing it.
+
+Rule: a backend is detected by its own settings endpoint, not by a version number. `Some(true)` = installed and enabled, `Some(false)` = installed and disabled, `None` = endpoint absent (404). Neither new endpoint present means a device that predates both, and the legacy ISC path is used. One enabled: use it. Both enabled: refuse, because silently listing one would hide the other's leases. Present but none enabled: refuse and say so.
+
+- [x] **Step 1: Write the failing tests** (append to `tests/read_tools.rs`)
+
+```rust
+fn dhcp_routes(dnsmasq_enabled: &str, kea_enabled: &str) -> HashMap<String, serde_json::Value> {
+    use rustopnsmcp_core::endpoints as ep;
+    let mut routes = default_routes();
+    routes.remove(ep::DHCP_LEASES_SEARCH);
+    routes.insert(
+        ep::DNSMASQ_SETTINGS_GET.to_owned(),
+        serde_json::json!({ "dnsmasq": { "enable": dnsmasq_enabled } }),
+    );
+    routes.insert(
+        ep::KEA_DHCPV4_GET.to_owned(),
+        serde_json::json!({ "dhcpv4": { "general": { "enabled": kea_enabled } } }),
+    );
+    routes.insert(
+        ep::DNSMASQ_LEASES_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [{ "address": "192.0.2.50" }], "rowCount": 1, "total": 1, "current": 1 }),
+    );
+    routes.insert(
+        ep::KEA_LEASES4_SEARCH.to_owned(),
+        serde_json::json!({ "rows": [], "rowCount": 0, "total": 0, "current": 1,
+                            "stats": { "active": 0, "inactive": 0, "total": 0 } }),
+    );
+    routes
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_dnsmasq_when_it_is_the_enabled_backend() {
+    let client = client_against(dhcp_routes("1", "0")).await;
+    let leases = read::list_dhcp_leases(&client, &no_filter()).await.expect("leases");
+    assert_eq!(leases["backend"], "dnsmasq");
+    assert_eq!(leases["rows"][0]["address"], "192.0.2.50");
+}
+
+#[tokio::test]
+async fn dhcp_leases_come_from_kea_when_it_is_the_enabled_backend() {
+    let client = client_against(dhcp_routes("0", "1")).await;
+    let leases = read::list_dhcp_leases(&client, &no_filter()).await.expect("leases");
+    assert_eq!(leases["backend"], "kea");
+}
+
+#[tokio::test]
+async fn two_enabled_dhcp_backends_are_refused_not_silently_narrowed() {
+    let client = client_against(dhcp_routes("1", "1")).await;
+    let error = read::list_dhcp_leases(&client, &no_filter()).await.expect_err("both enabled");
+    assert!(error.to_string().contains("both"), "{error}");
+}
+
+#[tokio::test]
+async fn no_enabled_dhcp_backend_is_refused_and_says_so() {
+    let client = client_against(dhcp_routes("0", "0")).await;
+    let error = read::list_dhcp_leases(&client, &no_filter()).await.expect_err("none enabled");
+    assert!(error.to_string().contains("no DHCPv4 backend is enabled"), "{error}");
+}
+
+#[tokio::test]
+async fn a_device_with_neither_new_backend_falls_back_to_the_legacy_isc_path() {
+    // default_routes() serves DHCP_LEASES_SEARCH and 404s the two settings paths.
+    let client = client_against(default_routes()).await;
+    let leases = read::list_dhcp_leases(&client, &no_filter()).await.expect("leases");
+    assert_eq!(leases["backend"], "isc");
+    assert_eq!(leases["rows"][0]["hostname"], "example-host");
+}
+```
+
+- [x] **Step 2: Run to verify failure**
+
+Run: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo test -p rustopnsmcp-core --test read_tools dhcp`
+Expected: compile error, `DNSMASQ_SETTINGS_GET` not found.
+
+- [x] **Step 3: Implement**
+
+`endpoints.rs`: replace the `DHCP_LEASES_SEARCH` doc comment with "Legacy ISC DHCPv4 leases. **Absent on 26.7.5** (404 seen on opnsense-lab); used only when neither Dnsmasq nor Kea answers" and add:
+
+```rust
+/// Dnsmasq settings. `dnsmasq.enable` is `"1"` when the Dnsmasq service is on. Seen on 26.7.5.
+pub const DNSMASQ_SETTINGS_GET: &str = "/api/dnsmasq/settings/get";
+/// Dnsmasq DHCP leases, paginated search. Seen on 26.7.5 (envelope with `rows`, `total`, `interfaces`).
+pub const DNSMASQ_LEASES_SEARCH: &str = "/api/dnsmasq/leases/search";
+/// Kea DHCPv4 settings. `dhcpv4.general.enabled` is `"1"` when Kea DHCPv4 is on. Seen on 26.7.5.
+pub const KEA_DHCPV4_GET: &str = "/api/kea/dhcpv4/get";
+/// Kea DHCPv4 leases, paginated search. Seen on 26.7.5 (envelope plus `stats` and `interfaces`).
+pub const KEA_LEASES4_SEARCH: &str = "/api/kea/leases4/search";
+```
+
+`read.rs`: add before `list_dhcp_leases` and replace its body:
+
+```rust
+/// Which DHCPv4 service answers lease queries on a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DhcpBackend {
+    Dnsmasq,
+    Kea,
+    Isc,
+}
+
+impl DhcpBackend {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dnsmasq => "dnsmasq",
+            Self::Kea => "kea",
+            Self::Isc => "isc",
+        }
+    }
+    const fn leases_path(self) -> &'static str {
+        match self {
+            Self::Dnsmasq => endpoints::DNSMASQ_LEASES_SEARCH,
+            Self::Kea => endpoints::KEA_LEASES4_SEARCH,
+            Self::Isc => endpoints::DHCP_LEASES_SEARCH,
+        }
+    }
+}
+
+/// `Some(enabled)` when the settings endpoint exists, `None` when the device answers 404.
+async fn backend_enabled(
+    client: &OpnsenseClient,
+    path: &str,
+    pointer: &str,
+) -> Result<Option<bool>, OpnsenseError> {
+    match client.get(path).await {
+        Ok(settings) => Ok(Some(
+            settings.pointer(pointer).and_then(serde_json::Value::as_str) == Some("1"),
+        )),
+        Err(OpnsenseError::Upstream { status: 404, .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+async fn dhcp_backend(client: &OpnsenseClient) -> Result<DhcpBackend, OpnsenseError> {
+    let dnsmasq = backend_enabled(client, endpoints::DNSMASQ_SETTINGS_GET, "/dnsmasq/enable").await?;
+    let kea = backend_enabled(client, endpoints::KEA_DHCPV4_GET, "/dhcpv4/general/enabled").await?;
+    match (dnsmasq, kea) {
+        (Some(true), Some(true)) => Err(OpnsenseError::Config(
+            "both Dnsmasq and Kea DHCPv4 are enabled; listing one would hide the other's leases".to_owned(),
+        )),
+        (Some(true), _) => Ok(DhcpBackend::Dnsmasq),
+        (_, Some(true)) => Ok(DhcpBackend::Kea),
+        (None, None) => Ok(DhcpBackend::Isc),
+        _ => Err(OpnsenseError::Config(
+            "no DHCPv4 backend is enabled (Dnsmasq and Kea are both off)".to_owned(),
+        )),
+    }
+}
+
+/// `list_opnsense_dhcp_leases`: DHCPv4 leases from the enabled backend, one page.
+///
+/// The result's `backend` field says which service answered.
+///
+/// # Errors
+/// As [`list_firewall_rules`], and [`OpnsenseError::Config`] when no backend, or two, are enabled.
+pub async fn list_dhcp_leases(
+    client: &OpnsenseClient,
+    args: &ListArgs,
+) -> Result<serde_json::Value, OpnsenseError> {
+    let page = page_request(args)?;
+    let backend = dhcp_backend(client).await?;
+    let mut result = to_json(&search_page(client, backend.leases_path(), args, &page).await?)?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("backend".to_owned(), backend.label().into());
+    }
+    Ok(result)
+}
+```
+
+`server/mod.rs`: change the description's second sentence to "From the enabled DHCPv4 backend (Dnsmasq or Kea; legacy ISC only on devices that have neither); the result's backend field names it. DHCPv6 leases are NOT covered."
+
+- [x] **Step 4: Run to verify pass**, then the full suite.
+
+Run: `env CARGO_TARGET_DIR=$HOME/.cache/rustopnsmcp-p3-target cargo test -p rustopnsmcp-core --test read_tools` then `cargo test --workspace --locked`.
+Expected: PASS. The two settings fixture files are not needed by these tests (inline JSON); do not create them.
+
+- [x] **Step 5: Sabotage once.** Make `dhcp_backend` return `Ok(DhcpBackend::Dnsmasq)` unconditionally; the Kea and "two enabled" tests must fail. Restore.
+
+- [x] **Step 6: Commit** (`fix: list DHCP leases from the enabled backend; ISC is gone on 26.7 (#425)`)
+
+---
+
+### P3-Task 5: System status and device facts match what the device reports (P3.4)
+
+**Files:**
+- Modify: `rustopnsmcp-core/src/endpoints.rs` (`SYSTEM_TIME`), `rustopnsmcp-core/src/tools/fleet.rs` (`facts_from`), `rustopnsmcp/src/server/mod.rs` (the facts call near `facts_from(&args.device, &system, &firmware)`; descriptions of `get_opnsense_system_status` and `gather_device_facts`)
+- Test: `rustopnsmcp-core/src/tools/fleet.rs` (its unit tests), `rustopnsmcp-core/tests/read_tools.rs`
+
+**Interfaces:**
+- Produces: `endpoints::SYSTEM_TIME = "/api/diagnostics/system/systemTime"`; `facts_from(device, time: &Value, firmware: &Value) -> Value` with fields `device, product_name, product_version, product_latest, product_series, upgrade_needs_reboot, uptime, load_average`. `cpu_type` is removed: no source was found on 26.7.5, and a permanently null field is noise.
+
+Findings behind this: `product_name` is at `/product/product_name` of the firmware status; uptime and load are `uptime` and `loadavg` of system time; `/upgrade_needs_reboot` is absent on 26.7.5 so it stays, null when unreported, and the description says so.
+
+- [x] **Step 1: Rewrite the failing unit test** in `fleet.rs` to use inline shapes seen on the device
+
+```rust
+#[test]
+fn facts_read_the_shapes_26_7_reports() {
+    let time = serde_json::json!({ "uptime": "3 days, 04:12", "loadavg": "0.12, 0.09, 0.05", "datetime": "x", "boottime": "x", "config": "x" });
+    let firmware = serde_json::json!({ "status": "none", "product": {
+        "product_name": "OPNsense", "product_version": "26.7.5", "product_latest": "26.7.5", "product_series": "26.7" } });
+    let facts = facts_from("fw-1", &time, &firmware);
+    assert_eq!(facts["product_name"], "OPNsense");
+    assert_eq!(facts["product_series"], "26.7");
+    assert_eq!(facts["uptime"], "3 days, 04:12");
+    assert_eq!(facts["load_average"], "0.12, 0.09, 0.05");
+    assert!(facts["upgrade_needs_reboot"].is_null(), "26.7.5 does not report it");
+    assert!(facts.get("cpu_type").is_none());
+}
+```
+
+Update `a_missing_fact_is_null_not_invented` to drop its `cpu_type` assertion and assert `uptime` is null instead.
+
+- [x] **Step 2: Run to verify failure** (`cargo test -p rustopnsmcp-core fleet`), expected: wrong `product_name`.
+
+- [x] **Step 3: Implement**: the pointers become `firmware /product/product_name`, `time /uptime`, `time /loadavg`; delete `cpu_type`. In `server/mod.rs` read `fleet`'s time with `client.get(endpoints::SYSTEM_TIME)` (and `require_object`) instead of `read::system_status`. Descriptions: `get_opnsense_system_status` becomes "OPNsense system health summary: an overall status code, a message, and any subsystem notices. For version and uptime use gather_device_facts." `gather_device_facts` drops "CPU" and says "upgrade_needs_reboot is null when the device does not report it".
+
+- [x] **Step 4: Update `read_tools.rs`**'s `system_status_reads_the_fixture` to assert `status["metadata"]["system"]["status"]` once Task 10 swaps the fixture. Until then it passes unchanged; keep the old assertion and mark the dependency in the commit body.
+
+- [x] **Step 5: Run the workspace gates and commit** (`fix: facts and system status match the 26.7 response shapes (#425)`).
+
+---
+
+### P3-Task 6: Port forwards in the NAT listing: deferred
+
+**Deferred to P4 / P5.2 by the user's decision; nothing to do in P3.** The probe finding to carry forward: `GET /api/firewall/d_nat/search_rule` answers 200 on 26.7.5 with the usual envelope (4 rows on the baseline), so the `endpoints.rs` comment that `DNatController` "exists only on core master" and the `list_opnsense_nat_rules` description ("Port forwards ... are NOT included") are wrong for this release. The task number is kept so the list stays stable. Until then Task 3's NAT row passes with outbound and one-to-one rules only, and the README (Task 16) must say port forwards are not listed.
+
+---
+
+### P3-Task 7: A fingerprint and a pre-image that survive live counters (P3.4)
+
+**Files:**
+- Modify: `rustopnsmcp-core/src/changeset/fingerprint.rs` (`VOLATILE_FIELDS`), `rustopnsmcp-core/src/changeset/preimage.rs` (add `same_configuration`), `rustopnsmcp-core/src/changeset/mod.rs` (re-export), `rustopnsmcp-core/src/client.rs` (`preimage_matches`)
+- Test: the `tests` modules of `fingerprint.rs` and `preimage.rs`
+
+**Interfaces:**
+- Produces: `VOLATILE_FIELDS` extended; `pub fn same_configuration(recorded: &Value, live: &Value) -> bool` in `preimage.rs`, true when the two bodies are equal once `VOLATILE_FIELDS` are removed at every depth and key order is ignored.
+
+`counters` (the alias option that turns pf counters on) is configuration and must NOT be in the list.
+
+- [x] **Step 1: Failing tests**
+
+In `fingerprint.rs`:
+
+```rust
+#[test]
+fn pf_counters_do_not_change_the_fingerprint() {
+    for field in ["eval_nomatch", "eval_match", "in_block_p", "in_block_b", "in_pass_p", "in_pass_b",
+                  "out_block_p", "out_block_b", "out_pass_p", "out_pass_b"] {
+        let mut ticked = alias("1", "192.0.2.1");
+        ticked[field] = json!("17");
+        assert_eq!(
+            fingerprint_collections(&[alias("1", "192.0.2.1")], &[]).unwrap(),
+            fingerprint_collections(&[ticked], &[]).unwrap(),
+            "{field} is a live counter"
+        );
+    }
+}
+
+#[test]
+fn the_counters_option_is_configuration_and_does_change_the_fingerprint() {
+    let mut toggled = alias("1", "192.0.2.1");
+    toggled["counters"] = json!("1");
+    assert_ne!(
+        fingerprint_collections(&[alias("1", "192.0.2.1")], &[]).unwrap(),
+        fingerprint_collections(&[toggled], &[]).unwrap()
+    );
+}
+```
+
+In `preimage.rs`:
+
+```rust
+#[test]
+fn a_live_counter_tick_is_not_drift_but_a_content_change_is() {
+    let recorded = json!({ "uuid": "u", "name": "a", "content": { "192.0.2.1": { "value": "192.0.2.1", "selected": 1 } }, "eval_nomatch": "3" });
+    let mut ticked = recorded.clone();
+    ticked["eval_nomatch"] = json!("9");
+    assert!(same_configuration(&recorded, &ticked));
+    let mut edited = recorded.clone();
+    edited["name"] = json!("b");
+    assert!(!same_configuration(&recorded, &edited));
+}
+```
+
+- [x] **Step 2: Run, expect failures** (`cargo test -p rustopnsmcp-core fingerprint preimage`).
+
+- [x] **Step 3: Implement.** `VOLATILE_FIELDS` becomes the ten counters above plus `current_items` and `last_updated`, with the comment "pf evaluation counters and table sizes: re-read on every request (eval_nomatch seen ticking on opnsense-lab within 20 s). Not configuration." Make `canonical` `pub(super)`. In `preimage.rs`:
+
+```rust
+/// Whether `live` is the configuration `recorded` captured, ignoring live counters.
+#[must_use]
+pub fn same_configuration(recorded: &Value, live: &Value) -> bool {
+    super::fingerprint::canonical(recorded) == super::fingerprint::canonical(live)
+}
+```
+
+In `client.rs`, `preimage_matches`: replace `Some(live) if live == recorded => {}` with `Some(live) if crate::changeset::same_configuration(&recorded, &live) => {}`. Re-export in `changeset/mod.rs`.
+
+- [x] **Step 4: Run the workspace tests.** Expected PASS.
+
+- [x] **Step 5: Sabotage** the second site: change `preimage_matches` back to `live == recorded`. `apply.rs` has no test that notices (its mock controller bypasses `OpnsenseClient`), so add one integration test in `tests/read_tools.rs` using `client_against` with a `getItem` route whose body differs from the recorded pre-image only in `eval_nomatch`, and assert `ControllerOps::preimage_matches` returns `Ok(true)`. Confirm it fails under the sabotage, then restore. (`ControllerOps` must be in scope: `use rustopnsmcp_core::changeset::{ControllerOps, Preimage, ResourceKind, StagedMutation};`.)
+
+- [x] **Step 6: Commit** (`fix: pf counters are not configuration drift in the fingerprint or the pre-image check (#425)`).
+
+---
+
+### P3-Task 8: Re-run the live reads and prove the fingerprint is stable (P3.3, P3.4)
+
+**Needs user acknowledgement:** same as Task 3 (read-only, `POST` searches).
+
+- [x] **Step 1: Rebuild and reinstall.** Run `scripts/live/build-trixie.sh`, start `test-labmode-opns`, and re-run `scripts/live/rig-install.sh` (it overwrites the binary and leaves `tokens.json`; restart the service with `rig-ctl.sh svc test-labmode-opns restart`).
+- [x] **Step 2: Re-run `reads.json` and `refusals.json`.** Expected: every row of the Task 3 table is PASS, including `list_opnsense_dhcp_leases` (`backend: dnsmasq`), `gather_device_facts` (non-null name, uptime and load), and `list_opnsense_nat_rules` (outbound and one-to-one only; port forwards are deferred).
+- [x] **Step 3: Stability check.** Run `reads.json` a second time 30 seconds after the first, with `--save-vars $P3_WORK/fp-run2.json`, and the first with `--save-vars $P3_WORK/fp-run1.json`; `cmp` the two files. Expected: identical. Before Task 7 they would differ whenever an alias counter ticked.
+- [x] **Step 4: Record the baseline.** The first clean run's `fp-run1.json` is copied to `$P3_WORK/baseline.json` after renaming its `fp` key to `baseline` (`jq '{baseline: .fp}'`). Every later write task requires the live fingerprint to equal it. It is a hash of configuration, not a secret, but it lives in `$P3_WORK` so the plan stays free of device facts. Stop the rig.
+- [x] **Step 5: Update the Task 3 table's Result column** and commit the plan file (`docs(plan): P3 live read results after endpoint fixes (#425)`).
+
+### P3-Task 9: Fixture sanitizer (P3.5)
+
+**Files:**
+- Create: `scripts/sanitize_fixture.py`, `scripts/sanitize-fixture.sh`, `scripts/tests/sanitize-fixture.test.sh`
+- Modify: `.github/workflows/ci.yml` (one new step after "One mecmcp pin")
+
+**Interfaces:**
+- Produces: `sanitize-fixture.sh [--deny-file F] [--max-rows N] IN.json > OUT.json` and `sanitize-fixture.sh --verify [--deny-file F] FILE.json`. Exit 0 clean, 2 when verification finds a leftover. Messages name the category and count, never the value.
+
+Rules, applied to every string key and value:
+
+1. **Key names** matching password, passwd, secret, token, api key, key, hash, cert, crt, pem, psk, private or username: a non-empty value becomes `"REDACTED"`.
+2. **Values** that are a PEM block, a crypt hash (`$1$`, `$2*$`, `$5$`, `$6$`, `$y$`), or a 40+ character base64/hex blob become `"REDACTED"`.
+3. **UUIDs and 32-character legacy refs** map to a deterministic fake of the same length (same input, same output, across files).
+4. **IPv4** maps to RFC 5737 (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`) by hash, keeping any `/prefix`; `0.0.0.0`, `255.*` and `127.*` are kept. **IPv6** maps to `2001:db8::x`; `::` and `::1` are kept. **MACs** map to `02:00:00:00:xx:xx`.
+5. **Domain names** under real-looking top-level domains map to `host-N.example.org`, except `example.*` and `opnsense.org`. Every line of `--deny-file` (outside the repository: the lab's own names) is replaced the same way.
+6. `--max-rows N` truncates a top-level `rows` array and rewrites `total` and `rowCount` to match.
+7. `--verify` re-scans the output for anything rules 1-5 would still change and exits 2.
+
+- [x] **Step 1: Write the test first**, `scripts/tests/sanitize-fixture.test.sh`. Secret-shaped input is assembled at run time so the test file itself contains no secret-shaped literal for the pre-push gate to flag.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+san=scripts/sanitize-fixture.sh
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+python3 -I - "$work/in.json" <<'PY'
+import json, sys
+secret_key = "pass" + "word"; blob = "A" * 44
+json.dump({"rows": [
+  {"uuid": "6f1c2a3e-1111-4222-8333-444455556666", "name": "web", secret_key: "hunter" + "2",
+   "content": "10.20.30.40\n10.20.30.41/24", "gw": "fe80::1:2:3:4", "mac": "00:11:22:33:44:55",
+   "fqdn": "gateway.corp.net", "pem": "-----BEGIN " + "CERTIFICATE-----", "blob": blob,
+   "legacy_ref": "0123456789abcdef0123456789abcdef", "crypt": "$6$" + "salt$hash", "version": "26.7.5", "ok": "config.xml"},
+  {"uuid": "6f1c2a3e-1111-4222-8333-444455556666", "name": "second"}], "total": 2, "rowCount": 2}, open(sys.argv[1], "w"))
+PY
+"$san" "$work/in.json" > "$work/out1.json"
+"$san" "$work/in.json" > "$work/out2.json"
+cmp "$work/out1.json" "$work/out2.json"                                  # deterministic
+"$san" --verify "$work/out1.json"                                        # its own output is clean
+for leaked in 10.20.30 fe80 00:11:22 corp.net hunter BEGIN 0123456789abcdef '\$6\$' "AAAAAAAA"; do
+  if grep -qE "$leaked" "$work/out1.json"; then echo "leaked: $leaked"; exit 1; fi
+done
+grep -q '26.7.5' "$work/out1.json"; grep -q 'config.xml' "$work/out1.json"  # benign values survive
+jq -e '.rows[0].uuid == .rows[1].uuid' "$work/out1.json" >/dev/null       # same input, same fake
+"$san" --max-rows 1 "$work/in.json" | jq -e '.total == 1 and .rowCount == 1 and (.rows|length) == 1' >/dev/null
+if "$san" --verify "$work/in.json" 2>"$work/err"; then echo "verify passed dirty input"; exit 1; fi
+! grep -qE '10\.20\.30|corp\.net' "$work/err"                             # messages carry no values
+printf 'corp.net\n' > "$work/deny"
+echo '{"x":"see host.corp.net"}' > "$work/d.json"
+if "$san" --verify --deny-file "$work/deny" "$work/d.json" 2>/dev/null; then echo "deny-file ignored"; exit 1; fi
+echo OK
+```
+
+- [x] **Step 2: Run it, expect failure** (the scripts do not exist).
+
+- [x] **Step 3: Implement `scripts/sanitize_fixture.py`**
+
+```python
+#!/usr/bin/env python3
+"""Sanitize a raw OPNsense capture into a committable fixture. Stdlib only. See sanitize-fixture.sh."""
+import argparse, hashlib, ipaddress, json, re, sys
+
+SECRET_KEY = re.compile(r"(pass(word|wd)?|secret|token|api[_-]?key|(^|[_.-])key($|[_.-])|hash|cert|crt|pem|psk|private|username)", re.I)
+PEM = re.compile(r"-----BEGIN ")
+CRYPT = re.compile(r"^\$(1|2[abxy]?|5|6|y)\$")
+BLOB = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
+UUID36 = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+REF32 = re.compile(r"^[0-9a-f]{32}$")
+IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+IPV6 = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])")
+MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
+DOMAIN = re.compile(r"\b(?:[A-Za-z0-9-]+\.)+(?:org|com|net|io|dev|lan|local|internal|home|localdomain)\b", re.I)
+KEEP_DOMAIN = re.compile(r"(^|\.)(example\.(org|com|net)|opnsense\.org)$", re.I)
+DOC_V4 = ("192.0.2.", "198.51.100.", "203.0.113.")
+SALT = "rustopnsmcp-fixture-v1"
+
+
+def digest(kind, value):
+    return hashlib.sha256(f"{SALT}:{kind}:{value}".encode()).digest()
+
+
+def fake_v4(match):
+    address = match.group(0)
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except ValueError:
+        return address
+    if address == "0.0.0.0" or address.startswith(("255.", "127.")) or str(parsed).startswith(DOC_V4):
+        return address
+    index = int.from_bytes(digest("v4", address)[:4], "big") % (len(DOC_V4) * 254)
+    return f"{DOC_V4[index // 254]}{index % 254 + 1}"
+
+
+def fake_v6(match):
+    text = match.group(0)
+    try:
+        parsed = ipaddress.IPv6Address(text)
+    except ValueError:
+        return text
+    if parsed in (ipaddress.IPv6Address("::"), ipaddress.IPv6Address("::1")) or str(parsed).startswith("2001:db8:"):
+        return text
+    return "2001:db8::%x" % (int.from_bytes(digest("v6", text)[:2], "big") or 1)
+
+
+def fake_mac(match):
+    if match.group(0).lower().startswith("02:00:00:00"):
+        return match.group(0)
+    raw = digest("mac", match.group(0).lower())
+    return "02:00:00:00:%02x:%02x" % (raw[0], raw[1])
+
+
+def fake_domain(match):
+    if KEEP_DOMAIN.search(match.group(0)):
+        return match.group(0)
+    return "host-%d.example.org" % (int.from_bytes(digest("dom", match.group(0).lower())[:2], "big") % 1000)
+
+
+def fake_uuid(match):
+    h = digest("uuid", match.group(0).lower()).hex()
+    return f"{h[:8]}-{h[8:12]}-4{h[13:16]}-8{h[17:20]}-{h[20:32]}"
+
+
+def scrub_string(text, denied):
+    if PEM.search(text) or CRYPT.match(text) or BLOB.match(text):
+        return "REDACTED"
+    if REF32.match(text):
+        return digest("ref", text).hex()[:32]
+    for name in denied:
+        text = re.sub(re.escape(name), "redacted.example.org", text, flags=re.I)
+    text = MAC.sub(fake_mac, text)
+    text = UUID36.sub(fake_uuid, text)
+    text = IPV4.sub(fake_v4, text)
+    text = IPV6.sub(fake_v6, text)
+    return DOMAIN.sub(fake_domain, text)
+
+
+def walk(node, denied, key=""):
+    if isinstance(node, dict):
+        # Keys are scrubbed too: an alias's content map is keyed by its addresses.
+        return {scrub_string(k, denied) if k else k: walk(v, denied, k) for k, v in node.items()}
+    if isinstance(node, list):
+        return [walk(v, denied, key) for v in node]
+    if isinstance(node, str) and node:
+        return "REDACTED" if SECRET_KEY.search(key) else scrub_string(node, denied)
+    return node
+
+
+def leftovers(text, denied):
+    """Categories still present in already-sanitized text, as {category: count}."""
+    found = {}
+    def note(category, count):
+        if count:
+            found[category] = count
+    note("ipv4", sum(1 for m in IPV4.finditer(text) if fake_v4(m) != m.group(0)))
+    note("ipv6", sum(1 for m in IPV6.finditer(text) if fake_v6(m) != m.group(0)))
+    note("mac", sum(1 for m in MAC.finditer(text) if fake_mac(m) != m.group(0)))
+    note("domain", sum(1 for m in DOMAIN.finditer(text) if fake_domain(m) != m.group(0)))
+    note("pem", len(PEM.findall(text)))
+    note("deny-file name", sum(1 for name in denied if name.lower() in text.lower()))
+    return found
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file")
+    parser.add_argument("--deny-file")
+    parser.add_argument("--max-rows", type=int)
+    parser.add_argument("--verify", action="store_true")
+    args = parser.parse_args()
+    denied = [l.strip() for l in open(args.deny_file) if l.strip()] if args.deny_file else []
+    if args.verify:
+        found = leftovers(open(args.file).read(), denied)
+        for category, count in found.items():
+            print(f"leftover {category}: {count}", file=sys.stderr)
+        sys.exit(2 if found else 0)
+    document = json.load(open(args.file))
+    if args.max_rows is not None and isinstance(document, dict) and isinstance(document.get("rows"), list):
+        document["rows"] = document["rows"][: args.max_rows]
+        for field in ("total", "rowCount"):
+            if field in document:
+                document[field] = len(document["rows"])
+    clean = walk(document, denied)
+    text = json.dumps(clean, indent=2, sort_keys=True) + "\n"
+    found = leftovers(text, denied)
+    if found:
+        print("sanitizer left " + ", ".join(f"{k}: {v}" for k, v in found.items()), file=sys.stderr)
+        sys.exit(2)
+    sys.stdout.write(text)
+
+
+main()
+```
+
+`scripts/sanitize-fixture.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Sanitize a raw OPNsense capture (see scripts/sanitize_fixture.py for the rules).
+exec python3 -I "$(dirname "$0")/sanitize_fixture.py" "$@"
+```
+
+`walk` redacts by key name before the value rules, so a `password` key never reaches them; dict keys are scrubbed as well as values (a `getItem` content map is keyed by the addresses); and `--verify` is a second, independent pass over the output text.
+
+- [x] **Step 4: Run the test until it passes**, adjusting only the script (not weakening the test). Expected: `OK`.
+
+- [x] **Step 5: Add the CI step**
+
+```yaml
+      - name: Fixture sanitizer self-test
+        run: scripts/tests/sanitize-fixture.test.sh
+```
+
+- [x] **Step 6: Sabotage once.** Delete the `IPV4.sub(fake_v4, text)` line; the test must fail on the leaked address (and `--verify` on the output must report `ipv4`). Restore.
+
+- [x] **Step 7: Commit** (`scripts: fixture sanitizer with a verifying second pass (#425)`).
+
+---
+
+### P3-Task 10: Record and commit live-derived fixtures (P3.5)
+
+**Needs user acknowledgement:** read-only `GET`s through `lab-get.sh`; raw bodies are written to `$LAB_WORK/raw/` on the dev host (mode 0700 dir, 0600 files) and are never copied here.
+
+**Files:**
+- Replace: `rustopnsmcp-core/tests/fixtures/{system_status,firmware_status,interfaces,gateways,firewall_rules,aliases,nat_outbound}.json`
+- Create: `rustopnsmcp-core/tests/fixtures/{alias_get_item,rule_get_item}.json`
+- Keep synthetic: `nat_one_to_one.json`, `routes.json`, `dhcp_leases.json` (empty on the baseline)
+- Modify: `rustopnsmcp-core/src/testing.rs` (header), the assertions in `tests/read_tools.rs`, `src/tools/fleet.rs` and `src/changeset/validate.rs` that name old fixture values
+- Create (dev host only): `$LAB_WORK/deny.txt`, one name per line, the lab's own hostnames and domain
+
+- [x] **Step 1: Capture raw** (one `lab-get.sh raw` per path, on the dev host)
+
+| Fixture | Path (`?current=1&rowCount=-1` on search endpoints) | `--max-rows` |
+|---|---|---|
+| `system_status` | `/api/core/system/status` | |
+| `firmware_status` | `/api/core/firmware/status` | |
+| `interfaces` | `/api/interfaces/overview/interfacesInfo` | |
+| `gateways` | `/api/routes/gateway/status` | |
+| `firewall_rules` | `/api/firewall/filter/search_rule` | 8 |
+| `aliases` | `/api/firewall/alias/search_item` | |
+| `nat_outbound` | `/api/firewall/source_nat/search_rule` | |
+| `alias_get_item` | `/api/firewall/alias/getItem/<uuid of an alias with a non-empty content>` | |
+| `rule_get_item` | `/api/firewall/filter/getRule/<uuid of an MVC rule>` | |
+
+The two uuids are read from the capture of the matching search on the dev host.
+
+- [x] **Step 2: Sanitize on the dev host.** For each raw file: `scripts/sanitize-fixture.sh --deny-file $LAB_WORK/deny.txt [--max-rows N] raw > clean/NAME.json`, then `scripts/sanitize-fixture.sh --verify --deny-file $LAB_WORK/deny.txt clean/NAME.json`. Copy `scripts/sanitize*` to the dev host first; they have no host details.
+
+- [x] **Step 3: Review by eye.** Print each clean file's key names, and read the values of every file in full on the dev host. Stop and report anything that looks like a real name, address, serial, key or hash that the rules did not catch; extend the sanitizer (with a test) rather than hand-editing the output.
+
+- [x] **Step 4: Copy only `clean/` to this repository's fixtures directory** (`scp`). `git diff --stat` shows fixtures only.
+
+- [x] **Step 5: Fix the tests to the real values.** Failing tests drive this: run `cargo test --workspace --locked`, and for each failure change the assertion to the sanitized fixture's value (for example `system_status` becomes `status["metadata"]["system"]["status"]`, `interfaces` expects 5 rows and `rows[0].identifier` from the capture, `firewall_rules` expects `coverage: complete` and a `product_version` of `26.7.5`, `rule_listing` tests keep their own inline versions).  Replace `testing.rs`'s header with: "Most fixtures under `tests/fixtures/` are sanitized captures from opnsense-lab on 26.7.5 (see `scripts/sanitize-fixture.sh`). `nat_one_to_one`, `routes` and `dhcp_leases` are synthetic: those collections are empty on the baseline, so there is nothing to capture."
+
+- [x] **Step 6: Use the real pre-image shapes.** Two new tests in `src/changeset/validate.rs`:
+
+```rust
+#[test]
+fn flatten_for_write_accepts_a_live_alias_get_item() {
+    let live = crate::testing::fixture("alias_get_item");
+    let flat = flatten_for_write(ResourceKind::Alias, &live["alias"]);
+    assert!(flat["type"].is_string() && flat["content"].is_string());
+}
+
+#[test]
+fn every_writable_field_exists_in_the_live_bodies() {
+    let alias = crate::testing::fixture("alias_get_item");
+    let rule = crate::testing::fixture("rule_get_item");
+    for field in ALIAS_WRITABLE_FIELDS { assert!(alias["alias"].get(*field).is_some(), "alias {field}"); }
+    for field in RULE_WRITABLE_FIELDS { assert!(rule["rule"].get(*field).is_some(), "rule {field}"); }
+}
+```
+
+The probes confirmed all names are present on 26.7.5. Then replace the "none has been exercised against a live OPNsense" sentence on `RULE_WRITABLE_FIELDS` with "names verified against `getRule` on 26.7.5; write behaviour verified in P3 Tasks 12-14", and rewrite the `endpoints.rs` header the same way (read paths verified on 26.7.5, write verbs not yet).
+
+- [x] **Step 7: Secret gate before commit.** `gitleaks detect --no-git --source rustopnsmcp-core/tests/fixtures` (or the pinned binary the pre-push hook uses) reports nothing; the pre-push gate is not bypassed. Then the CI gates.
+
+- [x] **Step 8: Commit** (`test: replace synthetic fixtures with sanitized opnsense-lab captures (#425)`).
+
+---
+
+### P3-Task 11: Baseline reset procedure and preflight (precondition for Tasks 12-15)
+
+**The user approved a snapshot rollback to `baseline-seeded` before each of Tasks 12-15; each rollback is still a named go-ahead step at run time.** Reading the guest's tags and snapshot list needs none. Starting and stopping a rig is covered in Task 2 and repeated here because every write task begins and ends with it.
+
+**Files:** none. The procedure is recorded here so it is used identically each time.
+
+**Reset and run procedure (generic):**
+
+1. Resolve the opnsense-lab VM by name and tag, never by a remembered id. **Hard gate:** refuse and stop unless exactly one guest is named `opnsense-lab` and its tags include `disposable`, `lab` and `rustopnsmcp` and not `protected`. Print its name, node, tags and snapshot list.
+2. Confirm the `baseline-seeded` snapshot exists.
+3. With the user's go-ahead for this rollback, roll opnsense-lab back to `baseline-seeded` through the Proxmox tooling (MCP or the cluster CLI, per the lab guardrails). **The `baseline-seeded` snapshot predates the `disposable` tag, so a rollback restores a config without it: re-apply the tag immediately after every rollback (e.g. `qm set <id> --tags 'disposable;lab;rustopnsmcp'`), before starting the VM.** This was found live on 2026-10-29: a rollback once proceeded without the tag gate (same guest, approved by name). If the snapshot has no memory state, start the VM afterwards. Do not stop or start the opnsense-lab VM for any other reason.
+4. Wait until `lab-get.sh shape /api/core/firmware/info` (on the dev host) answers `HTTP 200`.
+5. Start the rig for the task (`rig-ctl.sh start <rig>`) and clear its change-set state (`rig-ctl.sh reset-state <rig>`), so a stale change set cannot be applied.
+6. Run a fingerprint call (`pointers: {"/fingerprint": "$baseline"}`, `--vars $P3_WORK/baseline.json`). A mismatch means the device is not at baseline: stop.
+7. After the task, stop the rig (`rig-ctl.sh stop <rig>`; it re-checks the tags).
+
+- [x] **Step 1: Preflight, read-only.** Run steps 1-2, 4 and 6 with the rig started (skip 3 and 5). Expected: tags as above, snapshot present, API 200, fingerprint equals the baseline.
+- [x] **Step 2: Ask the user** to approve Tasks 12-15 individually, naming the writes each performs (listed in each task) and the rollback before each, and whether the final credential cleanup in Task 15 Step 5 is wanted.
+
+---
+
+### P3-Task 12: Alias change set, live, lab-mode waiver (P3.6)
+
+**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: creates, updates and deletes one alias named `p3_live_hosts`, and runs the alias `reconfigure` three times. Nothing else is touched. The server is `test-labmode-opns` (`--lab-mode`): the waiver is applied at creation, and the owner is never their own approver, so this run has no approve step.
+
+**Files:**
+- Create: `scripts/live/calls/alias.json`
+
+- [x] **Step 1: Write `scripts/live/calls/alias.json`.** Run with `--vars $P3_WORK/baseline.json` (Task 8) so the last call can require the baseline fingerprint.
+
+```json
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"create alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"alias","body":{"name":"p3_live_hosts","type":"host","content":"192.0.2.10\n192.0.2.11","description":"P3 live verification"}}]},
+  "expect":"ok","keys":["change_set_id","plan_digest"],"pointers":{"/approval_waiver":"^lab-mode$"},"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"approve after the waiver","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"error"},
+ {"name":"confirm_timeout_mins refused","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp","confirm_timeout_mins":5},"expect":"error"},
+ {"name":"refusal left it unclaimed","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs"},"expect":"ok","pointers":{"/state":"^approved$"}},
+ {"name":"apply","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$","/never_attempted":"^0$"}},
+ {"name":"alias is live","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_hosts"},"expect":"ok","pointers":{"/total":"^1$","/rows/0/name":"^p3_live_hosts$"},"save":{"alias":"/rows/0/uuid"}},
+ {"name":"fingerprint after create","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp2":"/fingerprint"}},
+ {"name":"update alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp2","actions":[
+   {"operation":"update","resource":"alias","uuid":"$alias","body":{"content":"192.0.2.10\n192.0.2.12"}}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply update","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp2"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"fingerprint after update","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp3":"/fingerprint"}},
+ {"name":"inverse: delete alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp3","actions":[
+   {"operation":"delete","resource":"alias","uuid":"$alias"}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply delete","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp3"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"alias is gone","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_hosts"},"expect":"ok","pointers":{"/total":"^0$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]
+```
+
+The waived state may be spelled differently from `approved`; set the pointer to what the first run shows. The refused `confirm_timeout_mins` call must leave the change set unclaimed (Review Focus 2), which is why status is read right after it.
+
+- [x] **Step 2: Reset to the baseline** (Task 11 procedure, with the user's go-ahead for the rollback).
+- [x] **Step 3: Run** on the workstation: `python3 -I scripts/live/mcp_call.py scripts/live/calls/alias.json --vars $P3_WORK/baseline.json --url http://$RIG_IP:30037/mcp --token-env P3_LAB_TOKEN`. Expected: every line PASS, including the last (the fingerprint after the inverse change set equals the baseline).
+- [x] **Step 4: Evidence for the gate comment:** the PASS/FAIL lines only (key names, states, counts). Not the alias content or any address.
+- [x] **Step 5: Record any defect found** as a new task with a failing test before changing code. Candidates the probes cannot settle: whether `reconfigure` answers `status: ok` (required by `interpret_reconfigure_response`); whether `setItem`, replaying a rolled-back alias, accepts the flattened `proto` and the list-valued `categories` that `flatten_field` passes through unchanged; whether `addItem` accepts `\n`-joined `content`.
+- [x] **Step 6: Commit** the calls file (`scripts: live alias change-set run (#425)`).
+
+**Live result (2026-10-29).** `test-labmode-opns`: 18/18 PASS on the second run: create-then-cancel (no device write), waiver, `confirm_timeout` and digest refusals, apply create/update/delete, alias gone, back at the baseline fingerprint. The first run stopped at "apply delete" (`applied_unverified`) and exposed defect 12a.
+
+### P3-Task 12a: Alias getItem answers a template for an unknown uuid
+
+On 26.7.5 alias `getItem` for an unknown uuid answers HTTP 200 with the default alias template (not `[]`), so delete verification read "still exists" and the apply ended `applied_unverified`. Fixed by treating a template (empty `name`) as not found (commit 623a20b). `getRule` for an unknown uuid answers `[]` (re-confirmed).
+
+---
+
+### P3-Task 13: Two-person approval, live, over HTTP (P3.6)
+
+**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: one alias `p3_live_approved` is created and then deleted by its inverse change set, plus two alias `reconfigure` calls. The server runs **without** `--lab-mode`, on loopback HTTP on the dev host, with two tokens in a throwaway store under `$LAB_WORK`.
+
+**Files:**
+- Create: `scripts/live/calls/two-person-owner-create.json`, `two-person-approver.json`, `two-person-owner-apply.json`, `two-person-owner-finish.json`
+
+- [x] **Step 1: Write the four calls files.**
+
+`two-person-owner-create.json`:
+
+```json
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"create alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"alias","body":{"name":"p3_live_approved","type":"host","content":"192.0.2.30"}}]},
+  "expect":"ok","pointers":{"/state":"^planned$","/approver":"^None$"},"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"owner cannot approve","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"error"}
+]
+```
+
+`two-person-approver.json` (used twice, once per change set):
+
+```json
+[
+ {"name":"approve with a stale digest","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"expect":"error"},
+ {"name":"still planned","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs"},"expect":"ok","pointers":{"/state":"^planned$"}},
+ {"name":"approve","tool":"approve_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest"},"expect":"ok","pointers":{"/state":"^approved$"}}
+]
+```
+
+`two-person-owner-apply.json`:
+
+```json
+[
+ {"name":"apply with a drifted fingerprint","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"expect":"error"},
+ {"name":"nothing was written","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_approved"},"expect":"ok","pointers":{"/total":"^0$"}},
+ {"name":"apply","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"alias is live","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_approved"},"expect":"ok","pointers":{"/total":"^1$"},"save":{"alias":"/rows/0/uuid"}},
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp":"/fingerprint"}},
+ {"name":"inverse: delete alias","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"delete","resource":"alias","uuid":"$alias"}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}}
+]
+```
+
+`two-person-owner-finish.json`:
+
+```json
+[
+ {"name":"apply delete","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]
+```
+
+- [x] **Step 2: Reset to the baseline** (Task 11) with `test-twoperson-opns` as the rig.
+- [x] **Step 3: Mint two tokens on the rig,** capturing each by command substitution so it is never printed:
+
+```fish
+set -x P3_OWNER_TOKEN (bash scripts/live/rig-token.sh test-twoperson-opns p3-owner agent)
+set -x P3_APPROVER_TOKEN (bash scripts/live/rig-token.sh test-twoperson-opns p3-approver human)
+bash scripts/live/rig-ctl.sh svc test-twoperson-opns restart
+set -x RIG_IP (ssh $RIG_PVE pct exec (bash scripts/live/rig-ctl.sh vmid test-twoperson-opns) -- hostname -I | awk '{print $1}')
+```
+
+- [x] **Step 4: Run in this order,** each with `--url http://$RIG_IP:30037/mcp`, `--vars $P3_WORK/baseline.json` for the first and `$P3_WORK/tp.json` after, and `--save-vars $P3_WORK/tp.json` (`tp.json` starts as a copy of `baseline.json`):
+  1. owner (`--token-env P3_OWNER_TOKEN`): `two-person-owner-create.json`
+  2. approver (`--token-env P3_APPROVER_TOKEN`): `two-person-approver.json`
+  3. owner: `two-person-owner-apply.json`
+  4. approver: `two-person-approver.json`
+  5. owner: `two-person-owner-finish.json`
+
+  Expected: every line PASS. This is Review Focus 5 live: a stale digest refused with the change set left `planned`, a drifted fingerprint refused with nothing written.
+- [x] **Step 5: Stop the rig, delete `$P3_WORK/tp.json`, unset the token variables.** The rig's tokens stay on its disk until Task 15's cleanup.
+- [x] **Step 6: Evidence:** the PASS/FAIL lines and states only. **Step 7: Commit** the four files (`scripts: live two-person change-set run (#425)`).
+
+**Live result (2026-10-29).** `test-twoperson-opns`, owner `agent` and approver `human` tokens: 5/5 files PASS. The owner cannot approve; a stale digest is refused and the set left planned; the second principal approves; a fingerprint that does not match the plan is refused with nothing written; apply; the inverse delete is approved by the second principal; back at the baseline.
+
+---
+
+### P3-Task 14: Filter-rule change set, live (P3.6)
+
+**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: one MVC filter rule `p3_live_rule`, created **disabled** (`enabled: "0"`, so it cannot change traffic or lock out management), updated, then deleted by its inverse, plus three filter `apply` calls. Run on `test-labmode-opns`, as Task 12.
+
+**Files:**
+- Create: `scripts/live/calls/rule.json`, `scripts/live/calls/rule-legacy.json`
+
+`interface: "lan"` is OPNsense's default LAN identifier; confirm it appears in `list_opnsense_interfaces` before running, and substitute the identifier the device shows if not.
+
+- [x] **Step 1: Write `scripts/live/calls/rule.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
+
+```json
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"create rule","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"rule","body":{"action":"pass","interface":"lan","direction":"in","ipprotocol":"inet","protocol":"TCP","source_net":"any","destination_net":"192.0.2.0/24","destination_port":"8443","description":"p3_live_rule","enabled":"0"}}]},
+  "expect":"ok","keys":["change_set_id","plan_digest"],"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply create","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"rule is listed","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_rule"},"expect":"ok","pointers":{"/total":"^1$","/coverage":"^complete$"},"save":{"rule":"/rows/0/uuid"}},
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp2":"/fingerprint"}},
+ {"name":"update rule","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp2","actions":[
+   {"operation":"update","resource":"rule","uuid":"$rule","body":{"description":"p3_live_rule_edited","log":"1"}}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"confirm_timeout_mins refused for a rule","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp2","confirm_timeout_mins":5},"expect":"error"},
+ {"name":"apply update","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp2"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"edit is live","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab","search_phrase":"p3_live_rule_edited"},"expect":"ok","pointers":{"/total":"^1$"}},
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","save":{"fp3":"/fingerprint"}},
+ {"name":"inverse: delete rule","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp3","actions":[
+   {"operation":"delete","resource":"rule","uuid":"$rule"}]},
+  "expect":"ok","save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply delete","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp3"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]
+```
+
+- [x] **Step 2: Write `scripts/live/calls/rule-legacy.json`.** Legacy and automatic rules cannot be changed; this must be refused at creation and write nothing. The reference is any `legacy: true` row's 32-character `uuid` from the listing; save it by hand into `$P3_WORK/legacy.json` as `{"fp": "<current fingerprint>", "legacy_ref": "<ref>"}` (a rule reference is not sensitive).
+
+```json
+[
+ {"name":"update a legacy rule is refused","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"update","resource":"rule","uuid":"$legacy_ref","body":{"description":"x"}}]},"expect":"error"},
+ {"name":"nothing staged or written","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]
+```
+
+This step writes nothing to the device (the refusal happens before any claim), and needs `baseline` in the same vars file.
+
+- [x] **Step 3: Reset to the baseline (Task 11), run `rule.json`, then `rule-legacy.json`.** Expected: every line PASS.
+- [x] **Step 4: Record any defect** as a new task with a failing test first. Watch in particular: the exact `status` word the filter `apply` returns on 26.7.5 (`interpret_reconfigure_response` accepts only `ok`; with the savepoint feature present a plain `apply` may answer differently, and P5.6 depends on the answer, so write down what the device said), and whether `addRule` accepts `enabled` and `sequence` as the writable list assumes.
+- [x] **Step 5: Evidence** as Task 12 Step 4. **Step 6: Commit** (`scripts: live filter-rule change-set run (#425)`).
+
+**Live result (2026-10-29).** `test-labmode-opns`: `rule.json` 13/13 and `rule-legacy.json` 4/4 PASS on the second run: disabled rule created, filter apply, update, `confirm_timeout` refusal, inverse delete, back at the baseline; a legacy rule update refused with nothing written. The first run stopped at "apply create" (`not_loaded`, rolled back cleanly) and exposed defect 14a. `confirm_opnsense_change_set` is not exercisable: this build refuses `confirm_timeout_mins` for rules.
+
+### P3-Task 14a: The filter apply answers configd's raw output
+
+The filter apply returns configd's raw output (`OK` plus newlines; upstream `FilterBaseController::applyAction`), which the server rejected as not-ok, so `apply create` ended `not_loaded`. Fixed by accepting a status that trims to "ok" case-insensitively (commit e76b9d2).
+
+---
+
+### P3-Task 15: A partial apply, live (P3.7)
+
+**Writes to opnsense-lab. Needs the user's explicit go-ahead for this task.** Writes: one alias `p3_part_a` is created and then removed by the server's own best-effort rollback; the second action is refused by the device; the third is never sent.
+
+**Files:**
+- Create: `scripts/live/calls/partial.json`
+
+The failing second action is deterministic: an alias **name that already exists**. The device validates name uniqueness and answers HTTP 200 with `result: "failed"` (Review Focus 3). The file reads an existing alias name from the device at run time, so no device value is committed.
+
+- [x] **Step 1: Write `scripts/live/calls/partial.json`** (run on `test-labmode-opns` with `--vars $P3_WORK/baseline.json`):
+
+```json
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"an existing alias name","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","limit":1},"expect":"ok","save":{"existing":"/rows/0/name"}},
+ {"name":"create three-action set","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"create","resource":"alias","body":{"name":"p3_part_a","type":"host","content":"192.0.2.20"}},
+   {"operation":"create","resource":"alias","body":{"name":"$existing","type":"host","content":"192.0.2.21"}},
+   {"operation":"create","resource":"alias","body":{"name":"p3_part_c","type":"host","content":"192.0.2.22"}}]},
+  "expect":"ok","pointers":{"/action_count":"^3$"},"save":{"cs":"/change_set_id","digest":"/plan_digest"}},
+ {"name":"apply: partial","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},
+  "expect":"error","pointers":{"/state":"^partial$","/succeeded":"^1$","/attempted_and_failed":"^1$","/never_attempted":"^1$","/rollback_failures":"^\\[\\]$"}},
+ {"name":"recorded as failed, not applied","tool":"get_opnsense_change_set_status","arguments":{"device":"opnsense-lab","change_set_id":"$cs"},"expect":"ok","pointers":{"/state":"^failed$"}},
+ {"name":"rollback removed the first alias","tool":"list_opnsense_aliases","arguments":{"device":"opnsense-lab","search_phrase":"p3_part"},"expect":"ok","pointers":{"/total":"^0$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]
+```
+
+The `action_count` key and the `rollback_failures` rendering are as the code builds them (`status_view`, `apply_outcome_response`); adjust a pointer only to what the first run shows. `never_attempted` is a count, not a list (see the checklist note).
+
+- [x] **Step 2: Reset to the baseline (Task 11), run it.** Expected: every line PASS.
+- [x] **Step 3: Evidence:** the PASS/FAIL lines and counts only.
+- [x] **Step 4: If the rollback leaves `p3_part_a` behind** (`partial_rollback_failed`), do not fix the lab by hand. Record it, write a failing test first, and reset to the baseline (Task 11) with the user's go-ahead.
+- [x] **Step 5: Final reset and cleanup (optional, the user's decision from Task 11 Step 2):** run the reset procedure and confirm the fingerprint equals the baseline. Then, with the user's go-ahead, remove the lab credentials and tokens from each rig (`rig-ctl.sh svc <rig> stop`, then delete `/etc/rustopnsmcp/credentials`, `/etc/rustopnsmcp/devices.json` and `/var/lib/rustopnsmcp/tokens.json` inside it), stop the rigs, and delete the raw captures on the dev host and `$P3_WORK`.
+- [x] **Step 6: Commit** (`scripts: live partial-apply run (#425)`).
+
+**Live result (2026-10-29).** `test-labmode-opns`: 6/6 PASS. The device refused the second action (duplicate name), the apply reported `partial`, the change set recorded `failed`, best-effort rollback removed the first alias, and the fingerprint is back at the baseline. Last step done: the lab credentials are purged from both rigs.
+
+---
+
+### P3-Task 16: Remove the banner and document the tools (P3.8) and the P3 gate
+
+**Files:**
+- Modify: `README.md` (line 1-2 banner; the `## Status` section)
+
+**Precondition:** Tasks 3, 8, 12, 13, 14 and 15 passed with no open defect. Rebase onto P2's README change if P2 has landed (see "Overlap with P2").
+
+- [ ] **Step 1: Remove the banner.** Delete the `> [!WARNING]` block at the top of `README.md` (the "Under construction" line).
+- [ ] **Step 2: Rewrite `## Status`.** Replace the phase list and the "None of this has been exercised against a live OPNsense" paragraph with: what v1.0 will cover; "Verified against OPNsense 26.7.5 (opnsense-lab): reads, fingerprint, alias and filter-rule change sets, a forced partial apply"; the limits stated plainly ("writes persist to `config.xml` immediately and take effect on `apply`; a partial apply is a reachable, reported outcome; `confirm_timeout_mins` is refused until filter-rule commit-confirm lands; automatic and legacy filter rules can be listed but not changed; NAT port forwards are not listed yet (deferred to P4/P5.2); not yet released or packaged").
+- [ ] **Step 3: Add the tool table** (names from `TOOL_NAMES`):
+
+| Group | Tools |
+|---|---|
+| Fleet | `get_device_list`, `gather_device_facts`, `opnsmcp_status`, `add_device`, `reload_devices` |
+| Reads | `get_opnsense_system_status`, `get_opnsense_firmware_status`, `list_opnsense_interfaces`, `list_opnsense_firewall_rules`, `list_opnsense_aliases`, `list_opnsense_nat_rules`, `list_opnsense_routes`, `list_opnsense_gateways`, `list_opnsense_dhcp_leases` |
+| Change control | `get_opnsense_config_fingerprint`, `create_opnsense_change_set`, `approve_opnsense_change_set`, `apply_opnsense_change_set`, `confirm_opnsense_change_set`, `cancel_opnsense_change_set`, `get_opnsense_change_set_status`, `list_opnsense_change_sets` |
+
+- [ ] **Step 4: Check the names against the code:** `grep -o '"[a-z_]*_opnsense_[a-z_]*"' rustopnsmcp-core/src/tools/mod.rs | sort -u` and diff against the README table; they must match. Run `scripts/parity-check.sh --junos-src <rustjunosmcp checkout> --phase P1`: still exit 0.
+- [ ] **Step 5: CI gates, then commit.** Commit message: `docs(readme): drop the under-construction banner after live verification on 26.7.5 (#425)`, with a body listing the user-visible changes for the P7 CHANGELOG: DHCP leases from Dnsmasq/Kea, fingerprint and pre-image stable under live counters, corrected device facts.
+
+### P3 gate
+
+- [ ] The filled pass/fail table (Task 3, updated in Task 8): every row PASS.
+- [ ] Task 12-15 evidence: alias lab-mode run, two-person run (wrong digest and wrong fingerprint refused, then applied), filter-rule run, partial apply (`partial`, counts, `failed`, rolled back), each ending at the baseline fingerprint.
+- [ ] Fixtures: sanitizer self-test green in CI, `--verify` clean on every committed fixture, pre-push secret gate passed unmodified.
+- [ ] `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --locked`, `scripts/check-mecmcp-pin.sh` and `scripts/parity-check.sh --phase P1` green; CI green on `main` after the last P3 merge.
+- [ ] Banner removed, README status and table accurate.
+- [ ] Post the P3 gate summary on the epic: what merged, the evidence above (shapes and pass/fail only), the known gaps (port forwards not listed, deferred; three empty collections unrecorded; alias and rule `categories` as a list unexercised for lack of seeded categories; DHCPv6 and static mappings left to P4.5; `confirm_opnsense_change_set` not exercisable in this build, which refuses `confirm_timeout_mins` for rules, so it was never called live, not even as a refusal and no confirm window ever opened; `add_device` and `reload_devices` ran live only as read-only refusals, their success paths not exercised; update/delete rollback replay not exercised beyond Task 15's create rollback; D2, `/readyz` 401 versus 403, belongs to the P2 branch and is still to be checked live), and what's next (P4).
 
 ## P4 — Read breadth
 

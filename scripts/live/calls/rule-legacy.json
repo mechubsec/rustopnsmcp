@@ -1,0 +1,7 @@
+[
+ {"name":"fingerprint","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"},"save":{"fp":"/fingerprint"}},
+ {"name":"pick the legacy row","tool":"list_opnsense_firewall_rules","arguments":{"device":"opnsense-lab","limit":1,"offset":"$legacy_offset"},"expect":"ok","pointers":{"/rows/0/legacy":"^True$"},"save":{"legacy_ref":"/rows/0/uuid"}},
+ {"name":"update a legacy rule is refused","tool":"create_opnsense_change_set","arguments":{"device":"opnsense-lab","expected_fingerprint":"$fp","actions":[
+   {"operation":"update","resource":"rule","uuid":"$legacy_ref","body":{"description":"x"}}]},"expect":"error","error_contains":"is not a canonical UUID"},
+ {"name":"nothing staged or written","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]

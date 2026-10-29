@@ -1,0 +1,4 @@
+[
+ {"name":"apply delete","tool":"apply_opnsense_change_set","arguments":{"device":"opnsense-lab","change_set_id":"$cs","expected_digest":"$digest","expected_fingerprint":"$fp"},"expect":"ok","pointers":{"/state":"^applied$"}},
+ {"name":"back at the baseline","tool":"get_opnsense_config_fingerprint","arguments":{"device":"opnsense-lab"},"expect":"ok","pointers":{"/fingerprint":"$baseline"}}
+]

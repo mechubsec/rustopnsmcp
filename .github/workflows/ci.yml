@@ -33,7 +33,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -52,6 +52,15 @@ jobs:
 
       - name: One mecmcp pin
         run: scripts/check-mecmcp-pin.sh
+
+      - name: Fixture sanitizer self-test
+        run: scripts/tests/sanitize-fixture.test.sh
+
+      - name: Committed fixtures are clean
+        run: |
+          for fixture in rustopnsmcp-core/tests/fixtures/*.json; do
+            scripts/sanitize-fixture.sh --verify "$fixture" || exit 1
+          done
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
@@ -212,7 +221,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       # Under RUNNER_TEMP, never the checkout: a stray archive would dirty the
       # tree and BUILD-INFO would record git_dirty=true.
