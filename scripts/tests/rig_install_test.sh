@@ -36,11 +36,16 @@ cat > "$work/bin/pct" <<STUB
 echo "\$*" >> "$work/pct-calls"
 root="$work/guest"
 case \$1 in
-  push) mkdir -p "\$(dirname "\$root\$4")"; cp "\$3" "\$root\$4" ;;
+  push)
+    # A running service holds its binary open: replacing it fails, as on a real rig.
+    if [ "\$4" = /usr/local/bin/rustopnsmcp ] && [ -e "\$root/running" ]; then echo "failed to create file: \$4: Text file busy" >&2; exit 255; fi
+    mkdir -p "\$(dirname "\$root\$4")"; cp "\$3" "\$root\$4" ;;
   exec) shift 3
     case \$1 in
       hostname) echo 192.0.2.10 ;;
-      systemd-sysusers|systemd-tmpfiles|systemctl|chown) ;;
+      systemctl) case \$2 in stop) [ -n "\${STUCK_RUNNING:-}" ] || rm -f "\$root/running" ;; start) touch "\$root/running" ;; esac ;;
+      sha256sum) if [ -n "\${WRONG_HASH:-}" ]; then echo "0000 \$2"; else sha256sum "\$root\$2" | sed "s#\$root##"; fi ;;
+      systemd-sysusers|systemd-tmpfiles|chown) ;;
       install) mkdir -p "\$root\${@: -1}"; touch "$work/credentials-dir-made"; [ -z "\${FLIP_ON_INSTALL:-}" ] || touch "$work/flip" ;;
       mkdir) mkdir -p "\$root\${@: -1}" ;;
       sh) shift 2; cmd="\$(printf '%s' "\$1" | sed -E "s#(^|[ >])/(etc|usr|var)/#\\1\$root/\\2/#g")"
@@ -69,6 +74,25 @@ grep -q CANARY "$work/out" "$work/err" "$work/ssh-calls" "$work/pct-calls" && fa
 grep -q -- '--audit-journald' "$work/guest/etc/systemd/system/rustopnsmcp.service.d/override.conf" || fail "override lacks audit flags"
 grep -q 'systemctl enable' "$work/pct-calls" || fail "service not enabled"
 echo "ok   install: stat report is parsed correctly, 4 files, 600, non-zero, no credential in argv or output"
+
+# 1a. Re-install over a running service: the service is stopped first, the new binary lands and its hash matches.
+reset
+mkdir -p "$work/guest/usr/local/bin"; printf OLD > "$work/guest/usr/local/bin/rustopnsmcp"; touch "$work/guest/running"
+run rig-install.sh test-labmode-opns "$work/binary" >/dev/null || { cat "$work/err"; fail "re-install over a running service failed"; }
+[ "$(cat "$work/guest/usr/local/bin/rustopnsmcp")" = BIN ] || fail "old binary left in place"
+grep -q 'systemctl stop' "$work/pct-calls" || fail "service not stopped before the push"
+echo "ok   install: running service is stopped, the busy binary is replaced, the hash matches"
+
+# 1a2. A binary that does not land (or lands different) fails the install with the old binary untouched.
+reset
+mkdir -p "$work/guest/usr/local/bin"; printf OLD > "$work/guest/usr/local/bin/rustopnsmcp"; touch "$work/guest/running"
+if STUCK_RUNNING=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install exited 0 with the old binary in place"; fi
+grep -q 'could not replace' "$work/err" || fail "no clear message: $(head -1 "$work/err")"
+[ "$(cat "$work/guest/usr/local/bin/rustopnsmcp")" = OLD ] || fail "binary changed despite the failure"
+reset
+if WRONG_HASH=1 run rig-install.sh test-labmode-opns "$work/binary" >/dev/null; then fail "install passed with a mismatched binary"; fi
+grep -q 'does not match' "$work/err" || fail "no hash message: $(head -1 "$work/err")"
+echo "ok   install: a failed replace or a hash mismatch fails the install with a clear message"
 
 # 1b. If the rig received nothing (zero-size files), the install fails loudly and prints no secret.
 reset
@@ -104,6 +128,18 @@ for args in "p3;id agent" 'a$(id) agent' "p3-lab root" "p3-lab unknown" "x"; do
   if run rig-token.sh test-labmode-opns $args >/dev/null 2>&1; then fail "token args '$args' accepted"; fi
   [ ! -s "$work/ssh-calls" ] || fail "ssh ran for token args '$args'"
 done
+# 4b. Optional tool list: reaches the guest intact; the default wildcard is not globbed by the node shell.
+reset; run rig-token.sh test-labmode-opns p3-lab agent create_opnsense_change_set,get_opnsense_config_fingerprint >/dev/null
+grep -q -- '--tools create_opnsense_change_set,get_opnsense_config_fingerprint --actor-type agent' "$work/pct-calls" || fail "tool list mangled: $(grep runuser "$work/pct-calls")"
+reset; run rig-token.sh test-labmode-opns p3-lab agent >/dev/null
+grep -q -- '--tools \* --actor-type agent' "$work/pct-calls" || fail "default wildcard mangled: $(grep runuser "$work/pct-calls")"
+for tools in 'a;id' 'a b' 'A_b' 'a,,b' ',a' 'a,' '$(id)' 'a*'; do
+  reset
+  if run rig-token.sh test-labmode-opns p3-lab agent "$tools" >/dev/null 2>&1; then fail "tool list '$tools' accepted"; fi
+  [ ! -s "$work/ssh-calls" ] || fail "ssh ran for tool list '$tools'"
+done
+echo "ok   token: tool list passed intact, wildcard default not globbed, unsafe lists refused before ssh"
+
 reset
 if FLIP_AFTER=1 run rig-token.sh test-labmode-opns p3-lab agent >/dev/null; then fail "token minted after the vmid changed"; fi
 [ ! -s "$work/pct-calls" ] || fail "pct ran after the vmid changed"

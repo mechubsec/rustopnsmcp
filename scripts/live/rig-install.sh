@@ -33,7 +33,12 @@ scp -q "$local_tmp/rustopnsmcp" "$root/packaging/systemd/rustopnsmcp.service" "$
 # shellcheck disable=SC2029 # vmid and paths are expanded locally on purpose
 push() { same_guest; ssh -n "$RIG_PVE" pct push "$vmid" "$tmp/$1" "$2" --perms "$3"; }
 inrig mkdir -p /etc/systemd/system/rustopnsmcp.service.d
-push rustopnsmcp /usr/local/bin/rustopnsmcp 0755
+# The service is enabled, so it is running after any rig start and pct push cannot replace a running binary
+# ("Text file busy"). Stop it first rather than rename over it: the stopped service cannot go on serving the old
+# code, and the token/restart step that follows starts the new one. On a first install the unit does not exist yet.
+inrig systemctl stop rustopnsmcp || true
+push rustopnsmcp /usr/local/bin/rustopnsmcp 0755 \
+  || { echo "install failed: could not replace /usr/local/bin/rustopnsmcp on $rig; the old binary is still there" >&2; exit 1; }
 push rustopnsmcp.service /etc/systemd/system/rustopnsmcp.service 0644
 push override.conf /etc/systemd/system/rustopnsmcp.service.d/override.conf 0644
 push rustopnsmcp.sysusers /usr/lib/sysusers.d/rustopnsmcp.conf 0644
@@ -53,6 +58,11 @@ emit endpoint | python3 -I "$here/make-devices-json.py" | put /etc/rustopnsmcp/d
 inrig systemctl daemon-reload
 # Up after any rig start. Not started here: it needs a token (rig-token.sh) and then a restart.
 inrig systemctl enable rustopnsmcp
+# The binary on the rig must be the one that was built here.
+local_sum=$(sha256sum "$binary" | awk '{print $1}')
+# shellcheck disable=SC2029 # vmid is expanded locally on purpose
+rig_sum=$(ssh -n "$RIG_PVE" "pct exec $vmid -- sha256sum /usr/local/bin/rustopnsmcp" | awk '{print $1}')
+[ "$local_sum" = "$rig_sum" ] || { echo "install failed: the binary on $rig does not match the local build" >&2; exit 1; }
 # Sizes and modes only; a zero size means the rig did not forward stdin (see the plan's fallback). The node's
 # shell re-splits ssh arguments, so the whole remote command goes as one string with the stat format quoted.
 same_guest

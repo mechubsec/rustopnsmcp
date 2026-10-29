@@ -9,3 +9,4 @@ abs_path_re='^/[A-Za-z0-9._/-]{1,200}$'
 require_match() {
   [[ "${2-}" =~ $3 ]] || { echo "$1 is empty or has characters outside the allowed set; refusing" >&2; exit 2; }
 }
+tool_list_re='^[a-z_]+(,[a-z_]+)*$'
