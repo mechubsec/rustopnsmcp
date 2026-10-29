@@ -19,7 +19,7 @@
           "%value": "lab_clients",
           "description": "desc-866870",
           "isAlias": true,
-          "summary": "<strong>Lab LAN clients</strong><br/>192.0.2.72/24",
+          "summary": "desc-186840",
           "value": "lab_clients"
         }
       ],
@@ -59,7 +59,7 @@
       "tagged": "",
       "target": "wanip",
       "target_port": "",
-      "uuid": "c254f922-ec20-4ba0-8347-9343b4a08e3f"
+      "uuid": "9761e810-a5ba-4fb8-893f-014cdfe26b1e"
     },
     {
       "%interface": "WAN",

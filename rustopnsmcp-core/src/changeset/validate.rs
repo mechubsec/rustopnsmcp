@@ -477,8 +477,6 @@ mod tests {
         assert!(flat.get("uuid").is_none());
     }
 
-    /// A field this function does not recognise as either shape is passed
-    /// through unchanged rather than dropped or mangled.
     #[test]
     fn flatten_for_write_accepts_a_live_alias_get_item() {
         let live = crate::testing::fixture("alias_get_item");
@@ -499,6 +497,8 @@ mod tests {
         }
     }
 
+    /// A field this function does not recognise as either shape is passed
+    /// through unchanged rather than dropped or mangled.
     #[test]
     fn flatten_for_write_passes_through_unrecognised_shapes() {
         let get_item = json!({"name": "x", "counters": 42});
