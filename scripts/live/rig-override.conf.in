@@ -1,0 +1,16 @@
+# P3 manual install. Superseded by packaging/lxc/install.sh once P2 lands.
+# Replaces the packaged ExecStart: plain HTTP for a throwaway test rig, no TLS, the inventory read-only.
+# An off-loopback bind needs --allowed-host and --allowed-origin (mecmcp-runtime refuses startup without
+# them); an origin is scheme://authority with no path.
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/rustopnsmcp \
+    --device-mapping /etc/rustopnsmcp/devices.json \
+    --tokens-file /var/lib/rustopnsmcp/tokens.json \
+    --state-file /var/lib/rustopnsmcp/changeset-state.json \
+    --transport streamable-http --host @RIG_IP@ --port 30037 --allow-insecure-bind \
+    --allowed-host @RIG_IP@ --allowed-host @RIG_IP@:30037 \
+    --allowed-host @RIG_NAME@ --allowed-host @RIG_NAME@:30037 \
+    --allowed-origin http://@RIG_IP@:30037 --allowed-origin http://@RIG_NAME@:30037 \
+    --inventory-readonly @LAB_MODE@
+EnvironmentFile=
