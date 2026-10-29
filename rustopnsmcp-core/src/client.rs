@@ -463,12 +463,15 @@ impl OpnsenseClient {
 /// into the body, so this unwraps that envelope and inserts `uuid` itself,
 /// which is what [`crate::changeset::Preimage`] keys entries by.
 ///
-/// OPNsense answers an unknown UUID with HTTP 200 and a bare `[]`, not a 404
-/// status — a device response this crate's HTTP layer never turns into an
-/// error — so that shape must be translated into the same "not found" signal
-/// callers of [`crate::changeset::ControllerOps::fetch_resource`] already
-/// expect from a real 404. Without this, every delete would be misread as
-/// having left the resource in place.
+/// OPNsense does not answer a missing UUID with a 404 status. `getRule` answers
+/// HTTP 200 with a bare `[]`. Alias `getItem` (26.7.5) answers HTTP 200 with
+/// the default alias template: an `"alias"` object whose fields are all at
+/// their defaults, `name` empty. Both must be translated into the same "not
+/// found" signal callers of [`crate::changeset::ControllerOps::fetch_resource`]
+/// already expect from a real 404. Without this, every delete would be
+/// misread as having left the resource in place, and a missing alias would
+/// be captured as a pre-image. A stored alias always has a non-empty `name`
+/// (OPNsense requires one), so an alias body without one is the template.
 ///
 /// A URL-table alias's body can carry `username`/`password` for an
 /// authenticated fetch. Those fields are dropped here, at the one place every
@@ -479,18 +482,19 @@ impl OpnsenseClient {
 /// # Errors
 ///
 /// Returns [`OpnsenseError::Upstream`] with `status: 404` for an empty-array
-/// response, and [`OpnsenseError::Malformed`] if the response has no
-/// `envelope_key` object.
+/// response or an alias with no name, and [`OpnsenseError::Malformed`] if the
+/// response has no `envelope_key` object.
 fn interpret_get_item_response(
     raw: serde_json::Value,
     uuid: &str,
     envelope_key: &str,
 ) -> Result<serde_json::Value, OpnsenseError> {
+    let not_found = || OpnsenseError::Upstream {
+        status: 404,
+        detail: "not found".to_owned(),
+    };
     if matches!(&raw, serde_json::Value::Array(items) if items.is_empty()) {
-        return Err(OpnsenseError::Upstream {
-            status: 404,
-            detail: "not found".to_owned(),
-        });
+        return Err(not_found());
     }
 
     let Some(item) = raw.get(envelope_key).filter(|value| value.is_object()) else {
@@ -498,6 +502,14 @@ fn interpret_get_item_response(
             "response has no {envelope_key} object"
         )));
     };
+    if envelope_key == "alias"
+        && item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(not_found());
+    }
 
     let mut body = item.clone();
     let object = body
@@ -868,15 +880,17 @@ mod tests {
         assert!(OpnsenseClient::require_saved(&raw).is_ok());
     }
 
-    /// OPNsense answers an unknown UUID with HTTP 200 and a bare `[]`, not a
-    /// 404 — without this translation, `fetch_alias`'s `Ok(None)` arm (which
-    /// only fires on a real 404) can never be reached, and every successful
-    /// delete would be misread as having left the alias in place.
+    /// `getRule` answers an unknown UUID with HTTP 200 and a bare `[]`, not a
+    /// 404 — without this translation, `fetch_resource`'s `Ok(None)` arm
+    /// (which only fires on a real 404) can never be reached, and every
+    /// successful delete would be misread as having left the resource in
+    /// place. (Alias `getItem` answers the default template instead; see
+    /// `tests/rollback_delete_idempotent.rs`.)
     #[test]
     fn get_item_interprets_an_empty_array_as_not_found() {
         let raw = serde_json::json!([]);
         let error =
-            super::interpret_get_item_response(raw, "u1", "alias").expect_err("must be refused");
+            super::interpret_get_item_response(raw, "u1", "rule").expect_err("must be refused");
         assert!(
             matches!(
                 error,
