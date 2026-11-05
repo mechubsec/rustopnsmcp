@@ -16,7 +16,7 @@ jobs:
       contents: write   # gh release upload
       packages: write   # cosign attest pushes the attestation to GHCR
       id-token: write   # keyless cosign signing
-    uses: mechubsec/mecmcp/.github/workflows/reusable-attest-release-sbom.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    uses: mechubsec/mecmcp/.github/workflows/reusable-attest-release-sbom.yml@39e7308cda922dadad18a0b0a5775ec1ab4a0bca # v0.32.0
     with:
       image: ghcr.io/${{ github.repository }}
       cargo-manifest-path: rustopnsmcp/Cargo.toml
