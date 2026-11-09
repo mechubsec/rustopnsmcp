@@ -41,7 +41,7 @@ jobs:
       # short-lived certificate. A reusable workflow's permissions can only be
       # narrowed by its caller, so this job must grant them itself.
       id-token: write
-    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@8557155ed1ecd24e7ae25948d70485f0fc8c8451 # v0.30.1
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@39e7308cda922dadad18a0b0a5775ec1ab4a0bca # v0.32.0
     with:
       image: ghcr.io/${{ github.repository }}
       # Docker Hub images are linux/amd64 only; platforms keeps its default.
