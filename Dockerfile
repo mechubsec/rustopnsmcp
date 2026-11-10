@@ -51,8 +51,8 @@ RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp && \
     chmod 0700 /image/var/lib/rustopnsmcp
 
 # Runtime stage: distroless Debian 13 with nonroot user. Pinned to the
-# multi-arch image index digest (same digest rustunifimcp pins for `nonroot`).
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
+# multi-arch image index digest (same digest rustsdcmcp pins for `nonroot`).
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
 
 USER 65532:65532
 
