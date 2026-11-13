@@ -48,6 +48,9 @@ has been released yet, so everything is under Unreleased.
 
 ### Changed
 
+- Container images are published for `linux/amd64` and `linux/arm64`, so Apple
+  Silicon pulls a native image instead of failing with `no matching manifest`
+  (mechubsec/rustjunosmcp#648). Each platform builds on its own native runner.
 - All tool output goes through `mecmcp-redact`.
 - A single `mecmcp` pin is enforced in CI; the pin is now `v0.30.1`.
 - Startup refusals converge on the shared validator's exit helper.
