@@ -260,9 +260,9 @@ orchestrator's probe. See [OPERATIONS.md](OPERATIONS.md) for what each means.
 
 ### Platform notes
 
-The images are `linux/amd64` only. On Apple Silicon they run under emulation;
-add `--platform linux/amd64` to `docker pull` and `docker run` if Docker warns
-about a platform mismatch. Building locally for your own architecture is faster.
+The images are published for `linux/amd64` and `linux/arm64`, so Docker pulls
+the native image on Apple Silicon. Releases before multi-arch support are
+amd64-only and need `--platform linux/amd64` on `docker pull` and `docker run`.
 
 ### Building locally
 
