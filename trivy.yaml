@@ -1,3 +1,5 @@
+ignorefile: .trivyignore.yaml
+
 scan:
   skip-dirs:
     - target
