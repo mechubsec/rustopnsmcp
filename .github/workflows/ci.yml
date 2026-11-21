@@ -155,6 +155,17 @@ jobs:
           fi
           echo "PASS: config and audit flags survive --host override"
 
+          # The runtime is base-nossl: libssl/libcrypto must be absent (the
+          # binary is rustls-only) and libgcc_s.so.1 present (the binary links it).
+          container_id=$(docker create rustopnsmcp:ci)
+          files=$(docker export "$container_id" | tar -tf -)
+          docker rm "$container_id" > /dev/null
+          if grep -E 'libssl|libcrypto' <<< "$files"; then
+            echo "FAIL: libssl/libcrypto present in the runtime image"; exit 1
+          fi
+          grep -q 'libgcc_s\.so\.1$' <<< "$files" || { echo "FAIL: libgcc_s.so.1 missing from the runtime image"; exit 1; }
+          echo "PASS: no libssl/libcrypto, libgcc_s.so.1 present"
+
       - name: First run in a container creates the audit key and keeps state private
         run: |
           set -euo pipefail

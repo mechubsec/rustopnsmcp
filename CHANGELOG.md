@@ -7,6 +7,11 @@ has been released yet, so everything is under Unreleased.
 
 ## [Unreleased]
 
+### Changed
+
+- The container image runs on `distroless/base-nossl-debian13` instead of `cc-debian13`,
+  dropping libssl3t64 (unfixed CVE-2026-124709); the binary is rustls-only.
+
 ### Added
 
 - `get_opnsense_feed_status`: read-only report of the device's mecfeedmcp
