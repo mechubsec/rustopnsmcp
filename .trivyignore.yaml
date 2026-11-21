@@ -1,0 +1,19 @@
+vulnerabilities:
+  # HIGH CVE in libssl3t64, a transitive package inside the pinned
+  # gcr.io/distroless/cc-debian13:nonroot runtime base image. No fixed
+  # version exists yet (also present on the newest digest). rustopnsmcp has
+  # no OpenSSL/native-tls dependency (only openssl-probe, which merely
+  # locates the CA bundle); the distroless nonroot runtime has no shell, so
+  # libssl3t64 is never loaded. This is a time-boxed suppression, not a
+  # permanent risk acceptance: added 2026-11-21 with expired_at: 2027-01-31,
+  # so trivy stops honoring the ignore and the gate re-fails automatically
+  # on that date if no one has removed it. Remove sooner once distroless
+  # ships a digest with the patched package.
+  - id: CVE-2026-124709
+    expired_at: 2027-01-31
+    statement: >-
+      Unreachable: no OpenSSL/native-tls dependency in rustopnsmcp (only
+      openssl-probe, which locates the CA bundle); distroless nonroot runtime
+      has no shell. Suppression added 2026-11-21 pending an upstream
+      distroless rebuild with the patched libssl3t64. Expires 2027-01-31 so
+      trivy re-flags this for review.
