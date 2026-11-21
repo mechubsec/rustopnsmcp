@@ -2,11 +2,15 @@
 #
 # Multi-stage build producing a distroless image with no shell and no external
 # binaries. The runtime has no package manager, no shell, and no GNU userland —
-# only libc and the statically-linked server binary.
+# only libc, libgcc_s and the server binary.
 #
 # Builder glibc generation must be <= runtime generation: Debian 13 (trixie) on
 # both sides satisfies this. Building on a newer base (Debian 14+) would link
 # against a newer glibc that the Debian 13 runtime does not carry.
+
+# Source of libgcc-s1 only; the runtime is base-nossl, which lacks it. Kept
+# ahead of the builder so the runtime stays the last FROM.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS libgcc
 
 # Builder stage: Debian 13 slim with Rust 1.98.1, matching rust-toolchain.toml.
 # Pinned to the multi-arch image index digest (matches what `rust:1.98-slim-trixie`
@@ -50,9 +54,22 @@ RUN mkdir -p /image/etc/rustopnsmcp /image/var/lib/rustopnsmcp && \
     chmod 0750 /image/etc/rustopnsmcp && \
     chmod 0700 /image/var/lib/rustopnsmcp
 
-# Runtime stage: distroless Debian 13 with nonroot user. Pinned to the
-# multi-arch image index digest (same digest rustsdcmcp pins for `nonroot`).
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
+# libgcc_s.so.1 is the one library the binary needs beyond glibc, and
+# base-nossl does not ship it. Stage it with its dpkg records (status.d) so
+# Trivy and the SBOM still see libgcc-s1 and gcc-14-base. The multiarch
+# directory comes from the builder's own triplet (x86_64 or aarch64).
+COPY --from=libgcc / /cc/
+RUN triplet="$(gcc -dumpmachine | sed 's/-pc-/-/')" \
+    && install -d "/stage-libgcc/usr/lib/${triplet}" /stage-libgcc/var/lib/dpkg/status.d \
+    && cp -a "/cc/usr/lib/${triplet}/libgcc_s.so.1" "/stage-libgcc/usr/lib/${triplet}/" \
+    && cp -a /cc/var/lib/dpkg/status.d/libgcc-s1 /cc/var/lib/dpkg/status.d/libgcc-s1.md5sums \
+        /cc/var/lib/dpkg/status.d/gcc-14-base /cc/var/lib/dpkg/status.d/gcc-14-base.md5sums \
+        /stage-libgcc/var/lib/dpkg/status.d/
+
+# Runtime stage: distroless base-nossl, Debian 13, nonroot user. No
+# libssl3t64/libcrypto: the binary is rustls-only, and libssl3t64 carries
+# unfixed CVE-2026-124709. Pinned to the multi-arch image index digest.
+FROM gcr.io/distroless/base-nossl-debian13:nonroot@sha256:89815d620ac01d8de13cdaf04d19ed874447ca2296d4985b14b818f6e5e47854
 
 USER 65532:65532
 
@@ -60,6 +77,7 @@ USER 65532:65532
 # nothing for a healthcheck command to run. Orchestrators supervise the
 # process via the container runtime.
 
+COPY --from=builder /stage-libgcc/ /
 COPY --from=builder /build/target/release/rustopnsmcp /usr/local/bin/rustopnsmcp
 COPY --from=builder --chown=65532:65532 /image/etc/ /etc/
 COPY --from=builder --chown=65532:65532 /image/var/lib/ /var/lib/
