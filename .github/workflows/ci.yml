@@ -160,10 +160,10 @@ jobs:
           container_id=$(docker create rustopnsmcp:ci)
           files=$(docker export "$container_id" | tar -tf -)
           docker rm "$container_id" > /dev/null
-          if echo "$files" | grep -E 'libssl|libcrypto'; then
+          if grep -E 'libssl|libcrypto' <<< "$files"; then
             echo "FAIL: libssl/libcrypto present in the runtime image"; exit 1
           fi
-          echo "$files" | grep -q 'libgcc_s\.so\.1$' || { echo "FAIL: libgcc_s.so.1 missing from the runtime image"; exit 1; }
+          grep -q 'libgcc_s\.so\.1$' <<< "$files" || { echo "FAIL: libgcc_s.so.1 missing from the runtime image"; exit 1; }
           echo "PASS: no libssl/libcrypto, libgcc_s.so.1 present"
 
       - name: First run in a container creates the audit key and keeps state private
