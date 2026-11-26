@@ -10,7 +10,7 @@
 
 # Source of libgcc-s1 only; the runtime is base-nossl, which lacks it. Kept
 # ahead of the builder so the runtime stays the last FROM.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS libgcc
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:29ee70762214fe8190cea04ef1c0a84a8365879e047ce8f911ae5a5ab2355fa2 AS libgcc
 
 # Builder stage: Debian 13 slim with Rust 1.98.1, matching rust-toolchain.toml.
 # Pinned to the multi-arch image index digest (matches what `rust:1.98-slim-trixie`
